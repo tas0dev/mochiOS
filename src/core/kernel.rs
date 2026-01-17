@@ -53,7 +53,7 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
         boot_info.physical_memory_offset
     );
 
-    let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, None, 0);
+    let kernel_process = task::Process::new("swiftcore", task::PrivilegeLevel::Core, None, 0);
     let kernel_pid = kernel_process.id();
 
     if task::add_process(kernel_process).is_none() {
@@ -63,7 +63,7 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
     let stack_addr = unsafe { core::ptr::addr_of!(KERNEL_THREAD_STACK.0) as *const u8 as u64 };
     let kernel_thread = task::Thread::new(
         kernel_pid,
-        "kernel-idle",
+        "core",
         kernel_idle,
         stack_addr,
         KERNEL_THREAD_STACK_SIZE,
