@@ -1,16 +1,11 @@
 //! カーネルエントリーポイント
 
-use crate::{
-    debug, info, interrupt, mem, sprintln, task, util, vprintln, BootInfo, KernelError,
-    MemoryRegion, Result,
-};
+use crate::{interrupt, mem, task, util, BootInfo, KernelError, MemoryRegion, Result};
 
 /// カーネルエントリーポイント
 #[no_mangle]
 pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
-
-    LogLevel = Info;
-
+    util::log::set_level(util::log::LogLevel::Info);
     util::console::init();
     util::vga::init(
         boot_info.framebuffer_addr,
@@ -27,7 +22,7 @@ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
     };
 
     for (i, region) in memory_map.iter().enumerate() {
-        debug!(
+        crate::debug!(
             "  Region {}: {:#x} - {:#x} ({:?})",
             i,
             region.start,
@@ -38,7 +33,7 @@ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
 
     match kernel_main(boot_info, memory_map) {
         Ok(_) => {
-            info!("Kernel shutdown gracefully");
+            crate::info!("Kernel shutdown gracefully");
             halt_forever();
         }
         Err(e) => {
@@ -50,17 +45,17 @@ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
 
 /// カーネルメイン処理
 fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]) -> Result<()> {
-    info!("Initializing kernel...");
-    info!("Memory map entries: {}", boot_info.memory_map_len);
+    crate::info!("Initializing kernel...");
+    crate::info!("Memory map entries: {}", boot_info.memory_map_len);
 
-    vprintln!("Framebuffer: {:#x}", boot_info.framebuffer_addr);
-    vprintln!(
+    crate::vprintln!("Framebuffer: {:#x}", boot_info.framebuffer_addr);
+    crate::vprintln!(
         "Resolution: {}x{}",
         boot_info.screen_width,
         boot_info.screen_height
     );
-    
-    info!(
+
+    crate::info!(
         "Physical memory offset: {:#x}",
         boot_info.physical_memory_offset
     );
@@ -69,13 +64,13 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
     mem::init(boot_info.physical_memory_offset);
     mem::init_frame_allocator(memory_map)?;
 
-    info!("Kernel ready");
+    crate::info!("Kernel ready");
 
     // タスクシステムを初期化
     init_tasks();
 
     // 割込みを有効化
-    debug!("Enabling interrupts...");
+    crate::debug!("Enabling interrupts...");
     unsafe {
         x86_64::instructions::interrupts::enable();
     }
@@ -84,10 +79,10 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
     interrupt::init_pit();
     interrupt::enable_timer_interrupt();
 
-    info!("Timer interrupt configured (10ms period)");
+    crate::info!("Timer interrupt configured (10ms period)");
 
     // スケジューリングを開始（戻ってこない）
-    info!("Starting task scheduler...");
+    crate::info!("Starting task scheduler...");
     task::start_scheduling();
 
     #[allow(unreachable_code)]
@@ -96,7 +91,7 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
 
 /// タスクシステムを初期化
 fn init_tasks() {
-    info!("Initializing task system...");
+    crate::info!("Initializing task system...");
 
     // スケジューラを初期化
     task::init_scheduler();
@@ -127,18 +122,18 @@ fn init_tasks() {
     let stack_a_addr = unsafe { core::ptr::addr_of!(STACK_A) as u64 };
     let stack_b_addr = unsafe { core::ptr::addr_of!(STACK_B) as u64 };
 
-    debug!(
+    crate::debug!(
         "Stack A: {:#x} - {:#x}",
         stack_a_addr,
         stack_a_addr + STACK_SIZE as u64
     );
-    debug!(
+    crate::debug!(
         "Stack B: {:#x} - {:#x}",
         stack_b_addr,
         stack_b_addr + STACK_SIZE as u64
     );
-    debug!("Task A entry: {:p}", task_a_entry as *const ());
-    debug!("Task B entry: {:p}", task_b_entry as *const ());
+    crate::debug!("Task A entry: {:p}", task_a_entry as *const ());
+    crate::debug!("Task B entry: {:p}", task_b_entry as *const ());
 
     // スレッドAを作成
     let thread_a = task::Thread::new(
@@ -160,17 +155,17 @@ fn init_tasks() {
     );
     task::add_thread(thread_b).expect("Failed to create thread B");
 
-    info!("Task system initialized");
-    info!("  Processes: {}", task::process_count());
-    info!("  Threads: {}", task::thread_count());
+    crate::info!("Task system initialized");
+    crate::info!("  Processes: {}", task::process_count());
+    crate::info!("  Threads: {}", task::thread_count());
 }
 
 /// タスクAのエントリーポイント
 fn task_a_entry() -> ! {
     let mut counter = 0u64;
     loop {
-        vprintln!("Hello from Task A ({})", counter);
-        sprintln!("Hello from Task A ({})", counter);
+        crate::vprintln!("Hello from Task A ({})", counter);
+        crate::sprintln!("Hello from Task A ({})", counter);
         counter += 1;
 
         // 少し待機
@@ -184,8 +179,8 @@ fn task_a_entry() -> ! {
 fn task_b_entry() -> ! {
     let mut counter = 0u64;
     loop {
-        vprintln!("Hello from Task B ({})", counter);
-        sprintln!("Hello from Task B ({})", counter);
+        crate::vprintln!("Hello from Task B ({})", counter);
+        crate::sprintln!("Hello from Task B ({})", counter);
         counter += 1;
 
         // 少し待機
@@ -200,8 +195,8 @@ fn handle_kernel_error(error: KernelError) {
     use crate::error::*;
 
     crate::warn!("KERNEL ERROR: {}", error);
-    debug!("Is fatal: {}", error.is_fatal());
-    debug!("Is retryable: {}", error.is_retryable());
+    crate::debug!("Is fatal: {}", error.is_fatal());
+    crate::debug!("Is retryable: {}", error.is_retryable());
 
     match error {
         KernelError::Memory(mem_err) => {
@@ -218,7 +213,7 @@ fn handle_kernel_error(error: KernelError) {
         }
     }
 
-    info!("System halted.");
+    crate::info!("System halted.");
 }
 
 /// システムを無限ループで停止

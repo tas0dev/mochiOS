@@ -62,7 +62,7 @@ impl Thread {
         unsafe {
             // 戻り先として thread_exit_handler を配置
             let ret_addr = stack_ptr as *mut u64;
-            *ret_addr = thread_exit_handler as u64;
+            *ret_addr = thread_exit_handler as *const () as u64;
         }
 
         // rsp は「戻り先アドレスが置かれている位置」を指す
