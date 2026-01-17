@@ -17,6 +17,8 @@ pub enum KernelError {
     InvalidParam,
     /// 未実装の機能
     NotImplemented,
+    /// 未知のエラー
+    UnknownError,
 }
 
 /// メモリ関連のエラー
@@ -34,6 +36,8 @@ pub enum MemoryError {
     NotMapped,
     /// アライメントエラー
     AlignmentError,
+    /// 未知のエラー
+    UnknownError,
 }
 
 /// プロセス関連のエラー
@@ -57,6 +61,8 @@ pub enum ProcessError {
     RogueProcessDetected,
     /// サービス関連
     Service(ServiceError),
+    ///　未知のエラー
+    UnknownError,
 }
 
 /// サービス関連のエラー
@@ -78,6 +84,8 @@ pub enum ServiceError {
     Conflict,
     /// 未登録のサービス
     Unregistered,
+    /// 未知のエラー
+    UnknownError
 }
 
 /// デバイス関連のエラー
@@ -95,6 +103,16 @@ pub enum DeviceError {
     DeviceNotFound,
     /// ドライバのロード失敗
     DriverLoadFailure,
+    /// 切断されたデバイス
+    Disconnected,
+    /// サポートされていないデバイス
+    Unsupported,
+    /// 通信中に切断
+    CommunicationLost,
+    /// リソース不足
+    ResourceUnavailable,
+    /// 未知のエラー
+    UnknownError,
 }
 
 impl KernelError {
