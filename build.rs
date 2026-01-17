@@ -16,7 +16,10 @@ fn main() {
 
     emit_rerun_if_changed(&manifest_dir.join("src/apps/shell"));
 
-    if let Some(shell_bin) = find_shell_bin(&manifest_dir) {
+    let shell_bin = find_shell_bin(&manifest_dir)
+        .or_else(|| build_shell(&manifest_dir));
+
+    if let Some(shell_bin) = shell_bin {
         let dest = stage_dir.join("shell");
         fs::copy(&shell_bin, &dest).expect("failed to copy shell binary into initfs");
     } else {
@@ -84,4 +87,27 @@ fn find_shell_bin(manifest_dir: &Path) -> Option<PathBuf> {
     ];
 
     candidates.into_iter().find(|p| p.is_file())
+}
+
+fn build_shell(manifest_dir: &Path) -> Option<PathBuf> {
+    if env::var("SWIFTCORE_SKIP_SHELL_BUILD").ok().as_deref() == Some("1") {
+        return None;
+    }
+
+    let shell_dir = manifest_dir.join("src/apps/shell");
+    if !shell_dir.is_dir() {
+        return None;
+    }
+
+    let status = Command::new("cargo")
+        .current_dir(&shell_dir)
+        .env("SWIFTCORE_SKIP_SHELL_BUILD", "1")
+        .args(["build", "--target", "x86_64-unknown-none"]) 
+        .status();
+
+    match status {
+        Ok(s) if s.success() => find_shell_bin(manifest_dir),
+        Ok(_) => None,
+        Err(_) => None,
+    }
 }
