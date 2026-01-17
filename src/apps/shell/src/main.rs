@@ -8,7 +8,7 @@ const SYS_CONSOLE_WRITE: u64 = 5;
 const SYS_INITFS_READ: u64 = 6;
 const SYS_EXIT: u64 = 7;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     write_str("SwiftCore shell\n");
     write_str("Type: (input not implemented yet)\n");

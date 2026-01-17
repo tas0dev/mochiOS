@@ -79,11 +79,29 @@ fn find_shell_bin(manifest_dir: &Path) -> Option<PathBuf> {
         }
     }
 
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let profile_dir = if profile == "release" { "release" } else { "debug" };
+
+    if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        let candidate = target_dir
+            .join("x86_64-unknown-none")
+            .join(profile_dir)
+            .join("shell");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
     let candidates = [
-        manifest_dir.join("target/x86_64-unknown-none/debug/shell"),
-        manifest_dir.join("target/x86_64-unknown-none/release/shell"),
-        manifest_dir.join("src/apps/shell/target/x86_64-unknown-none/debug/shell"),
-        manifest_dir.join("src/apps/shell/target/x86_64-unknown-none/release/shell"),
+        manifest_dir
+            .join("target/x86_64-unknown-none")
+            .join(profile_dir)
+            .join("shell"),
+        manifest_dir
+            .join("src/apps/shell/target/x86_64-unknown-none")
+            .join(profile_dir)
+            .join("shell"),
     ];
 
     candidates.into_iter().find(|p| p.is_file())
@@ -99,10 +117,17 @@ fn build_shell(manifest_dir: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    let status = Command::new("cargo")
-        .current_dir(&shell_dir)
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(&shell_dir)
         .env("SWIFTCORE_SKIP_SHELL_BUILD", "1")
-        .args(["build", "--target", "x86_64-unknown-none"]) 
+        .args(["build", "--target", "x86_64-unknown-none"]);
+
+    if profile == "release" {
+        cmd.arg("--release");
+    }
+
+    let status = cmd
         .status();
 
     match status {
