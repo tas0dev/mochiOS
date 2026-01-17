@@ -49,6 +49,35 @@ pub enum ProcessError {
     MaxProcessesReached,
     /// 権限不足
     InsufficientPrivilege,
+    /// プロセス間通信エラー
+    IpcError,
+    /// タイムアウト
+    Timeout,
+    /// 暴走プロセス検出
+    RogueProcessDetected,
+    /// サービス関連
+    Service(ServiceError),
+}
+
+/// サービス関連のエラー
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceError {
+    /// サービスが見つからない
+    NotFound,
+    /// サービスの起動失敗
+    StartFailure,
+    /// サービスの停止失敗
+    StopFailure,
+    /// サービスの応答なし
+    NoResponse,
+    /// サービスの権限不足
+    InsufficientPrivilege,
+    /// サービスの不正な状態
+    InvalidState,
+    /// サービスの競合
+    Conflict,
+    /// 未登録のサービス
+    Unregistered,
 }
 
 /// デバイス関連のエラー
@@ -62,6 +91,10 @@ pub enum DeviceError {
     Timeout,
     /// 不正な操作
     InvalidOperation,
+    /// デバイスが見つからない
+    DeviceNotFound,
+    /// ドライバのロード失敗
+    DriverLoadFailure,
 }
 
 impl KernelError {
