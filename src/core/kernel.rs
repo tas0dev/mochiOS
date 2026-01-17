@@ -53,7 +53,7 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
         boot_info.physical_memory_offset
     );
 
-    let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Kernel, None, 0);
+    let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, None, 0);
     let kernel_pid = kernel_process.id();
 
     if task::add_process(kernel_process).is_none() {
