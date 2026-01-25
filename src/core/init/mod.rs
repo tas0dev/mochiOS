@@ -41,6 +41,9 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         x86_64::instructions::interrupts::enable();
     }
 
+    // Initialize syscall MSRs (STAR/LSTAR/FMASK)
+    interrupt::init_syscall();
+
     interrupt::init_pit();
     // Timer interrupts are not enabled by default. Userland `core.service`
     // will manage multitasking and enable scheduling if desired.

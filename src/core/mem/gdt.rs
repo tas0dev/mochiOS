@@ -91,6 +91,24 @@ pub fn user_data_selector() -> u16 {
         .0
 }
 
+/// カーネル用コードセレクタを返す
+pub fn kernel_code_selector() -> u16 {
+    GDT.get()
+        .expect("GDT not initialized")
+        .1
+        .code_selector
+        .0
+}
+
+/// カーネル用データセレクタを返す
+pub fn kernel_data_selector() -> u16 {
+    GDT.get()
+        .expect("GDT not initialized")
+        .1
+        .data_selector
+        .0
+}
+
 #[allow(unused)]
 /// データセグメントレジスタを設定
 unsafe fn set_data_segments(selector: SegmentSelector) {
