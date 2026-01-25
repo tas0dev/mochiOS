@@ -20,6 +20,8 @@ struct Selectors {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
+    user_code_selector: SegmentSelector,
+    user_data_selector: SegmentSelector,
 }
 
 /// GDTを初期化
@@ -35,6 +37,9 @@ pub fn init() {
         let code_selector = gdt.append(Descriptor::kernel_code_segment());
         let data_selector = gdt.append(Descriptor::kernel_data_segment());
         let tss_selector = gdt.append(Descriptor::tss_segment(tss));
+        // user segments (RPL=3)
+        let user_code_selector = gdt.append(Descriptor::user_code_segment());
+        let user_data_selector = gdt.append(Descriptor::user_data_segment());
 
         sprintln!("GDT entries created:");
         sprintln!("  Code selector: {:?}", code_selector);
@@ -47,6 +52,8 @@ pub fn init() {
                 code_selector,
                 data_selector,
                 tss_selector,
+                user_code_selector,
+                user_data_selector,
             },
         )
     });
@@ -64,6 +71,24 @@ pub fn init() {
     }
 
     sprintln!("GDT loaded with TSS");
+}
+
+/// ユーザーモード用コードセレクタ（RPL=3）を返す
+pub fn user_code_selector() -> u16 {
+    GDT.get()
+        .expect("GDT not initialized")
+        .1
+        .user_code_selector
+        .0
+}
+
+/// ユーザーモード用データセレクタ（RPL=3）を返す
+pub fn user_data_selector() -> u16 {
+    GDT.get()
+        .expect("GDT not initialized")
+        .1
+        .user_data_selector
+        .0
 }
 
 #[allow(unused)]

@@ -1,5 +1,3 @@
-//! カーネルエントリーポイント
-
 use crate::{init::{fs, kinit}, task, util, BootInfo, MemoryRegion, Result};
 use crate::{debug, info, vprintln, sprintln};
 use crate::error::handle_kernel_error;
@@ -58,16 +56,11 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
         return Err(KernelError::Process(ProcessError::MaxProcessesReached));
     }
 
-    if let Err(e) = task::spawn_service("keyboard.service", "keyboard") {
-        return Err(e);
-    }
-    if let Err(e) = task::spawn_service("shell.service", "shell") {
-        return Err(e);
-    }
-
-    info!("service launched.");
-
-    task::start_scheduling();
+    // NOTE:
+    // The kernel no longer auto-starts services or the scheduler.
+    // A userland service (e.g. `core.service`) will act as the service
+    // manager and enable multitasking/scheduling as needed.
+    info!("kernel running in single-task mode (no auto-start services)");
 
     #[allow(unreachable_code)]
     Ok(())

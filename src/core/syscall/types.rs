@@ -18,6 +18,10 @@ pub enum SyscallNumber {
 	Exit = 7,
 	/// キーボード1文字読み取り
 	KeyboardRead = 8,
+	/// 現在のスレッドIDを取得
+	GetThreadId = 9,
+	/// スレッド名からIDを取得 (arg0=name_ptr, arg1=name_len)
+	GetThreadIdByName = 10,
 }
 
 /// 未実装エラー

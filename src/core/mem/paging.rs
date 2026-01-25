@@ -6,13 +6,17 @@ use crate::error::{KernelError, MemoryError, Result};
 use crate::sprintln;
 use spin::Mutex;
 use x86_64::{
+    registers::control::{Cr0, Cr0Flags},
     structures::paging::{
-        Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
+        mapper::MapToError, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
+        Size4KiB,
     },
     VirtAddr,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
 
 static PAGE_TABLE: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
+static PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// ページングシステムを初期化
 pub fn init(physical_memory_offset: u64) {
@@ -22,9 +26,15 @@ pub fn init(physical_memory_offset: u64) {
         let level_4_table = active_level_4_table(physical_memory_offset);
         let page_table = OffsetPageTable::new(level_4_table, VirtAddr::new(physical_memory_offset));
         *PAGE_TABLE.lock() = Some(page_table);
+        PHYSICAL_MEMORY_OFFSET.store(physical_memory_offset, Ordering::Relaxed);
     }
 
     sprintln!("Paging initialized");
+}
+
+/// 現在設定されている物理メモリオフセットを返す
+pub fn physical_memory_offset() -> u64 {
+    PHYSICAL_MEMORY_OFFSET.load(Ordering::Relaxed)
 }
 
 /// アクティブなレベル4ページテーブルへの参照を取得
@@ -51,11 +61,25 @@ pub fn map_page(page: Page, frame: PhysFrame, flags: PageTableFlags) -> Result<(
         .as_mut()
         .ok_or(KernelError::Memory(MemoryError::OutOfMemory))?;
 
-    unsafe {
-        page_table
-            .map_to(page, frame, flags, allocator)
-            .map_err(|_| KernelError::Memory(MemoryError::InvalidAddress))?
-            .flush();
+    let cr0 = Cr0::read();
+    if cr0.contains(Cr0Flags::WRITE_PROTECT) {
+        unsafe { Cr0::write(cr0 - Cr0Flags::WRITE_PROTECT); }
+    }
+
+    let result = unsafe { page_table.map_to(page, frame, flags, allocator) };
+
+    if cr0.contains(Cr0Flags::WRITE_PROTECT) {
+        unsafe { Cr0::write(cr0); }
+    }
+
+    match result {
+        Ok(flush) => flush.flush(),
+        Err(MapToError::PageAlreadyMapped(_)) => return Ok(()),
+        Err(MapToError::ParentEntryHugePage) => {
+            // 既存の大ページに含まれる領域はスキップ
+            return Ok(());
+        }
+        Err(_) => return Err(KernelError::Memory(MemoryError::InvalidAddress)),
     }
 
     Ok(())

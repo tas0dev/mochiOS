@@ -25,6 +25,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, _arg2: u64, _arg3: u64, _arg4: u
 		x if x == SyscallNumber::InitfsRead as u64 => fs::read(arg0, arg1, _arg2, _arg3),
 		x if x == SyscallNumber::Exit as u64 => task::exit(arg0),
 		x if x == SyscallNumber::KeyboardRead as u64 => keyboard::read_char(),
+		x if x == SyscallNumber::GetThreadId as u64 => task::get_thread_id(),
+		x if x == SyscallNumber::GetThreadIdByName as u64 => task::get_thread_id_by_name(arg0, arg1),
 		_ => ENOSYS,
 	}
 }

@@ -32,20 +32,19 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         );
     }
 
-    task::init_scheduler();
     driver::ps2_keyboard::init();
 
     mem::init(boot_info.physical_memory_offset);
     mem::init_frame_allocator(memory_map)?;
-
-    fs::init();
 
     unsafe {
         x86_64::instructions::interrupts::enable();
     }
 
     interrupt::init_pit();
-    interrupt::enable_timer_interrupt();
+    // Timer interrupts are not enabled by default. Userland `core.service`
+    // will manage multitasking and enable scheduling if desired.
+    // interrupt::enable_timer_interrupt();
 
     Ok(memory_map)
 }

@@ -4,6 +4,8 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 
+extern crate alloc;
+
 /// エラー型定義
 pub mod error;
 

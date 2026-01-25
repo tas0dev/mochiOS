@@ -7,11 +7,27 @@ use core::panic::PanicInfo;
 const SYS_CONSOLE_WRITE: u64 = 5;
 const SYS_EXIT: u64 = 7;
 const SYS_KEYBOARD_READ: u64 = 8;
+const SYS_IPC_SEND: u64 = 3;
+const SYS_GET_THREAD_ID_BY_NAME: u64 = 10;
 const ENODATA: u64 = u64::MAX - 4;
+const EAGAIN: u64 = u64::MAX - 2;
+const ENOENT: u64 = u64::MAX - 3;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    write_str("SwiftCore keyboard service\n");
+    write_str("keyboard service started\n");
+
+    let shell_id = loop {
+        let id = syscall2(
+            SYS_GET_THREAD_ID_BY_NAME,
+            "core.service.shell".as_ptr() as u64,
+            "core.service.shell".len() as u64,
+        );
+        if id != ENOENT && id != EAGAIN {
+            break id;
+        }
+        unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
+    };
 
     loop {
         let ch = syscall0(SYS_KEYBOARD_READ);
@@ -20,9 +36,10 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
-        let byte = ch as u8;
-        let buf = [byte];
-        let _ = syscall2(SYS_CONSOLE_WRITE, buf.as_ptr() as u64, 1);
+        let ret = syscall2(SYS_IPC_SEND, shell_id, ch as u64);
+        if ret == EAGAIN {
+            unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
+        }
     }
 }
 

@@ -7,11 +7,13 @@ use core::panic::PanicInfo;
 const SYS_CONSOLE_WRITE: u64 = 5;
 const SYS_INITFS_READ: u64 = 6;
 const SYS_EXIT: u64 = 7;
+const SYS_IPC_RECV: u64 = 4;
+const EAGAIN: u64 = u64::MAX - 2;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     write_str("SwiftCore shell\n");
-    write_str("Type: (input not implemented yet)\n");
+    write_str("Type: (keyboard via IPC)\n");
 
     let mut buf = [0u8; 128];
     let read = syscall4(
@@ -29,9 +31,20 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    let _ = syscall1(SYS_EXIT, 0);
     loop {
-        unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
+        let mut sender = 0u64;
+        let ch = syscall1(SYS_IPC_RECV, &mut sender as *mut u64 as u64);
+        if ch == EAGAIN {
+            unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
+            continue;
+        }
+
+        let mut byte = ch as u8;
+        if byte == b'\r' {
+            byte = b'\n';
+        }
+        let buf = [byte];
+        let _ = syscall2(SYS_CONSOLE_WRITE, buf.as_ptr() as u64, 1);
     }
 }
 

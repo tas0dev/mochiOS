@@ -1,8 +1,4 @@
-//! 起動時にメモリへ展開済みの ext2 (read-only)
-//!
-//! - root 直下＋サブディレクトリ対応
-//! - 直接ブロック + 単一間接ブロック対応
-//! - 読み取りは固定バッファにコピー（最大 64KiB）
+//! 起動時にメモリへ展開済みのext2 (read-only)
 
 use core::str;
 
@@ -136,7 +132,7 @@ fn data_block_number(image: &[u8], sb: Superblock, inode: Inode, block_index: us
 	read_u32(block, idx * 4)
 }
 
-const READ_BUFFER_SIZE: usize = 64 * 1024;
+const READ_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 static mut READ_BUFFER: [u8; READ_BUFFER_SIZE] = [0; READ_BUFFER_SIZE];
 
 fn read_inode_data(image: &[u8], sb: Superblock, inode_num: u32) -> Option<&'static [u8]> {

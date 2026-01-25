@@ -13,7 +13,7 @@ mod sys;
 
 pub use sys::SyscallNumber;
 pub use ipc::{ipc_recv, ipc_send};
-pub use task::{yield_now, exit};
+pub use task::{yield_now, exit, current_thread_id, thread_id_by_name};
 pub use time::get_ticks;
 pub use console::write as console_write;
 pub use fs::read as initfs_read;
