@@ -5,7 +5,6 @@ use crate::mem::{self, user, frame};
 use x86_64::structures::paging::Page;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::PageTableFlags;
-use alloc::vec::Vec;
 use crate::task::{add_process, add_thread, Process, PrivilegeLevel, Thread};
 use crate::init;
 
@@ -145,28 +144,23 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     let page_size: usize = 4096;
     let pages = (stack_size + page_size - 1) / page_size;
 
-    // Allocate physical frames (collect them) so we can map into kernel virtual space
-    let mut frames: Vec<x86_64::structures::paging::PhysFrame> = Vec::new();
-    for _ in 0..pages {
-        let f = frame::allocate_frame()?;
-        frames.push(f);
-    }
-
-    let first_phys = frames
-        .first()
-        .expect("frame allocation failed")
-        .start_address()
-        .as_u64();
+    // Allocate physical frames and map them immediately into kernel virtual space
+    let first_frame = frame::allocate_frame()?;
+    let first_phys = first_frame.start_address().as_u64();
     let phys_offset = crate::mem::paging::physical_memory_offset();
-    // We'll map the allocated frames into kernel virtual space at (phys + phys_offset)
     let kernel_stack_addr = first_phys + phys_offset;
 
-    // Map each allocated physical frame into consecutive kernel virtual pages
-    for (i, frame_phys) in frames.iter().enumerate() {
+    // Map the first frame
+    let page = Page::containing_address(VirtAddr::new(kernel_stack_addr));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    crate::mem::paging::map_page(page, first_frame, flags)?;
+
+    // Allocate and map remaining frames
+    for i in 1..pages {
+        let f = frame::allocate_frame()?;
         let vaddr = kernel_stack_addr + (i as u64) * (page_size as u64);
         let page = Page::containing_address(VirtAddr::new(vaddr));
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-        crate::mem::paging::map_page(page, *frame_phys, flags)?;
+        crate::mem::paging::map_page(page, f, flags)?;
     }
 
     let entry_fn: fn() -> ! = unsafe { core::mem::transmute(loaded.entry) };

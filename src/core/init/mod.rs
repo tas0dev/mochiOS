@@ -45,9 +45,10 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     interrupt::init_syscall();
 
     interrupt::init_pit();
-    // Timer interrupts are not enabled by default. Userland `core.service`
-    // will manage multitasking and enable scheduling if desired.
-    // interrupt::enable_timer_interrupt();
+    // Enable scheduler and timer interrupts for preemptive multitasking during development/testing.
+    // (In production this may be controlled by userland service manager.)
+    crate::task::init_scheduler();
+    interrupt::enable_timer_interrupt();
 
     Ok(memory_map)
 }

@@ -265,14 +265,14 @@ pub fn start_scheduling() -> ! {
     if let Some(first_id) = super::thread::peek_next_thread() {
         set_current_thread(Some(first_id));
 
-        // デバッグ情報を出力
+        // 情報出力（表示確実化のため info にする）
         with_thread_mut(first_id, |thread| {
-            crate::debug!(
+            crate::info!(
                 "Starting first thread: {} (id={:?})",
                 thread.name(),
                 thread.id()
             );
-            crate::debug!(
+            crate::info!(
                 "  Context: rsp={:#x}, rip={:#x}, rflags={:#x}",
                 thread.context().rsp,
                 thread.context().rip,
@@ -282,8 +282,22 @@ pub fn start_scheduling() -> ! {
         });
 
         // 最初のスレッドにジャンプ（戻ってこない）
+        // Determine if the first thread is user (Service) and capture its context pointer
+        let (is_user, ctx_ptr) = crate::task::with_thread(first_id, |thread| {
+            let priv_level = crate::task::with_process(thread.process_id(), |p| p.privilege())
+                .unwrap_or(crate::task::PrivilegeLevel::Core);
+            (priv_level != crate::task::PrivilegeLevel::Core, thread.context() as *const _)
+        })
+        .unwrap_or((false, core::ptr::null()));
+
         unsafe {
-            switch_to_thread(None, first_id);
+            if is_user {
+                let ctx = &*ctx_ptr;
+                crate::info!("Entering user mode for first thread via enter_user_from_kernel");
+                crate::task::context::enter_user_from_kernel(ctx);
+            } else {
+                switch_to_thread(None, first_id);
+            }
         }
 
         unreachable!("switch_to_thread should never return");

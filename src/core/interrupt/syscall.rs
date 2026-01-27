@@ -8,16 +8,13 @@ const IA32_FMASK: u32 = 0xC000_0084;
 
 /// Write MSR with given index and value (rdx:rax)
 unsafe fn wrmsr(msr: u32, value: u64) {
-    let low = value as u32 as u64;
-    let high = (value >> 32) as u64;
+    let low = value as u32;
+    let high = (value >> 32) as u32;
     asm!(
-        "mov ecx, {msr}",
-        "mov eax, {low}",
-        "mov edx, {high}",
         "wrmsr",
-        msr = in(reg) msr,
-        low = in(reg) (low as u32),
-        high = in(reg) (high as u32),
+        in("ecx") msr,
+        in("eax") low,
+        in("edx") high,
         options(nostack, preserves_flags),
     );
 }
@@ -35,7 +32,7 @@ pub fn init_syscall() {
         extern "C" {
             fn syscall_entry();
         }
-        let addr = syscall_entry as usize as u64;
+        let addr = syscall_entry as *const () as usize as u64;
         wrmsr(IA32_LSTAR, addr);
 
         // FMASK: mask of flags to clear on syscall (clear interrupt flag)
@@ -49,11 +46,9 @@ pub fn init_syscall() {
 // (This is a pragmatic bridge until a full, register-preserving syscall path is implemented.)
 core::arch::global_asm!(r#"
     .global syscall_entry
-    .type syscall_entry, @function
 syscall_entry:
     swapgs
-    // invoke int 0x80 handler (existing path) and return using sysretq
-    int $0x80
+    int 0x80
     swapgs
     sysretq
 "#);

@@ -36,6 +36,16 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptSta
                     "timer: switching current != next, preparing saved context (next={:?})",
                     next_id
                 );
+
+                // 次のスレッドがサービス特権の場合はスイッチを延期
+                let next_is_service = crate::task::with_thread(next_id, |t| {
+                    let proc = t.process_id();
+                    crate::task::with_process(proc, |p| p.privilege()).unwrap_or(crate::task::PrivilegeLevel::Core) == crate::task::PrivilegeLevel::Service
+                }) .unwrap_or(false);
+
+                if next_is_service {
+                    return;
+                }
                 // 割り込み時点の RIP を取得
                 let rip = _stack_frame.instruction_pointer.as_u64();
 

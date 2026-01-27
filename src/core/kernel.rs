@@ -56,11 +56,39 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
         return Err(KernelError::Process(ProcessError::MaxProcessesReached));
     }
 
-    // NOTE:
-    // The kernel no longer auto-starts services or the scheduler.
-    // A userland service (e.g. `core.service`) will act as the service
-    // manager and enable multitasking/scheduling as needed.
-    info!("kernel running in single-task mode (no auto-start services)");
+    if let Err(e) = task::spawn_service("hello", "init.hello") {
+        info!("failed to spawn initfs hello: {:?}", e);
+    } else {
+        info!("spawned initfs/hello");
+    }
+
+    info!("Process list:");
+    task::for_each_process(|p| {
+        info!("  proc: {} id={}", p.name(), p.id().as_u64());
+    });
+
+    info!("Thread list:");
+    task::for_each_thread(|t| {
+        info!("  thread: {} id={:?} pid={} state={:?}", t.name(), t.id().as_u64(), t.process_id().as_u64(), t.state());
+    });
+
+    // Start the user service `init.hello` first: mark the kernel `core` thread as Sleeping
+    // so the scheduler picks the service as the initial thread and we enter it via iret.
+    let mut core_id = None;
+    task::for_each_thread(|t| {
+        if t.name() == "core" {
+            core_id = Some(t.id());
+        }
+    });
+
+    if let Some(id) = core_id {
+        crate::task::with_thread_mut(id, |thr| {
+            use crate::task::ThreadState;
+            thr.set_state(ThreadState::Sleeping);
+        });
+    }
+
+    task::start_scheduling();
 
     #[allow(unreachable_code)]
     Ok(())

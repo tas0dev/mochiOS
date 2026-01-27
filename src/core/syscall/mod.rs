@@ -6,12 +6,14 @@ pub mod time;
 pub mod console;
 pub mod fs;
 pub mod keyboard;
+pub mod linux;
 
 mod types;
 
 pub use types::{SyscallNumber, EAGAIN, EINVAL, ENOSYS, ENOENT, ENODATA};
 
 use core::arch::asm;
+use linux as linux_sys;
 use x86_64::structures::idt::InterruptStackFrame;
 
 /// システムコールのディスパッチ
@@ -27,8 +29,59 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, _arg2: u64, _arg3: u64, _arg4: u
 		x if x == SyscallNumber::KeyboardRead as u64 => keyboard::read_char(),
 		x if x == SyscallNumber::GetThreadId as u64 => task::get_thread_id(),
 		x if x == SyscallNumber::GetThreadIdByName as u64 => task::get_thread_id_by_name(arg0, arg1),
-		_ => ENOSYS,
+		_ => {
+			match num {
+				x if x == linux_sys::SYS_READ => { // read(fd, buf, count)
+					let fd = arg0; let buf = arg1; let count = _arg2;
+					return linux_read(fd, buf, count);
+				}
+				x if x == linux_sys::SYS_WRITE => { // write(fd, buf, count)
+					let fd = arg0; let buf = arg1; let count = _arg2;
+					return linux_write(fd, buf, count);
+				}
+				x if x == linux_sys::SYS_MMAP => { // mmap
+					return ENOSYS;
+				}
+				x if x == linux_sys::SYS_BRK => { // brk
+					return ENOSYS;
+				}
+				x if x == linux_sys::SYS_EXIT => { // exit
+					let code = arg0;
+					return task::exit(code);
+				}
+				_ => ENOSYS,
+			}
+		}
 	}
+}
+
+fn linux_write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
+    if buf_ptr == 0 {
+        return EINVAL;
+    }
+    let len = len as usize;
+    if len == 0 {
+        return 0;
+    }
+
+    let bytes = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
+    let text = match core::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return EINVAL,
+    };
+
+    match fd {
+        1 | 2 => {
+            crate::util::console::print(format_args!("{}", text));
+            crate::util::vga::print(format_args!("{}", text));
+            len as u64
+        }
+        _ => EINVAL,
+    }
+}
+
+fn linux_read(_fd: u64, _buf_ptr: u64, _len: u64) -> u64 {
+    ENOSYS
 }
 
 /// システムコール割り込みハンドラ (int 0x80)

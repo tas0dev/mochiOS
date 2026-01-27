@@ -181,7 +181,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 ) {
     error!("EXCEPTION: GENERAL PROTECTION FAULT");
     error!("Error code: {:#x}", error_code);
-    debug!("{:#?}", stack_frame);
+    error!("{:#?}", stack_frame);
     halt_cpu();
 }
 

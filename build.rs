@@ -1,8 +1,9 @@
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
+#[allow(unused)]
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -14,11 +15,50 @@ fn main() {
     }
     fs::create_dir_all(&stage_dir).expect("failed to create initfs stage dir");
 
-    //emit_rerun_if_changed(&manifest_dir.join("src/services/shell"));
-    //emit_rerun_if_changed(&manifest_dir.join("src/services/keyboard"));
+    let builder_script = manifest_dir.join("scripts/build-user-elf.sh");
+    if builder_script.exists() {
+        match Command::new("sh").arg(&builder_script).current_dir(&manifest_dir).output() {
+            Ok(out) => {
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    println!("cargo:warning=build-user-elf.sh failed: exit={} stderr=\n{}", out.status, stderr);
+                } else {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    println!("cargo:warning=build-user-elf.sh output:\n{}", stdout);
+                }
+            }
+            Err(e) => println!("cargo:warning=failed to run build-user-elf.sh: {}", e),
+        }
+    }
 
-    //copy_service(&manifest_dir, "shell", &stage_dir);
-    //copy_service(&manifest_dir, "keyboard", &stage_dir);
+    let initfs_src = manifest_dir.join("src/initfs");
+    if initfs_src.exists() {
+        fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+            std::fs::create_dir_all(dst)?;
+            for entry in std::fs::read_dir(src)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                let src_path = entry.path();
+                let dst_path = dst.join(entry.file_name());
+                if file_type.is_dir() {
+                    copy_dir_recursive(&src_path, &dst_path)?;
+                } else if file_type.is_file() {
+                    std::fs::copy(&src_path, &dst_path)?;
+                }
+            }
+            Ok(())
+        }
+
+        if let Err(e) = copy_dir_recursive(&initfs_src, &stage_dir) {
+            panic!("failed to copy initfs files: {}", e);
+        }
+    }
+
+    // emit_rerun_if_changed(&manifest_dir.join("src/services/shell"));
+    // emit_rerun_if_changed(&manifest_dir.join("src/services/keyboard"));
+
+    // copy_service(&manifest_dir, "shell", &stage_dir);
+    // copy_service(&manifest_dir, "keyboard", &stage_dir);
 
     let status = Command::new("mke2fs")
         .args([
