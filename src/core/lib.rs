@@ -16,6 +16,9 @@ pub mod kernel;
 /// メモリ管理、GDT、TSSを含む
 pub mod mem;
 
+/// ELF周り
+pub mod elf;
+
 /// パニックハンドラ
 pub mod panic;
 

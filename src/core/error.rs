@@ -13,6 +13,8 @@ pub enum KernelError {
     Process(ProcessError),
     /// デバイスエラー
     Device(DeviceError),
+    /// ELFエラー
+    Elf(ElfError),
     /// 無効なパラメータ
     InvalidParam,
     /// 未実装の機能
@@ -88,6 +90,23 @@ pub enum ServiceError {
     UnknownError,
 }
 
+/// ELF関連のエラー
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElfError {
+    /// 無効なELFフォーマット
+    InvalidFormat,
+    /// サポートされていないELFタイプ
+    UnsupportedType,
+    /// セグメントのロード失敗
+    SegmentLoadFailure,
+    /// シンボル解決失敗
+    SymbolResolutionFailure,
+    /// Elfファイルの長さ不足
+    InsufficientLength,
+    /// 未知のエラー
+    UnknownError,
+}
+
 /// デバイス関連のエラー
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceError {
@@ -150,6 +169,7 @@ impl fmt::Display for KernelError {
             KernelError::Memory(e) => write!(f, "Memory error: {:?}", e),
             KernelError::Process(e) => write!(f, "Process error: {:?}", e),
             KernelError::Device(e) => write!(f, "Device error: {:?}", e),
+            KernelError::Elf(e) => write!(f, "ELF error: {:?}", e),
             KernelError::InvalidParam => write!(f, "Invalid parameter"),
             KernelError::NotImplemented => write!(f, "Not implemented"),
             KernelError::UnknownError => write!(f, "Unknown error"),

@@ -10,6 +10,8 @@ pub enum SyscallNumber {
     IpcSend = 3,
     /// IPC受信 (arg0=sender_ptr)
     IpcRecv = 4,
+    /// initfsから実行可能ファイルを読み込み実行 (arg0=filename_ptr)
+    Exec = 5,
 }
 
 /// 未実装エラー

@@ -28,7 +28,16 @@ impl BitmapFrameAllocator {
     pub fn new(memory_map: &'static [MemoryRegion]) -> Self {
         Self {
             memory_map,
-            next_frame: 0,
+            next_frame: {
+                let mut start_idx = 0usize;
+                for r in memory_map.iter() {
+                    if r.region_type == MemoryType::Usable {
+                        start_idx = (r.start / 4096) as usize;
+                        break;
+                    }
+                }
+                start_idx
+            },
         }
     }
 

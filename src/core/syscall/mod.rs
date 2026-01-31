@@ -3,6 +3,7 @@
 pub mod ipc;
 pub mod task;
 pub mod time;
+pub mod exec;
 
 mod types;
 
@@ -18,6 +19,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, _arg2: u64, _arg3: u64, _arg4: u
         x if x == SyscallNumber::GetTicks as u64 => time::get_ticks(),
         x if x == SyscallNumber::IpcSend as u64 => ipc::send(arg0, arg1),
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0),
+        x if x == SyscallNumber::Exec as u64 => exec::exec_kernel(arg0),
         _ => ENOSYS,
     }
 }

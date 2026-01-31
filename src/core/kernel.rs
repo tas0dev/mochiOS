@@ -15,7 +15,7 @@ static mut KERNEL_THREAD_STACK: KernelStack = KernelStack([0; KERNEL_THREAD_STAC
 /// カーネルエントリーポイント
 #[no_mangle]
 pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
-    util::log::set_level(util::log::LogLevel::Info);
+    util::log::set_level(util::log::LogLevel::Debug);
     let memory_map = match kinit(boot_info) {
         Ok(map) => map,
         Err(e) => {
@@ -72,6 +72,14 @@ fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]
 
     if task::add_thread(kernel_thread).is_none() {
         return Err(KernelError::Process(ProcessError::MaxProcessesReached));
+    }
+
+    match crate::syscall::exec::exec_kernel(
+        crate::init::fs::read("/hello.bin").map(|_| 0).unwrap_or(0),
+    ) {
+        r => {
+            crate::debug!("exec returned: {}", r);
+        }
     }
 
     info!("Starting task scheduler...");

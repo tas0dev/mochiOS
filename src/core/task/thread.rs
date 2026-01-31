@@ -34,6 +34,26 @@ pub struct Thread {
     kernel_stack_size: usize,
 }
 
+// Simple kernel stack pool for creating kernel stacks for threads
+const KSTACK_POOL_SIZE: usize = 4096 * 64; // 256 KiB
+static mut KSTACK_POOL: [u8; KSTACK_POOL_SIZE] = [0; KSTACK_POOL_SIZE];
+static NEXT_KSTACK_OFFSET: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Allocate a kernel stack from the internal pool. Returns base address (bottom) of stack.
+pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
+    if size == 0 || size > KSTACK_POOL_SIZE {
+        return None;
+    }
+    // align size to 16
+    let size = (size + 0xF) & !0xF;
+    let off = NEXT_KSTACK_OFFSET.fetch_add(size, core::sync::atomic::Ordering::SeqCst);
+    if off + size > KSTACK_POOL_SIZE {
+        return None;
+    }
+    let ptr = unsafe { &raw const KSTACK_POOL as *const _ as usize + off } as u64;
+    Some(ptr)
+}
+
 impl Thread {
     /// 新しいスレッドを作成
     ///
