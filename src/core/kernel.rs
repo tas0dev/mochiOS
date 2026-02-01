@@ -2,7 +2,7 @@
 
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
-use crate::{info, vprintln};
+use crate::{info, sprintln, vprintln};
 use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
 
 const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 8;
@@ -23,6 +23,11 @@ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
             halt_forever();
         }
     };
+
+    create_kernel_proc().unwrap_or_else(|e| {
+        handle_kernel_error(e);
+        halt_forever();
+    });
 
     match kernel_main(boot_info, memory_map) {
         Ok(_) => {
