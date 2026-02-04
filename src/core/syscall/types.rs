@@ -18,6 +18,20 @@ pub enum SyscallNumber {
     Write = 7,
     /// 読み込み (arg0=fd, arg1=buf_ptr, arg2=len)
     Read = 8,
+    /// 現在のプロセスIDを取得
+    GetPid = 9,
+    /// 現在のスレッドIDを取得
+    GetTid = 10,
+    /// スリープ (arg0=milliseconds)
+    Sleep = 11,
+    /// ファイルを開く (arg0=path_ptr, arg1=flags)
+    Open = 12,
+    /// ファイルを閉じる (arg0=fd)
+    Close = 13,
+    /// Fork (arg0=reserved)
+    Fork = 14,
+    /// Wait (arg0=pid, arg1=status_ptr)
+    Wait = 15,
 }
 
 /// 成功
@@ -32,3 +46,7 @@ pub const EAGAIN: u64 = u64::MAX - 2;
 pub const EBADF: u64 = u64::MAX - 3;
 /// 不正なアドレス
 pub const EFAULT: u64 = u64::MAX - 4;
+/// ファイルが見つからない
+pub const ENOENT: u64 = u64::MAX - 5;
+/// 権限エラー
+pub const EPERM: u64 = u64::MAX - 6;

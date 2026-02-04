@@ -67,7 +67,7 @@ fn build_apps(apps_dir: &Path, initfs_dir: &Path) {
         }
 
         let app_name = path.file_name().unwrap().to_string_lossy();
-        println!("cargo:warning=Building app: {}", app_name);
+        println!("Building app: {}", app_name);
 
         // アプリのソースファイルを明示的に監視
         println!("cargo:rerun-if-changed={}", cargo_toml.display());
@@ -86,7 +86,7 @@ fn build_apps(apps_dir: &Path, initfs_dir: &Path) {
         // カスタムターゲットが見つかった場合は指定
         if let Some(target) = &target_spec {
             cmd.arg("--target").arg(target);
-            println!("cargo:warning=  Using target: {}", target);
+            println!("  Using target: {}", target);
         }
 
         let output = cmd.current_dir(&path).output();
@@ -101,13 +101,12 @@ fn build_apps(apps_dir: &Path, initfs_dir: &Path) {
                         .map(|s| s.to_string_lossy().to_string());
 
                     if let Some(elf_path) = find_built_binary(&target_dir, target_name.as_deref()) {
-                        // initfsにコピー（.elf拡張子を付ける）
-                        let dest_name = format!("{}.elf", app_name);
-                        let dest = initfs_dir.join(&dest_name);
+                        // initfsにコピー
+                        let dest = initfs_dir.join(&*app_name);
                         if let Err(e) = fs::copy(&elf_path, &dest) {
-                            println!("cargo:warning=Failed to copy {} to initfs: {}", dest_name, e);
+                            println!("cargo:warning=Failed to copy {} to initfs: {}", app_name, e);
                         } else {
-                            println!("cargo:warning=Copied {} to initfs (from {})", dest_name, elf_path.display());
+                            println!("Copied {} to initfs (from {})", app_name, elf_path.display());
                         }
                     } else {
                         println!("cargo:warning=Built binary not found for {}", app_name);

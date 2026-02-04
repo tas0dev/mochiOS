@@ -18,6 +18,13 @@ pub enum SyscallNumber {
     Exit = 6,
     Write = 7,
     Read = 8,
+    GetPid = 9,
+    GetTid = 10,
+    Sleep = 11,
+    Open = 12,
+    Close = 13,
+    Fork = 14,
+    Wait = 15,
 }
 
 /// システムコールを呼び出す（引数0個）
@@ -129,5 +136,45 @@ pub fn read(fd: u64, buf: &mut [u8]) -> u64 {
 #[inline]
 pub fn print(s: &str) -> u64 {
     write(1, s.as_bytes())
+}
+
+/// 現在のプロセスIDを取得
+#[inline]
+pub fn getpid() -> u64 {
+    syscall0(SyscallNumber::GetPid as u64)
+}
+
+/// 現在のスレッドIDを取得
+#[inline]
+pub fn gettid() -> u64 {
+    syscall0(SyscallNumber::GetTid as u64)
+}
+
+/// 指定されたミリ秒数の間スリープする
+#[inline]
+pub fn sleep(milliseconds: u64) {
+    syscall1(SyscallNumber::Sleep as u64, milliseconds);
+}
+
+/// ファイルを開く（未実装）
+#[inline]
+pub fn open(path: &str, flags: u64) -> i64 {
+    let ret = syscall2(SyscallNumber::Open as u64, path.as_ptr() as u64, flags);
+    if ret == u64::MAX {
+        -1
+    } else {
+        ret as i64
+    }
+}
+
+/// ファイルを閉じる（未実装）
+#[inline]
+pub fn close(fd: u64) -> i64 {
+    let ret = syscall1(SyscallNumber::Close as u64, fd);
+    if ret == u64::MAX {
+        -1
+    } else {
+        ret as i64
+    }
 }
 

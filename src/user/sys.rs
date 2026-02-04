@@ -22,6 +22,20 @@ pub enum SyscallNumber {
     Write = 7,
     /// 読み込み
     Read = 8,
+    /// 現在のプロセスIDを取得
+    GetPid = 9,
+    /// 現在のスレッドIDを取得
+    GetTid = 10,
+    /// スリープ
+    Sleep = 11,
+    /// ファイルを開く
+    Open = 12,
+    /// ファイルを閉じる
+    Close = 13,
+    /// Fork
+    Fork = 14,
+    /// Wait
+    Wait = 15,
 }
 
 #[inline(always)]

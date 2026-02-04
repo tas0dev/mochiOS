@@ -6,10 +6,11 @@ pub mod time;
 pub mod exec;
 pub mod io;
 pub mod process;
+pub mod fs;
 
 mod types;
 
-pub use types::{SyscallNumber, EAGAIN, EINVAL, ENOSYS, EBADF, EFAULT, SUCCESS};
+pub use types::{SyscallNumber, EAGAIN, EINVAL, ENOSYS, EBADF, EFAULT, ENOENT, EPERM, SUCCESS};
 
 use core::arch::asm;
 use x86_64::structures::idt::InterruptStackFrame;
@@ -25,6 +26,13 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, _arg3: u64, _arg4: u6
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         x if x == SyscallNumber::Read as u64 => io::read(arg0, arg1, arg2),
         x if x == SyscallNumber::Exit as u64 => process::exit(arg0),
+        x if x == SyscallNumber::GetPid as u64 => process::getpid(),
+        x if x == SyscallNumber::GetTid as u64 => process::gettid(),
+        x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
+        x if x == SyscallNumber::Open as u64 => fs::open(arg0, arg1),
+        x if x == SyscallNumber::Close as u64 => fs::close(arg0),
+        x if x == SyscallNumber::Fork as u64 => process::fork(),
+        x if x == SyscallNumber::Wait as u64 => process::wait(arg0, arg1),
         _ => ENOSYS,
     }
 }

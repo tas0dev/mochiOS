@@ -2,8 +2,10 @@
 
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
-use crate::{info, sprintln, vprintln};
+use crate::{debug, info, sprintln, vprintln};
 use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
+use crate::init::fs::read;
+use crate::syscall::exec::exec_kernel;
 
 const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 8;
 
@@ -12,7 +14,7 @@ struct KernelStack([u8; KERNEL_THREAD_STACK_SIZE]);
 
 static mut KERNEL_THREAD_STACK: KernelStack = KernelStack([0; KERNEL_THREAD_STACK_SIZE]);
 
-/// カーネル初期化いろいろ（エントリーポイント）
+/// カーネル初期化
 #[no_mangle]
 pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
     util::log::set_level(util::log::LogLevel::Info);
@@ -24,42 +26,17 @@ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
         }
     };
 
-    create_kernel_proc().unwrap_or_else(|e| {
+    create_kernel_proc(boot_info, memory_map).unwrap_or_else(|e| {
         handle_kernel_error(e);
         halt_forever();
     });
-
-    match kernel_main(boot_info, memory_map) {
-        Ok(_) => {
-            info!("Kernel shutdown gracefully");
-            halt_forever();
-        }
-        Err(e) => {
-            handle_kernel_error(e);
-            halt_forever();
-        }
-    }
-}
-
-/// カーネルメイン処理
-fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]) -> Result<()> {
-    // test.elfを実行
-    let path = "/test_app.elf\0";
-    match crate::syscall::exec::exec_kernel(path.as_ptr() as u64) {
-        r if r != crate::syscall::EINVAL => {
-            info!("exec /test_app.elf returned: {}", r);
-        }
-        _ => {
-            crate::warn!("Failed to exec /test_app.elf");
-        }
-    }
 
     info!("Starting task scheduler...");
     task::start_scheduling();
 }
 
 /// カーネルメインプロセスの作成
-fn create_kernel_proc() -> Result<()> {
+fn create_kernel_proc(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]) -> Result<()> {
     let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, None, 0);
     let kernel_pid = kernel_process.id();
 
@@ -67,12 +44,11 @@ fn create_kernel_proc() -> Result<()> {
         return Err(Kernel::Process(Process::MaxProcessesReached));
     }
 
-    let stack_addr =
-        unsafe { (&raw const KERNEL_THREAD_STACK as *const u8) as u64 };
+    let stack_addr = unsafe { (&raw const KERNEL_THREAD_STACK as *const u8) as u64 };
     let kernel_thread = task::Thread::new(
         kernel_pid,
         "core",
-        kernel_thread,
+        kernel_main,
         stack_addr,
         KERNEL_THREAD_STACK_SIZE,
     );
@@ -84,16 +60,21 @@ fn create_kernel_proc() -> Result<()> {
     Ok(())
 }
 
-/// システムを無限ループで停止
-fn halt_forever() -> ! {
+/// カーネルメイン関数
+fn kernel_main() -> ! {
+    debug!("Kernel started");
+
+    let test_elf_path = "test_app.elf\0";
+    exec_kernel(test_elf_path.as_ptr() as u64);
+
     loop {
         x86_64::instructions::hlt();
     }
 }
 
-fn kernel_thread() -> ! {
+/// システムを無限ループで停止
+fn halt_forever() -> ! {
     loop {
         x86_64::instructions::hlt();
-        info!("[core] kernel thread alive");
     }
 }
