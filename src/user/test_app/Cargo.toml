@@ -1,0 +1,28 @@
+[package]
+name = "test_app"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "test_app"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+test = false
+bench = false
+
+[[bin]]
+name = "test_app"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+

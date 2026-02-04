@@ -15,7 +15,7 @@ static mut KERNEL_THREAD_STACK: KernelStack = KernelStack([0; KERNEL_THREAD_STAC
 /// カーネル初期化いろいろ（エントリーポイント）
 #[no_mangle]
 pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
-    util::log::set_level(util::log::LogLevel::Debug);
+    util::log::set_level(util::log::LogLevel::Info);
     let memory_map = match kinit(boot_info) {
         Ok(map) => map,
         Err(e) => {
@@ -43,21 +43,22 @@ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
 
 /// カーネルメイン処理
 fn kernel_main(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]) -> Result<()> {
-    match crate::syscall::exec::exec_kernel(
-        crate::init::fs::read("/hello.bin").map(|_| 0).unwrap_or(0),
-    ) {
-        r => {
-            crate::debug!("exec returned: {}", r);
+    // test.elfを実行
+    let path = "/test.elf\0";
+    match crate::syscall::exec::exec_kernel(path.as_ptr() as u64) {
+        r if r != crate::syscall::EINVAL => {
+            info!("exec /test.elf returned: {}", r);
+        }
+        _ => {
+            crate::warn!("Failed to exec /test.elf");
         }
     }
 
     info!("Starting task scheduler...");
     task::start_scheduling();
-
-    #[allow(unreachable_code)]
-    Ok(())
 }
 
+/// カーネルメインプロセスの作成
 fn create_kernel_proc() -> Result<()> {
     let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, None, 0);
     let kernel_pid = kernel_process.id();
@@ -67,11 +68,11 @@ fn create_kernel_proc() -> Result<()> {
     }
 
     let stack_addr =
-        unsafe { (&raw const KERNEL_THREAD_STACK as *const KernelStack as *const u8) as u64 };
+        unsafe { (&raw const KERNEL_THREAD_STACK as *const u8) as u64 };
     let kernel_thread = task::Thread::new(
         kernel_pid,
-        "kernel-idle",
-        kernel_idle,
+        "core",
+        kernel_thread,
         stack_addr,
         KERNEL_THREAD_STACK_SIZE,
     );
@@ -90,7 +91,7 @@ fn halt_forever() -> ! {
     }
 }
 
-fn kernel_idle() -> ! {
+fn kernel_thread() -> ! {
     loop {
         x86_64::instructions::hlt();
     }
