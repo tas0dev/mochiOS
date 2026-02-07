@@ -32,6 +32,10 @@ pub struct Thread {
     kernel_stack: u64,
     /// カーネルスタックのサイズ
     kernel_stack_size: usize,
+    /// ユーザーモードエントリポイント（0の場合はカーネルモードスレッド）
+    user_entry: u64,
+    /// ユーザースタックトップ（0の場合はカーネルモードスレッド）
+    user_stack: u64,
 }
 
 // Simple kernel stack pool for creating kernel stacks for threads
@@ -112,7 +116,91 @@ impl Thread {
             context,
             kernel_stack,
             kernel_stack_size,
+            user_entry: 0,
+            user_stack: 0,
         }
+    }
+
+    /// 新しいユーザーモードスレッドを作成
+    ///
+    /// # Arguments
+    /// * `process_id` - 所属するプロセスID
+    /// * `name` - スレッド名
+    /// * `user_entry` - ユーザーモードのエントリーポイント
+    /// * `user_stack` - ユーザースタックのトップアドレス
+    /// * `kernel_stack` - カーネルスタックのアドレス
+    /// * `kernel_stack_size` - カーネルスタックのサイズ
+    pub fn new_usermode(
+        process_id: ProcessId,
+        name: &'static str,
+        user_entry: u64,
+        user_stack: u64,
+        kernel_stack: u64,
+        kernel_stack_size: usize,
+    ) -> Self {
+        // カーネルスタックを設定（ユーザーモードからシステムコール時に使用）
+        let mut context = Context::new();
+        let stack_top = (kernel_stack + kernel_stack_size as u64) & !0xF;
+
+        // ユーザーモードへジャンプするトランポリン関数を設定
+        extern "C" fn usermode_entry_trampoline() -> ! {
+            // この関数は各スレッドが最初に実行される
+            // スレッド固有のuser_entryとuser_stackを取得してジャンプする
+            let tid = current_thread_id().expect("No current thread");
+            let (entry, stack) = with_thread(tid, |thread| {
+                (thread.user_entry(), thread.user_stack())
+            }).expect("Thread not found");
+
+            crate::debug!("Jumping to usermode: entry={:#x}, stack={:#x}", entry, stack);
+            unsafe {
+                crate::task::jump_to_usermode(entry, stack);
+            }
+        }
+
+        let stack_ptr = stack_top - 8;
+        unsafe {
+            let ret_addr = stack_ptr as *mut u64;
+            *ret_addr = thread_exit_handler as *const () as u64;
+        }
+
+        context.rsp = stack_ptr;
+        context.rbp = stack_top;
+        context.rip = usermode_entry_trampoline as *const () as u64;
+        context.rflags = 0x202;
+
+        crate::debug!(
+            "Creating usermode thread '{}': user_entry={:#x}, user_stack={:#x}",
+            name,
+            user_entry,
+            user_stack
+        );
+
+        Self {
+            id: ThreadId::new(),
+            process_id,
+            name,
+            state: ThreadState::Ready,
+            context,
+            kernel_stack,
+            kernel_stack_size,
+            user_entry,
+            user_stack,
+        }
+    }
+
+    /// ユーザーモードエントリポイントを取得
+    pub fn user_entry(&self) -> u64 {
+        self.user_entry
+    }
+
+    /// ユーザースタックを取得
+    pub fn user_stack(&self) -> u64 {
+        self.user_stack
+    }
+
+    /// ユーザーモードスレッドかどうか
+    pub fn is_usermode(&self) -> bool {
+        self.user_entry != 0
     }
 
     /// スレッドIDを取得

@@ -17,7 +17,7 @@ static mut KERNEL_THREAD_STACK: KernelStack = KernelStack([0; KERNEL_THREAD_STAC
 /// カーネル初期化
 #[no_mangle]
 pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
-    util::log::set_level(util::log::LogLevel::Info);
+    util::log::set_level(util::log::LogLevel::Debug);
     let memory_map = match kinit(boot_info) {
         Ok(map) => map,
         Err(e) => {

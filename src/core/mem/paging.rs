@@ -220,14 +220,18 @@ pub fn map_and_copy_segment(
     while page_addr < end {
         let frame = frame::allocate_frame()?;
         let page = Page::containing_address(VirtAddr::new(page_addr));
+        
+        // 初期フラグ：PRESENT + USER_ACCESSIBLE + WRITABLE (コピーのため)
+        // NO_EXECUTEビットは設定しない（デフォルトで実行可能）
         let mut flags =
             PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+        
         crate::debug!(
-            "about to map page {:#x} -> frame {:#x}, flags={:?}, phys_off={:#x}",
+            "about to map page {:#x} -> frame {:#x}, flags={:?}, writable={}",
             page_addr,
             frame.start_address().as_u64(),
             flags,
-            phys_off
+            writable
         );
         map_page(page, frame, flags)?;
         let page_start = page_addr;
@@ -285,14 +289,21 @@ pub fn map_and_copy_segment(
                 unsafe { core::ptr::write_bytes(dst_virt, 0, len) };
             }
         }
+        // セグメントのコピーと初期化が完了したら、最終的なフラグを設定
         if !writable {
             if let Some(ref mut pt) = PAGE_TABLE.lock().as_mut() {
-                use x86_64::structures::paging::mapper::MapToError;
+                // 読み取り専用: PRESENT + USER_ACCESSIBLE (WRITABLEを外す)
                 let new_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+                crate::debug!("Updating page {:#x} to read-only (flags={:?})", page_addr, new_flags);
                 unsafe {
-                    let _ = pt.update_flags(page, new_flags).ok();
+                    if let Err(e) = pt.update_flags(page, new_flags) {
+                        crate::warn!("Failed to update flags for page {:#x}: {:?}", page_addr, e);
+                    }
                 }
             }
+        } else {
+            // 書き込み可能な場合も最終フラグを確認
+            crate::debug!("Page {:#x} remains writable", page_addr);
         }
         page_addr += 4096;
     }

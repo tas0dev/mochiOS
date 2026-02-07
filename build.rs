@@ -101,12 +101,13 @@ fn build_apps(apps_dir: &Path, initfs_dir: &Path) {
                         .map(|s| s.to_string_lossy().to_string());
 
                     if let Some(elf_path) = find_built_binary(&target_dir, target_name.as_deref()) {
-                        // initfsにコピー
-                        let dest = initfs_dir.join(&*app_name);
+                        // initfsにコピー (.elf 拡張子を付ける)
+                        let dest_name = format!("{}.elf", app_name);
+                        let dest = initfs_dir.join(&dest_name);
                         if let Err(e) = fs::copy(&elf_path, &dest) {
-                            println!("cargo:warning=Failed to copy {} to initfs: {}", app_name, e);
+                            println!("cargo:warning=Failed to copy {} to initfs: {}", dest_name, e);
                         } else {
-                            println!("Copied {} to initfs (from {})", app_name, elf_path.display());
+                            println!("Copied {} to initfs (from {})", dest_name, elf_path.display());
                         }
                     } else {
                         println!("cargo:warning=Built binary not found for {}", app_name);

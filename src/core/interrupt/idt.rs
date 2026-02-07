@@ -61,9 +61,12 @@ pub fn init() {
         }
 
         // システムコール割り込み (0x80)
-        idt[0x80]
-            .set_handler_fn(syscall::syscall_interrupt_handler)
-            .set_privilege_level(PrivilegeLevel::Ring3);
+        // naked functionなので、手動で設定
+        unsafe {
+            let handler_addr = syscall::syscall_interrupt_handler as *const () as u64;
+            idt[0x80].set_handler_addr(x86_64::VirtAddr::new(handler_addr))
+                .set_privilege_level(PrivilegeLevel::Ring3);
+        }
 
         // 48-255番も念のため設定（未使用の割り込みベクタ）
         for i in 48..=255 {
@@ -181,6 +184,23 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 ) {
     error!("EXCEPTION: GENERAL PROTECTION FAULT");
     error!("Error code: {:#x}", error_code);
+
+    // エラーコードの詳細を解析
+    let external = (error_code & 0x1) != 0;
+    let table = (error_code >> 1) & 0x3;
+    let index = (error_code >> 3) & 0x1FFF;
+
+    error!("  External: {}, Table: {} ({}), Index: {}",
+           external,
+           table,
+           match table {
+               0 => "GDT",
+               1 => "IDT",
+               2 | 3 => "LDT",
+               _ => "Unknown",
+           },
+           index);
+
     debug!("{:#?}", stack_frame);
     halt_cpu();
 }
@@ -190,9 +210,27 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: x86_64::structures::idt::PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
+    use x86_64::VirtAddr;
+
+    let faulting_addr = Cr2::read().unwrap_or(VirtAddr::new(0));
+
     error!("EXCEPTION: PAGE FAULT");
-    error!("Accessed address: {:?}", Cr2::read());
+    error!("Accessed address: {:#x}", faulting_addr.as_u64());
     error!("Error code: {:?}", error_code);
+    error!("  Present: {}, Write: {}, User: {}, Reserved: {}, Instruction: {}",
+           error_code.contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION),
+           error_code.contains(x86_64::structures::idt::PageFaultErrorCode::CAUSED_BY_WRITE),
+           error_code.contains(x86_64::structures::idt::PageFaultErrorCode::USER_MODE),
+           error_code.contains(x86_64::structures::idt::PageFaultErrorCode::MALFORMED_TABLE),
+           error_code.contains(x86_64::structures::idt::PageFaultErrorCode::INSTRUCTION_FETCH));
+
+    // フォルトしたアドレスの周辺のページテーブルエントリを確認
+    if let Some(phys) = crate::mem::paging::translate_addr(faulting_addr) {
+        error!("  Virtual {:#x} is mapped to physical {:#x}", faulting_addr.as_u64(), phys.as_u64());
+    } else {
+        error!("  Virtual {:#x} is NOT mapped", faulting_addr.as_u64());
+    }
+
     debug!("{:#?}", stack_frame);
     halt_cpu();
 }

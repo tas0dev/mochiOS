@@ -34,6 +34,16 @@ pub fn user_data_selector() -> SegmentSelector {
     GDT.get().expect("GDT not initialized").1.user_data_selector
 }
 
+/// カーネルのコードセグメントセレクタを取得
+pub fn code_selector() -> SegmentSelector {
+    GDT.get().expect("GDT not initialized").1.code_selector
+}
+
+/// カーネルのデータセグメントセレクタを取得
+pub fn data_selector() -> SegmentSelector {
+    GDT.get().expect("GDT not initialized").1.data_selector
+}
+
 /// GDTを初期化
 pub fn init() {
     sprintln!("Initializing GDT...");

@@ -27,10 +27,24 @@ pub fn init() -> &'static TaskStateSegment {
 
             let stack_start = VirtAddr::from_ptr(unsafe { &raw const STACK });
             let stack_end = stack_start + STACK_SIZE as u64;
+            sprintln!("  IST[{}] stack: {:#x}", DOUBLE_FAULT_IST_INDEX, stack_end.as_u64());
             stack_end
         };
 
-        sprintln!("TSS configured with IST[{}] stack", DOUBLE_FAULT_IST_INDEX);
+        // ユーザーモードからカーネルモードへの遷移用のRing0スタックを設定
+        tss.privilege_stack_table[0] = {
+            const RING0_STACK_SIZE: usize = 4096 * 4;
+            static mut RING0_STACK: [u8; RING0_STACK_SIZE] = [0; RING0_STACK_SIZE];
+
+            let stack_start = VirtAddr::from_ptr(unsafe { &raw const RING0_STACK });
+            let stack_end = stack_start + RING0_STACK_SIZE as u64;
+            sprintln!("  Ring0 stack (RSP0): {:#x}", stack_end.as_u64());
+            stack_end
+        };
+
+        sprintln!("TSS configured:");
+        sprintln!("  IST[0] stack: {:#x}", tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize].as_u64());
+        sprintln!("  Ring0 stack (RSP0): {:#x}", tss.privilege_stack_table[0].as_u64());
         tss
     })
 }
