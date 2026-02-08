@@ -4,4 +4,4 @@
 *.fslckout
 *.log
 *.bin
-*.elf
+/src/initfs/

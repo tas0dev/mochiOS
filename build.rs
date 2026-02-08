@@ -8,15 +8,16 @@ fn main() {
     let apps_dir = manifest_dir.join("src/apps");
 
     let initfs_dir_core = manifest_dir.join("src/initfs");
-    let initfs_dir_legacy = manifest_dir.join("src/init/initfs");
-    let initfs_dir = if initfs_dir_core.is_dir() {
-        initfs_dir_core
-    } else {
-        initfs_dir_legacy
-    };
+    let initfs_dir = initfs_dir_core;
 
+    // initfsディレクトリが存在しない場合、作成
     if !initfs_dir.is_dir() {
-        panic!("initfs directory not found at {:?}", initfs_dir);
+        fs::create_dir_all(&initfs_dir).expect(&format!(
+            "Failed to create initfs directory: {}",
+            initfs_dir.display()
+        ));
+
+        println!("created initfs directory at {}", initfs_dir.display());
     }
 
     // appsディレクトリが存在する場合、アプリをビルド
