@@ -105,34 +105,45 @@ pub unsafe extern "C" fn syscall_interrupt_handler() {
         "mov ds, ax",
         "mov es, ax",
 
-        // システムコール引数を Rust 関数に渡す (System V ABI)
+        // デバッグ: スタックダンプ (MS ABI: Arg1 in RCX)
+        "mov rcx, rsp",      // Arg1: pointer to saved registers
+        "sub rsp, 32",       // Shadow space (32 bytes)
+        "call {dump_stack}",
+        "add rsp, 32",       // Cleanup shadow space
+
+        // システムコール引数を Rust 関数に渡す (Microsoft x64 ABI for UEFI)
         // 引数: (num, arg0, arg1, arg2, arg3, arg4)
-        // ユーザーランドのレジスタ配置: (rax=num, rdi=arg0, rsi=arg1, rdx=arg2, r10=arg3, r8=arg4)
-        // カーネル関数の引数: (rdi=num, rsi=arg0, rdx=arg1, rcx=arg2, r8=arg3, r9=arg4)
+        // MS ABI: RCX, RDX, R8, R9, Stack, Stack
+        // ユーザー入力 (SysV-like):
+        //   num (RAX)  -> RCX
+        //   arg0 (RDI) -> RDX
+        //   arg1 (RSI) -> R8
+        //   arg2 (RDX) -> R9
+        //   arg3 (R10) -> Stack[rsp+32]
+        //   arg4 (R8)  -> Stack[rsp+40]
 
-        // カーネルデータセグメントをロード（レジスタ設定の前に）
-        "push rax",             // raxを一時保存
-        "mov ax, 0x10",         // カーネルデータセグメント (index=2)
-        "mov ds, ax",
-        "mov es, ax",
-        "pop rax",              // raxを復元
+        // Stack Frame for Call: 32 (Shadow) + 16 (Args) = 48 bytes
+        // RSP must be 16-byte aligned before CALL.
+        // Current RSP is aligned (160 bytes pushed). 48 is divisible by 16.
+        "sub rsp, 48",
 
-        // スタックを16バイトアラインメント（System V ABI要件）
-        "sub rsp, 8",
+        // スタック上の引数を設定 (arg3, arg4)
+        "mov r11, [rsp + 48 + 40]", // r10 (arg3)
+        "mov [rsp + 32], r11",
+        "mov r11, [rsp + 48 + 56]", // u_r8 (arg4)
+        "mov [rsp + 40], r11",
 
-        // テスト: call直前に固定値を設定
-        "mov rdi, 0x1234",
-        "mov rsi, 0x5678",
-        "mov rdx, 0x9abc",
-        "mov rcx, 0xdef0",
-        "mov r8,  0x1111",
-        "mov r9,  0x2222",
+        // レジスタ引数を設定 (num, arg0, arg1, arg2)
+        "mov rcx, [rsp + 48 + 112]", // rax (num)
+        "mov rdx, [rsp + 48 + 64]",  // rdi (arg0)
+        "mov r8,  [rsp + 48 + 72]",  // rsi (arg1)
+        "mov r9,  [rsp + 48 + 96]",  // rdx (arg2)
 
         // Rust 関数を呼び出し
         "call {syscall_handler}",
 
         // スタックを戻す
-        "add rsp, 8",
+        "add rsp, 48",
 
         // 戻り値 (rax) をスタック上の保存された rax の位置に書き込む
         "mov [rsp + 112], rax",
@@ -163,37 +174,41 @@ pub unsafe extern "C" fn syscall_interrupt_handler() {
         "iretq",
 
         syscall_handler = sym syscall_handler_rust,
+        dump_stack = sym dump_syscall_stack,
     );
 }
 
-/* デバッグ用にコメントアウト
+// デバッグ用にコメントアウト
 /// デバッグ用: スタックの内容をダンプ
-extern "C" fn dump_syscall_stack(stack_ptr: u64) {
+pub extern "C" fn dump_syscall_stack(stack_ptr: u64) {
     use crate::debug;
 
     unsafe {
         let ptr = stack_ptr as *const u64;
-        debug!("Stack dump:");
-        debug!("  [rsp+0]   (es)  = {:#x}", *ptr.offset(0));
-        debug!("  [rsp+8]   (ds)  = {:#x}", *ptr.offset(1));
-        debug!("  [rsp+16]  (r15) = {:#x}", *ptr.offset(2));
-        debug!("  [rsp+24]  (r14) = {:#x}", *ptr.offset(3));
-        debug!("  [rsp+32]  (r13) = {:#x}", *ptr.offset(4));
-        debug!("  [rsp+40]  (r12) = {:#x}", *ptr.offset(5));
-        debug!("  [rsp+48]  (r11) = {:#x}", *ptr.offset(6));
-        debug!("  [rsp+56]  (r10) = {:#x}", *ptr.offset(7));
-        debug!("  [rsp+64]  (r9)  = {:#x}", *ptr.offset(8));
-        debug!("  [rsp+72]  (r8)  = {:#x}", *ptr.offset(9));
-        debug!("  [rsp+80]  (rdi) = {:#x}", *ptr.offset(10));
-        debug!("  [rsp+88]  (rsi) = {:#x}", *ptr.offset(11));
-        debug!("  [rsp+96]  (rbp) = {:#x}", *ptr.offset(12));
-        debug!("  [rsp+104] (rbx) = {:#x}", *ptr.offset(13));
-        debug!("  [rsp+112] (rdx) = {:#x}", *ptr.offset(14));
-        debug!("  [rsp+120] (rcx) = {:#x}", *ptr.offset(15));
-        debug!("  [rsp+128] (rax) = {:#x}", *ptr.offset(16));
+        debug!("Stack dump (rsp base={:#x}):", stack_ptr);
+        debug!("  [rsp+0]   (r15) = {:#x}", *ptr.offset(0));
+        debug!("  [rsp+8]   (r14) = {:#x}", *ptr.offset(1));
+        debug!("  [rsp+16]  (r13) = {:#x}", *ptr.offset(2));
+        debug!("  [rsp+24]  (r12) = {:#x}", *ptr.offset(3));
+        debug!("  [rsp+32]  (r11) = {:#x}", *ptr.offset(4));
+        debug!("  [rsp+40]  (r10) = {:#x}", *ptr.offset(5));
+        debug!("  [rsp+48]  (r9)  = {:#x}", *ptr.offset(6));
+        debug!("  [rsp+56]  (r8)  = {:#x}", *ptr.offset(7));
+        debug!("  [rsp+64]  (rdi) = {:#x}", *ptr.offset(8));
+        debug!("  [rsp+72]  (rsi) = {:#x}", *ptr.offset(9));
+        debug!("  [rsp+80]  (rbp) = {:#x}", *ptr.offset(10));
+        debug!("  [rsp+88]  (rbx) = {:#x}", *ptr.offset(11));
+        debug!("  [rsp+96]  (rdx) = {:#x}", *ptr.offset(12));
+        debug!("  [rsp+104] (rcx) = {:#x}", *ptr.offset(13));
+        debug!("  [rsp+112] (rax) = {:#x}", *ptr.offset(14));
+        debug!("  [rsp+120] (SS)  = {:#x}", *ptr.offset(15));
+        debug!("  [rsp+128] (rsp) = {:#x}", *ptr.offset(16));
+        debug!("  [rsp+136] (flg) = {:#x}", *ptr.offset(17));
+        debug!("  [rsp+144] (cs)  = {:#x}", *ptr.offset(18));
+        debug!("  [rsp+152] (rip) = {:#x}", *ptr.offset(19));
     }
 }
-*/
+// */
 
 /// システムコールハンドラの Rust 実装
 extern "C" fn syscall_handler_rust(

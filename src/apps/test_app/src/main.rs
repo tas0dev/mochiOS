@@ -44,8 +44,6 @@ pub extern "C" fn _start() -> ! {
             print("Sleeping for 100ms...\n");
             sleep(100);
             print("Woke up!\n");
-
-            yield_now();
         }
 
         // 30000回でループを抜ける
