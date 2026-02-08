@@ -41,7 +41,7 @@ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
         halt_forever();
     });
 
-    info!("Starting task scheduler...");
+    debug!("Starting task scheduler...");
     task::start_scheduling();
 }
 

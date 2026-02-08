@@ -3,7 +3,7 @@
 //! 仮想メモリとページテーブル管理
 
 use crate::result::{Kernel, Memory, Result};
-use crate::sprintln;
+use crate::info;
 use spin::Mutex;
 use x86_64::{
     structures::paging::{
@@ -21,14 +21,14 @@ static PHYS_OFFSET: Mutex<Option<u64>> = Mutex::new(None);
 
 /// ページングシステムを初期化
 pub fn init(boot_info: &'static crate::BootInfo) {
-    sprintln!("Initializing paging...");
+    info!("Initializing paging...");
 
     let physical_memory_offset = boot_info.physical_memory_offset;
 
     // 新しいレベル4ページテーブル用のフレームを割り当て
     let l4_frame = frame::allocate_frame().expect("Failed to allocate frame for new page table");
     let l4_table_addr = l4_frame.start_address().as_u64();
-    sprintln!("New L4 table at {:#x}", l4_table_addr);
+    info!("New L4 table at {:#x}", l4_table_addr);
 
     // 新しいページテーブルを初期化
     let l4_table = unsafe { &mut *(l4_table_addr as *mut PageTable) };
@@ -58,7 +58,7 @@ pub fn init(boot_info: &'static crate::BootInfo) {
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) rsp);
     }
-    sprintln!("Current RSP: {:#x}", rsp);
+    info!("Current RSP: {:#x}", rsp);
 
     // マップすべき領域のタイプ
     // 基本的にOSが使用する可能性のある領域はすべてRWでマップする
@@ -76,7 +76,7 @@ pub fn init(boot_info: &'static crate::BootInfo) {
         };
 
         if should_map {
-            sprintln!(
+            crate::debug!(
                 "Mapping region {:?} at {:#x}",
                 region.region_type,
                 region.start
@@ -125,15 +125,15 @@ pub fn init(boot_info: &'static crate::BootInfo) {
     // CR3スイッチ
     drop(allocator_lock);
 
-    sprintln!("Switching to new page table...");
+    crate::debug!("Switching to new page table...");
     unsafe {
         Cr3::write(l4_frame, Cr3Flags::empty());
         *PAGE_TABLE.lock() = Some(page_table);
         *PHYS_OFFSET.lock() = Some(physical_memory_offset);
     }
-    sprintln!("Switched CR3 successfully.");
+    crate::debug!("Switched CR3 successfully.");
 
-    sprintln!(
+    crate::debug!(
         "Paging initialized. New table active. Mapped {} pages.",
         mapped_pages
     );
@@ -236,7 +236,7 @@ pub fn map_and_copy_segment(
         map_page(page, frame, flags)?;
         let page_start = page_addr;
         let phys_frame_addr = frame.start_address().as_u64();
-        crate::info!(
+        crate::debug!(
             "mapped page {:#x} -> phys {:#x}",
             page_start,
             phys_frame_addr

@@ -2,7 +2,7 @@
 //!
 //! GDT、TSS、ページング、フレームアロケータ
 
-use crate::{interrupt, sprintln, MemoryRegion, Result};
+use crate::{debug, info, interrupt, sprintln, MemoryRegion, Result};
 
 pub mod frame;
 pub mod gdt;
@@ -10,7 +10,7 @@ pub mod paging;
 pub mod tss;
 
 pub fn init(boot_info: &'static crate::BootInfo) {
-    sprintln!("Initializing memory...");
+    info!("Initializing memory...");
 
     x86_64::instructions::interrupts::disable();
 
@@ -23,7 +23,7 @@ pub fn init(boot_info: &'static crate::BootInfo) {
     interrupt::disable_pit();
     interrupt::init_pic();
 
-    sprintln!("Memory initialized");
+    debug!("Memory initialized");
 }
 
 /// メモリマップを設定してフレームアロケータを初期化
@@ -31,7 +31,7 @@ pub fn init_frame_allocator(memory_map: &'static [MemoryRegion]) -> Result<()> {
     frame::init(memory_map);
 
     if let Some((total, frames)) = frame::get_memory_info() {
-        sprintln!(
+        debug!(
             "Physical memory: {} MB ({} frames)",
             total / 1024 / 1024,
             frames

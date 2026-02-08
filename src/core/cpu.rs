@@ -7,14 +7,12 @@ use crate::sprintln;
 
 /// CPUの初期化（SSE/FPU有効化）
 pub fn init() {
-    sprintln!("Initializing CPU features...");
+    crate::info!("Initializing CPU features...");
     
     unsafe {
         enable_fpu();
         enable_sse();
     }
-    
-    sprintln!("CPU features initialized (FPU/SSE enabled)");
 }
 
 /// FPUを有効化

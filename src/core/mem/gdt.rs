@@ -3,7 +3,7 @@
 //! Global Descriptor Tableを管理
 
 use crate::mem::tss;
-use crate::sprintln;
+use crate::info;
 use core::arch::asm;
 use spin::Once;
 use x86_64::instructions::tables::load_tss;
@@ -46,7 +46,7 @@ pub fn data_selector() -> SegmentSelector {
 
 /// GDTを初期化
 pub fn init() {
-    sprintln!("Initializing GDT...");
+    info!("Initializing GDT...");
 
     // TSSを初期化
     let tss = tss::init();
@@ -60,12 +60,12 @@ pub fn init() {
         let user_code_selector = gdt.append(Descriptor::user_code_segment());
         let tss_selector = gdt.append(Descriptor::tss_segment(tss));
 
-        sprintln!("GDT entries created:");
-        sprintln!("  Code selector: {:?}", code_selector);
-        sprintln!("  Data selector: {:?}", data_selector);
-        sprintln!("  User data selector: {:?}", user_data_selector);
-        sprintln!("  User code selector: {:?}", user_code_selector);
-        sprintln!("  TSS selector: {:?}", tss_selector);
+        info!("GDT entries created:");
+        info!("  Code selector: {:?}", code_selector);
+        info!("  Data selector: {:?}", data_selector);
+        info!("  User data selector: {:?}", user_data_selector);
+        info!("  User code selector: {:?}", user_code_selector);
+        info!("  TSS selector: {:?}", tss_selector);
 
         (
             gdt,
@@ -91,7 +91,7 @@ pub fn init() {
         load_tss(selectors.tss_selector);
     }
 
-    sprintln!("GDT loaded with TSS");
+    info!("GDT loaded with TSS");
 }
 
 #[allow(unused)]

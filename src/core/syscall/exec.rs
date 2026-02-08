@@ -98,7 +98,7 @@ pub fn exec_kernel(path_ptr: u64) -> u64 {
             return crate::syscall::types::EINVAL;
         }
 
-        crate::info!("exec: created usermode process '{}' (pid={:?}, entry={:#x})", path, pid, entry);
+        crate::debug!("exec: created usermode process '{}' (pid={:?}, entry={:#x})", path, pid, entry);
 
         return pid.as_u64();
     }

@@ -319,7 +319,7 @@ pub fn init() {
         }
     };
 
-    crate::info!(
+    crate::debug!(
         "initfs(ext2): block_size={} inode_size={}",
         sb.block_size,
         sb.inode_size
@@ -330,7 +330,7 @@ pub fn init() {
         crate::debug!("initfs(ext2): {} ({} bytes)", entry.name, entry.data.len());
         count += 1;
     }
-    crate::info!("initfs(ext2): {} entries", count);
+    crate::debug!("initfs(ext2): {} entries", count);
 }
 
 /// ファイルを取得
