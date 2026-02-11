@@ -18,7 +18,7 @@ use x86_64::structures::idt::InterruptStackFrame;
 /// システムコールのディスパッチ
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, _arg3: u64, _arg4: u64) -> u64 {
     match num {
-        x if x == SyscallNumber::Yield as u64 => task::yield_now(),
+        x if x == SyscallNumber::Yield as u64 => { task::yield_now(); 0 },
         x if x == SyscallNumber::GetTicks as u64 => time::get_ticks(),
         x if x == SyscallNumber::IpcSend as u64 => ipc::send(arg0, arg1, arg2),
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),

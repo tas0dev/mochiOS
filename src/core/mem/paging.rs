@@ -117,12 +117,20 @@ pub fn init(boot_info: &'static crate::BootInfo) {
         let is_kernel = rip >= region.start && rip < (region.start + region.len);
         if is_kernel {
              crate::debug!(
-                "Ensure Kernel Code Mapping region {:?} at {:#x}",
+                "Kernel Code in region {:?} at {:#x} - {:#x}",
                 region.region_type,
-                region.start
+                region.start,
+                region.start + region.len
             );
-            // マップ処理は上のループでやっているはずだが、もし `match` で除外されていたらマップする
-            // LoaderCodeなどは上の `_ => true` でマップされているはず
+        }
+        let is_stack = rsp >= region.start && rsp < (region.start + region.len);
+        if is_stack {
+             crate::debug!(
+                "Kernel Stack in region {:?} at {:#x} - {:#x}",
+                region.region_type,
+                region.start,
+                region.start + region.len
+            );
         }
     }
 

@@ -82,7 +82,30 @@ impl Thread {
         name_buf[..len].copy_from_slice(&bytes[..len]);
 
         let mut context = Context::new();
-// ... (existing code for stack setup) ...
+
+        // スタックポインタをスタックの最後に設定（スタックは下に伸びる）
+        // 16バイト境界に合わせる
+        let stack_top = (kernel_stack + kernel_stack_size as u64) & !0xF;
+
+        // 呼び出し規約に合わせて、戻り先アドレス用のスロットを確保
+        let stack_ptr = stack_top - 8;
+
+        unsafe {
+            // 戻り先として thread_exit_handler を配置
+            let ret_addr = stack_ptr as *mut u64;
+            *ret_addr = thread_exit_handler as *const () as u64;
+        }
+
+        // rsp は「戻り先アドレスが置かれている位置」を指す
+        context.rsp = stack_ptr;
+        context.rbp = stack_top;
+
+        // エントリーポイントをripに設定
+        context.rip = entry_point as u64;
+
+        // RFLAGSの初期値（割り込み有効）
+        context.rflags = 0x202; // IF (Interrupt Flag) = 1
+
         crate::debug!(
             "Creating thread '{}': stack={:#x}, size={:#x}, rsp={:#x}, rip={:#x}",
             name,
@@ -130,7 +153,34 @@ impl Thread {
 
         // カーネルスタックを設定（ユーザーモードからシステムコール時に使用）
         let mut context = Context::new();
-// ... (existing code) ...
+        let stack_top = (kernel_stack + kernel_stack_size as u64) & !0xF;
+
+        // ユーザーモードへジャンプするトランポリン関数を設定
+        extern "C" fn usermode_entry_trampoline() -> ! {
+            // この関数は各スレッドが最初に実行される
+            // スレッド固有のuser_entryとuser_stackを取得してジャンプする
+            let tid = current_thread_id().expect("No current thread");
+            let (entry, stack) = with_thread(tid, |thread| {
+                (thread.user_entry(), thread.user_stack())
+            }).expect("Thread not found");
+
+            crate::debug!("Jumping to usermode: entry={:#x}, stack={:#x}", entry, stack);
+            unsafe {
+                crate::task::jump_to_usermode(entry, stack);
+            }
+        }
+
+        let stack_ptr = stack_top - 8;
+        unsafe {
+            let ret_addr = stack_ptr as *mut u64;
+            *ret_addr = thread_exit_handler as *const () as u64;
+        }
+
+        context.rsp = stack_ptr;
+        context.rbp = stack_top;
+        context.rip = usermode_entry_trampoline as *const () as u64;
+        context.rflags = 0x202;
+
         crate::debug!(
             "Creating usermode thread '{}': user_entry={:#x}, user_stack={:#x}",
             name,

@@ -1,5 +1,5 @@
-use super::ids::ThreadId;
-use super::thread::THREAD_QUEUE;
+use crate::task::ids::ThreadId;
+use crate::task::thread::THREAD_QUEUE;
 
 /// CPUコンテキスト（レジスタ保存用）
 #[derive(Debug, Clone, Copy)]
@@ -15,6 +15,8 @@ pub struct Context {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
+    pub rdi: u64, // MS ABI Callee-saved
+    pub rsi: u64, // MS ABI Callee-saved
     /// 命令ポインタ（戻り先アドレス）
     pub rip: u64,
     /// RFLAGSレジスタ
@@ -32,6 +34,8 @@ impl Context {
             r13: 0,
             r14: 0,
             r15: 0,
+            rdi: 0,
+            rsi: 0,
             rip: 0,
             rflags: 0,
         }
@@ -50,8 +54,10 @@ impl Context {
 /// offset 0x20: r13
 /// offset 0x28: r14
 /// offset 0x30: r15
-/// offset 0x38: rip
-/// offset 0x40: rflags
+/// offset 0x38: rdi
+/// offset 0x40: rsi
+/// offset 0x48: rip
+/// offset 0x50: rflags
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn switch_context(old_context: *mut Context, new_context: *const Context) {
@@ -61,31 +67,76 @@ pub unsafe extern "C" fn switch_context(old_context: *mut Context, new_context: 
         // 現在のコンテキストを保存
         // 呼び出し元に戻った後の rsp を保存（ret 相当）
         "lea rax, [rsp + 0x08]",
-        // UEFI (x86_64-unknown-uefi) は Microsoft x64 ABI: rcx, rdx が引数
-        "mov [rcx + 0x00], rax", // rsp
-        "mov [rcx + 0x08], rbp", // rbp
-        "mov [rcx + 0x10], rbx", // rbx
-        "mov [rcx + 0x18], r12", // r12
-        "mov [rcx + 0x20], r13", // r13
-        "mov [rcx + 0x28], r14", // r14
-        "mov [rcx + 0x30], r15", // r15
+        // System V AMD64 ABI (Rust default on x86_64-unknown-none):
+        // 第1引数 (old_context) = rdi
+        // 第2引数 (new_context) = rsi
+        "mov [rdi + 0x00], rax", // rsp
+        "mov [rdi + 0x08], rbp", // rbp
+        "mov [rdi + 0x10], rbx", // rbx
+        "mov [rdi + 0x18], r12", // r12
+        "mov [rdi + 0x20], r13", // r13
+        "mov [rdi + 0x28], r14", // r14
+        "mov [rdi + 0x30], r15", // r15
+        "mov [rdi + 0x38], rdi", // rdi (保存)
+        "mov [rdi + 0x40], rsi", // rsi (保存)
         // 戻り先アドレス（call命令でスタックにpushされている）を保存
         "mov rax, [rsp]",
-        "mov [rcx + 0x38], rax", // rip
+        "mov [rdi + 0x48], rax", // rip
         // RFLAGSを保存
         "pushfq",
         "pop rax",
-        "mov [rcx + 0x40], rax", // rflags
+        "mov [rdi + 0x50], rax", // rflags
         // 新しいコンテキストを復元
-        "mov rax, [rdx + 0x38]", // 新しいrip
-        "mov r11, [rdx + 0x40]", // 新しいrflags
-        "mov rbx, [rdx + 0x10]", // rbx
-        "mov r12, [rdx + 0x18]", // r12
-        "mov r13, [rdx + 0x20]", // r13
-        "mov r14, [rdx + 0x28]", // r14
-        "mov r15, [rdx + 0x30]", // r15
-        "mov rbp, [rdx + 0x08]", // rbp
-        "mov rsp, [rdx + 0x00]", // rsp
+        "mov rax, [rsi + 0x48]", // 新しいrip
+        "mov r11, [rsi + 0x50]", // 新しいrflags
+        "mov rbx, [rsi + 0x10]", // rbx
+        "mov r12, [rsi + 0x18]", // r12
+        "mov r13, [rsi + 0x20]", // r13
+        "mov r14, [rsi + 0x28]", // r14
+        "mov r15, [rsi + 0x30]", // r15
+        "mov rdi, [rsi + 0x38]", // rdi (復元)
+        // rsi needs to be restored LAST because it holds the pointer to new_context
+        // But we need to restore rsi from [rsi + 0x40].
+        // So we load it into a temp register (rax is free now since we used it for rip, waits no we jump to rax)
+        // We can use rbp or something? No, rbp restored.
+        // We can use the STACK or a temp register?
+        // r11 holds rflags, we push it after.
+        // Let's use rax for rsi_value.
+        "mov rax, [rsi + 0x40]", // rsi (value to restore)
+        "mov rsi, rax",           // rsi restored (now rsi pointer is lost, but we don't need it anymore except for next fields... wait)
+
+        // Wait, we need [rsi + 0x48] (RIP) and [rsi + 0x00] (RSP) and [rsi + 0x08] (RBP).
+        // I restored rbp from [rsi + 0x08] ALREADY?
+        // Let's reorder.
+
+        // 1. Load everything we need from [rsi] while [rsi] is still valid.
+        "mov rbp, [rsi + 0x08]", // rbp
+        "mov rsp, [rsi + 0x00]", // rsp
+        "mov rax, [rsi + 0x48]", // rip (target)
+
+        // 2. Restore GPRs
+        // rbx, r12, r13, r14, r15 done above or here.
+        // rdi restored above or here.
+        // rsi restored LAST.
+
+        // Let's rewrite the restore part clearly
+        "mov rbx, [rsi + 0x10]", // rbx
+        "mov r12, [rsi + 0x18]", // r12
+        "mov r13, [rsi + 0x20]", // r13
+        "mov r14, [rsi + 0x28]", // r14
+        "mov r15, [rsi + 0x30]", // r15
+        "mov rdi, [rsi + 0x38]", // rdi
+        // Now carefully restore rsi. We need rsi pointer to read rsi value.
+        // But we also need 'rax' (rip) and 'r11' (rflags) preserved.
+        // We can push rsi value to stack? But we just switched stack!
+        // Yes, we switched RSP to new stack. We can push to new stack?
+        // But we assume the stack is clean/prepared.
+        // We can just use a register that we haven't restored yet, or overwrite one temp.
+        // We haven't restored 'rsi' yet.
+        // We can use 'rcx' or 'rdx' as scratch! (Caller saved).
+        "mov rcx, [rsi + 0x40]", // load new rsi value into rcx
+        "mov rsi, rcx",           // restore rsi
+
         // RFLAGSを復元
         "push r11",
         "popfq",
@@ -96,6 +147,10 @@ pub unsafe extern "C" fn switch_context(old_context: *mut Context, new_context: 
 
 /// 現在のスレッドから指定されたスレッドIDにコンテキストスイッチ
 pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) {
+    // コンテキストスイッチ中は割り込みを禁止する
+    // ロック解放からコンテキストスイッチまでの間に割り込みが入ると不整合が起きる可能性があるため
+    x86_64::instructions::interrupts::disable();
+
     crate::debug!(
         "switch_to_thread: current_id={:?}, next_id={:?}",
         current_id,
@@ -151,26 +206,29 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
         let ctx = &*new_context_ptr;
         core::arch::asm!(
             "cli",
-            "mov rsp, {rsp}",
-            "mov rbp, {rbp}",
-            "mov rbx, {rbx}",
-            "mov r12, {r12}",
-            "mov r13, {r13}",
-            "mov r14, {r14}",
-            "mov r15, {r15}",
-            "push {rflags}",
-            "popfq",
-            // エントリへジャンプ
-            "jmp {rip}",
-            rsp = in(reg) ctx.rsp,
-            rbp = in(reg) ctx.rbp,
-            rbx = in(reg) ctx.rbx,
-            r12 = in(reg) ctx.r12,
-            r13 = in(reg) ctx.r13,
-            r14 = in(reg) ctx.r14,
-            r15 = in(reg) ctx.r15,
-            rflags = in(reg) ctx.rflags,
-            rip = in(reg) ctx.rip,
+            "mov rsp, rax",       // rsp = ctx.rsp
+            "mov rbp, {rbp_val}", // Restore rbp
+            "mov rbx, {rbx_val}", // Restore rbx
+            "push rcx",           // push rflags
+            "popfq",              // restore rflags
+            "jmp rdx",            // jump to rip
+
+            // Fixed registers
+            in("rax") ctx.rsp,
+            in("rcx") ctx.rflags,
+            in("rdx") ctx.rip,
+
+            in("r12") ctx.r12,
+            in("r13") ctx.r13,
+            in("r14") ctx.r14,
+            in("r15") ctx.r15,
+            in("rdi") ctx.rdi,
+            in("rsi") ctx.rsi,
+
+            // Compiler allocated registers (will use r8-r11)
+            rbp_val = in(reg) ctx.rbp,
+            rbx_val = in(reg) ctx.rbx,
+
             options(noreturn)
         );
     } else {
@@ -183,4 +241,5 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
         switch_context(old_context_ptr, new_context_ptr);
         crate::debug!("  Returned from switch_context");
     }
+    crate::debug!("  End of switch_to_thread");
 }

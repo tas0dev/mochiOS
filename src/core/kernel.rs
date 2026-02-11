@@ -47,7 +47,7 @@ fn kernel_main() -> ! {
 /// カーネルエントリポイント
 #[no_mangle]
 pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
-    util::log::set_level(util::log::LogLevel::Info);
+    util::log::set_level(util::log::LogLevel::Debug);
     let memory_map = match kinit(boot_info) {
         Ok(map) => map,
         Err(e) => {
