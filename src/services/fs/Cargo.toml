@@ -10,7 +10,7 @@ test = false
 bench = false
 
 [dependencies]
-std = { path = "../../lib" }
+std = { path = "../../lib", package = "swiftcore_std" }
 
 [profile.dev]
 panic = "abort"

@@ -36,7 +36,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "std"
+name = "swiftcore_std"
 version = "0.1.0"
 dependencies = [
  "linked_list_allocator",
@@ -46,5 +46,5 @@ dependencies = [
 name = "test_app"
 version = "0.1.0"
 dependencies = [
- "std",
+ "swiftcore_std",
 ]

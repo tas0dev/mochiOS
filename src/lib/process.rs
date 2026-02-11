@@ -15,3 +15,17 @@ pub fn id() -> u64 {
     }
 }
 
+pub fn find_by_name(name: &str) -> Option<u64> {
+     let ret = unsafe {
+        crate::sys::syscall2(
+            SyscallNumber::FindProcessByName as u64,
+            name.as_ptr() as u64,
+            name.len() as u64,
+        )
+    };
+    if ret == 0 {
+        None
+    } else {
+        Some(ret)
+    }
+}
