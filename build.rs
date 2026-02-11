@@ -8,8 +8,8 @@ fn main() {
     let apps_dir = manifest_dir.join("src/apps");
     let services_dir = manifest_dir.join("src/services");
 
-    let initfs_dir_core = manifest_dir.join("src/initfs");
-    let initfs_dir = initfs_dir_core;
+    // fsディレクトリを使用（プロジェクトルート直下）
+    let initfs_dir = manifest_dir.join("fs");
 
     // initfsディレクトリが存在しない場合、作成
     if !initfs_dir.is_dir() {

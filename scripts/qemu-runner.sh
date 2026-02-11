@@ -33,6 +33,7 @@ if [ ! -f "$EFI_FILE" ]; then
 fi
 
 TEMP_DIR=$(mktemp -d)
+# shellcheck disable=SC2064
 trap "rm -rf $TEMP_DIR" EXIT
 
 mkdir -p "$TEMP_DIR/esp/EFI/BOOT"
@@ -42,6 +43,7 @@ cp "$EFI_FILE" "$TEMP_DIR/esp/EFI/BOOT/BOOTX64.EFI"
 exec qemu-system-x86_64 \
     -bios "$OVMF" \
     -drive format=raw,file=fat:rw:"$TEMP_DIR/esp" \
+    -drive id=disk0,file=target/swiftCore.img,format=raw,if=ide,index=0,media=disk \
     -net none \
     -m 512M \
     -serial stdio \
