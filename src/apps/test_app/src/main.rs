@@ -2,18 +2,18 @@
 #![no_main]
 
 #[macro_use]
-extern crate swiftcore_std;
+extern crate std;
 extern crate alloc;
 
 use core::panic::PanicInfo;
-use swiftcore_std::{process, thread};
-use swiftcore_std::fs::File;
+use std::{process, thread};
+use std::fs::File;
 use alloc::string::String;
 
 /// ユーザーアプリのエントリーポイント
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    swiftcore_std::heap::init();
+    std::heap::init();
     println!("TestApp Started with swift_std (High Level API)!");
 
     // ファイルを開く

@@ -1,10 +1,10 @@
 [package]
-name = "swiftcore_std"
+name = "std"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "swiftcore_std"
+name = "std"
 path = "lib.rs"
 crate-type = ["rlib"]
 test = false

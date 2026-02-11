@@ -11,5 +11,11 @@ pub mod process;
 pub mod thread;
 pub mod fs;
 pub mod heap;
+pub mod ipc;
+
+#[alloc_error_handler]
+pub fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+    panic!("allocation error: {:?}", layout)
+}
 
 pub use io::{_print};

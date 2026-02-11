@@ -3,13 +3,6 @@ name = "fs_service"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "fs_service"
-path = "src/lib.rs"
-crate-type = ["rlib"]
-test = false
-bench = false
-
 [[bin]]
 name = "fs_service"
 path = "src/main.rs"
@@ -17,6 +10,7 @@ test = false
 bench = false
 
 [dependencies]
+std = { path = "../../lib" }
 
 [profile.dev]
 panic = "abort"
