@@ -36,6 +36,20 @@ pub enum SyscallNumber {
     Fork = 14,
     /// Wait
     Wait = 15,
+    /// メモリブレーク
+    Brk = 16,
+    /// ファイルシーク
+    Lseek = 17,
+    /// ファイル情報取得
+    Fstat = 18,
+    /// 名前からプロセスIDを検索
+    FindProcessByName = 19,
+    /// カーネルログを出力
+    Log = 20,
+    /// I/Oポート入力
+    PortIn = 21,
+    /// I/Oポート出力
+    PortOut = 22,
 }
 
 #[inline(always)]
