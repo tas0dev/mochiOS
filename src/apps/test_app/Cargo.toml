@@ -10,6 +10,7 @@ test = false
 bench = false
 
 [dependencies]
+swiftlib = { path = "../../user" }
 
 [profile.dev]
 panic = "abort"

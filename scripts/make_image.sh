@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 # initfsディレクトリの場所
 INITFS_DIR="fs"
 OUTPUT_IMG="target/swiftCore.img"
-SIZE="32M"
+SIZE="128M"
 
 echo "Creating disk image: $OUTPUT_IMG (Source: $INITFS_DIR)"
 
