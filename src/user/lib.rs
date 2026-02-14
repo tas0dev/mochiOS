@@ -17,14 +17,13 @@ pub mod task;
 pub mod time;
 /// 入出力関連のシステムコール
 pub mod io;
+pub mod cfunc;
 
 use core::panic::PanicInfo;
+use cfunc::*;
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    // 簡易的なパニックハンドラ
-    // _writeを使ってエラー出力できればベストだが、
-    // ここでは無限ループするか、exit(1)する
     // TODO: 今後改修する
     unsafe {
        // 強制終了
@@ -67,11 +66,3 @@ unsafe impl GlobalAlloc for NewlibAllocator {
 
 #[global_allocator]
 static ALLOCATOR: NewlibAllocator = NewlibAllocator;
-
-#[allow(dead_code)]
-extern "C" {
-    fn malloc(size: usize) -> *mut u8;
-    fn free(ptr: *mut u8);
-    fn realloc(ptr: *mut u8, size: usize) -> *mut u8;
-    fn memalign(alignment: usize, size: usize) -> *mut u8;
-}

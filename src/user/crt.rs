@@ -9,13 +9,20 @@ global_asm!(
     ".section .text",
     ".global _start",
     "_start:",
-    // カーネルによってスタックは既にアロケートされている
+    // カーネルによってスタック上に argc, argv, envp が構築されている。
+    // RSP は argc を指している。
+
+    // argc を取得 (RDI)
+    "pop rdi",
+
+    // argv を取得 (RSI)
+    // argc を pop した直後の rsp が argv 配列の先頭を指している
+    "mov rsi, rsp",
+
+    // スタックアライメント
+    // main 呼び出し前に rsp を 16バイト境界に合わせる
     "and rsp, -16",
 
-    // argc, argv の準備
-    // 現在のカーネル実装では引数は渡されていないため、argc=0, argv=NULL とする
-    "xor edi, edi", // argc = 0
-    "xor esi, esi", // argv = NULL
 
     "call main",
 
