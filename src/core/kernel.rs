@@ -4,6 +4,7 @@ use crate::{debug, info, sprintln, vprintln};
 use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
 use crate::init::fs::{read, entries};
 use crate::syscall::exec::{exec_kernel, exec_kernel_with_name};
+use crate::util::log::LogLevel;
 
 const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 8;
 
@@ -14,7 +15,7 @@ static mut KERNEL_THREAD_STACK: KernelStack = KernelStack([0; KERNEL_THREAD_STAC
 
 /// カーネルメイン関数
 fn kernel_main() -> ! {
-    util::log::set_level(util::log::LogLevel::Info);
+    util::log::set_level(LogLevel::Info);
     debug!("Kernel started");
 
     // .service ファイルを自動実行
