@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::utils::{emit_rerun_if_changed, find_binary_in_dir, find_target_spec};
+use super::utils::{emit_rerun_if_changed, find_binary_in_dir, find_target_spec};
 
 /// アプリケーションをビルドして指定ディレクトリにコピー
 pub fn build_apps(apps_dir: &Path, output_dir: &Path, extension: &str) {

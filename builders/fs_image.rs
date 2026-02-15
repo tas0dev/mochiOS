@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::utils::emit_rerun_if_changed;
+use super::utils::emit_rerun_if_changed;
 
 /// InitFS (ramfs) 用のext2イメージを生成
 pub fn create_initfs_image(ramfs_dir: &Path, output_path: &Path) -> Result<(), String> {
@@ -14,7 +14,7 @@ pub fn create_initfs_image(ramfs_dir: &Path, output_path: &Path) -> Result<(), S
         .args(["-t", "ext2", "-b", "4096", "-m", "0", "-L", "initfs", "-d"])
         .arg(ramfs_dir)
         .arg(output_path)
-        .arg("8192") // 32MB (8192 * 4KB blocks)
+        .arg("16384") // 64MB (16384 * 4KB blocks) - initfs用に十分なサイズ
         .status();
 
     match status {

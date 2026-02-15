@@ -1,10 +1,10 @@
-mod build;
+mod builders;
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use build::{
+use builders::{
     build_apps, build_newlib, build_service, build_user_libs, copy_newlib_libs,
     create_ext2_image, create_initfs_image, parse_service_index,
 };
@@ -12,7 +12,7 @@ use build::{
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
-    // ramfs と fs ディレクトリを作成
+    // ramfsとfsディレクトリを作成
     let ramfs_dir = manifest_dir.join("ramfs");
     let fs_dir = manifest_dir.join("fs");
 
