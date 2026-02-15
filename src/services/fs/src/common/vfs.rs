@@ -126,6 +126,7 @@ pub trait FileSystem: Send + Sync {
 /// ファイルハンドル
 ///
 /// オープンされたファイルの状態を保持
+#[derive(Debug, Clone, Copy)]
 pub struct FileHandle {
     pub inode: u64,
     pub offset: u64,

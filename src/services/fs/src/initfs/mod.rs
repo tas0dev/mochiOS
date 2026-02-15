@@ -1,6 +1,7 @@
 //! InitFS - メモリ内ファイルシステム
 //!
 //! システム起動時に使用される簡易的なRAMベースファイルシステム
+//! 猫も杓子もInitFS！（？？？
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -354,7 +355,7 @@ impl FileSystem for InitFs {
     }
 
     fn sync(&mut self) -> VfsResult<()> {
-        // メモリ上なので何もしない
+        // メモリ上なので何もしない。だって再起動したら全部どっか行ってるし書き込みできないから
         Ok(())
     }
 }
