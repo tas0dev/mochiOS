@@ -11,6 +11,8 @@ pub struct ServiceEntry {
     pub dir: String,
     pub fs_type: String,
     pub description: String,
+    pub autostart: bool,
+    pub order: u32,
 }
 
 /// index.tomlを解析してサービス情報を取得
@@ -25,12 +27,14 @@ pub fn parse_service_index(index_path: &Path) -> Result<Vec<ServiceEntry>, Strin
     let mut current_dir = String::new();
     let mut current_fs = String::new();
     let mut current_desc = String::new();
+    let mut current_autostart = false;
+    let mut current_order = 999;
 
     for line in content.lines() {
         let line = line.trim();
 
-        // [core.service.NAME] を解析
-        if line.starts_with("[core.service.") && line.ends_with(']') {
+        // [core.service] または [core.service.NAME] を解析
+        if line.starts_with("[core.service") && line.ends_with(']') {
             // 前のサービスを保存
             if !current_service.is_empty() {
                 services.push(ServiceEntry {
@@ -38,23 +42,32 @@ pub fn parse_service_index(index_path: &Path) -> Result<Vec<ServiceEntry>, Strin
                     dir: current_dir.clone(),
                     fs_type: current_fs.clone(),
                     description: current_desc.clone(),
+                    autostart: current_autostart,
+                    order: current_order,
                 });
             }
 
             // 新しいサービス名を取得
-            let start = "[core.service.".len();
-            let end = line.len() - 1;
-            current_service = line[start..end].to_string();
+            if line == "[core.service]" {
+                current_service = "core".to_string();
+            } else if line.starts_with("[core.service.") {
+                let start = "[core.service.".len();
+                let end = line.len() - 1;
+                current_service = line[start..end].to_string();
+            }
+            
             current_dir.clear();
             current_fs.clear();
             current_desc.clear();
+            current_autostart = false;
+            current_order = 999;
         } else if line.starts_with("dir = ") {
             current_dir = line["dir = ".len()..]
                 .trim_matches('"')
                 .trim_matches('\'')
                 .to_string();
-        } else if line.starts_with("fs = ") {
-            current_fs = line["fs = ".len()..]
+        } else if line.starts_with("fs_type = ") {
+            current_fs = line["fs_type = ".len()..]
                 .trim_matches('"')
                 .trim_matches('\'')
                 .to_string();
@@ -63,6 +76,16 @@ pub fn parse_service_index(index_path: &Path) -> Result<Vec<ServiceEntry>, Strin
                 .trim_matches('"')
                 .trim_matches('\'')
                 .to_string();
+        } else if line.starts_with("autostart = ") {
+            current_autostart = line["autostart = ".len()..]
+                .trim()
+                .parse()
+                .unwrap_or(false);
+        } else if line.starts_with("order = ") {
+            current_order = line["order = ".len()..]
+                .trim()
+                .parse()
+                .unwrap_or(999);
         }
     }
 
@@ -73,8 +96,13 @@ pub fn parse_service_index(index_path: &Path) -> Result<Vec<ServiceEntry>, Strin
             dir: current_dir,
             fs_type: current_fs,
             description: current_desc,
+            autostart: current_autostart,
+            order: current_order,
         });
     }
+
+    // order順にソート
+    services.sort_by_key(|s| s.order);
 
     Ok(services)
 }

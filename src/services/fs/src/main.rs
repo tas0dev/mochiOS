@@ -126,9 +126,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     loop {
         let (sender, len) = ipc::ipc_recv(&mut recv_buf.0);
 
-        // EAGAIN (メッセージなし) の場合はスキップ
+        // EAGAIN (メッセージなし) の場合はCPUを譲る
         // EAGAIN時、sender=0xFFFFFFFF, len=0xFFFFFFFD になる
         if sender == 0xFFFFFFFF || len == 0xFFFFFFFD {
+            task::yield_now();
             continue;
         }
 

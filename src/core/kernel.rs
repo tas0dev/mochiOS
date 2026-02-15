@@ -2,8 +2,7 @@ use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
 use crate::{debug, info, sprintln, vprintln};
 use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
-use crate::init::fs::{read, entries};
-use crate::syscall::exec::{exec_kernel, exec_kernel_with_name};
+use crate::syscall::exec::exec_kernel_with_name;
 use crate::util::log::LogLevel;
 
 const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 8;
@@ -18,27 +17,12 @@ fn kernel_main() -> ! {
     util::log::set_level(LogLevel::Info);
     debug!("Kernel started");
 
-    // .service ファイルを自動実行
-    for entry in entries() {
-        if entry.name.ends_with(".service") {
-            // パス文字列の準備
-            let path = entry.name;
+    // core.service のみを起動（他のサービスはcore.serviceが管理）
+    info!("Starting core.service (Service Manager)");
+    exec_kernel_with_name("core.service", "core.service");
 
-            // サービス名（ドメイン）のマッピング
-            let service_name = match path {
-                "initfs.service" => "core.service.initfs",
-                "test_service.service" => "ext.service.test",
-                _ => path,
-            };
-
-            info!("Starting service: {} as {}", path, service_name);
-
-            exec_kernel_with_name(path, service_name);
-        }
-    }
-    let test_elf_path = "test_app.elf\0";
-    exec_kernel(test_elf_path.as_ptr() as u64);
-
+    // カーネルはアイドル状態に入る
+    info!("Kernel initialization complete. Entering idle loop...");
     loop {
         x86_64::instructions::hlt();
     }

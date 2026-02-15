@@ -1,12 +1,24 @@
 # サービスの定義
 #
 # 形式:
-# [core.service.サービス名]
+# [service.サービス名]
 # description = サービスの説明
 # dir = サービスのディレクトリ
-# fs = サービスをどのファイルシステムに配置するか（initfsまたはext2）
+# fs_type = サービスをどのファイルシステムに配置するか（initfs または ext2）
+# autostart = カーネル起動時に自動起動するか（core.serviceのみtrue、他はfalse）
+# order = 起動順序（数値が小さいほど先に起動、core.serviceが他を起動）
+
+[core.service]
+description = "Core service / system manager"
+dir = "core"
+fs_type = "initfs"
+autostart = true
+order = 0
 
 [core.service.fs]
-description = ファイルシステムの管理とディスクの管理（ディスクのマウントやアンマウントなど）
-dir = fs
-fs = initfs
+description = "Filesystem manager - handles VFS, initfs, ext2"
+dir = "fs"
+fs_type = "initfs"
+autostart = false
+order = 10
+dependencies = []
