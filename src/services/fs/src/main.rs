@@ -13,9 +13,12 @@ use swiftlib::task;
 mod common;
 mod initfs;
 mod ext2;
+mod disk_device;
 
 use common::{FileHandle, FileSystem, VfsError, resolve_path};
 use initfs::InitFs;
+use ext2::Ext2Fs;
+use disk_device::DiskServiceDevice;
 
 const MAX_HANDLES: usize = 16;
 
