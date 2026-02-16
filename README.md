@@ -1,7 +1,6 @@
 <h1 align="center">SwiftCore</h1>
 <div align="center">
     <a href="https://deepwiki.com/tas0dev/SwiftCore" target="_blank"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
-    <a href="./LICENSE" target="_blank"><img src="https://img.shields.io/github/license/tas0dev/SwiftCore" alt="License" /></a>
     <a href="https://deps.rs/repo/github/tas0dev/SwiftCore" target="_blank"><img src="https://deps.rs/repo/github/tas0dev/SwiftCore/status.svg" alt="dependency status" /></a>
 </div>
 
