@@ -1,10 +1,12 @@
 [build]
 target = "../../x86_64-swiftcore.json"
 
+[unstable]
+build-std = ["std", "panic_abort"]
+build-std-features = ["compiler-builtins-mem"]
+
 [target.x86_64-swiftcore]
 rustflags = [
     "-C", "link-arg=-nostdlib",
-    "--cfg", "libc_priv_libc",
-    "--cfg", "libc_core_cstd",
-    "--cfg", "target_os=\"freebsd\"", 
+    "-C", "panic=abort",
 ]

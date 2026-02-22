@@ -1,7 +1,7 @@
 //! プロセス管理関連のシステムコール
 
 use crate::task::{exit_current_task, current_thread_id};
-use super::types::{SUCCESS, ENOSYS};
+use super::types::{SUCCESS, ENOSYS, EINVAL, EFAULT, ENOMEM};
 
 /// Exitシステムコール
 ///
@@ -153,6 +153,162 @@ pub fn sleep(milliseconds: u64) -> u64 {
 /// Waitシステムコール
 pub fn wait(_pid: u64, _status_ptr: u64) -> u64 {
     ENOSYS
+}
+
+/// Mmapシステムコール
+///
+/// 匿名メモリマッピングを作成する (MAP_ANONYMOUS | MAP_PRIVATE のみサポート)
+///
+/// # 引数
+/// - `addr`: ヒント仮想アドレス (0で任意)
+/// - `length`: マップするサイズ
+/// - `prot`: 保護フラグ (PROT_READ|PROT_WRITE = 3)
+/// - `flags`: マップフラグ (MAP_ANONYMOUS=0x20, MAP_PRIVATE=0x2)
+/// - `_fd`: ファイルディスクリプタ (-1 = 匿名)
+///
+/// # 戻り値
+/// マップされた仮想アドレス、またはエラーコード
+pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
+    use super::types::{EINVAL, ENOMEM};
+
+    if length == 0 {
+        return EINVAL;
+    }
+
+    // MAP_ANONYMOUS (0x20) のみサポート
+    const MAP_ANONYMOUS: u64 = 0x20;
+    if flags & MAP_ANONYMOUS == 0 {
+        return ENOSYS;
+    }
+
+    let current_tid = match crate::task::current_thread_id() {
+        Some(tid) => tid,
+        None => return ENOMEM,
+    };
+    let pid = match crate::task::with_thread(current_tid, |t| t.process_id()) {
+        Some(pid) => pid,
+        None => return ENOMEM,
+    };
+
+    // ページ境界に切り上げ
+    let size = (length + 4095) & !4095;
+
+    let result = crate::task::with_process_mut(pid, |process| {
+        // mmap用のヒープ領域を現在のbrk以降に割り当てる
+        // (簡易実装: brkと同じ領域を使う)
+        if process.heap_start() == 0 {
+            let default_heap_base = 0x5000_0000u64;
+            process.set_heap_start(default_heap_base);
+            process.set_heap_end(default_heap_base);
+        }
+
+        let map_start = if addr != 0 {
+            (addr + 4095) & !4095
+        } else {
+            // heap_endを mmap_base として使う（簡易実装）
+            // 実際は別のアドレス空間管理が必要
+            let base = process.heap_end();
+            (base + 4095) & !4095
+        };
+
+        let pt_phys = match process.page_table() {
+            Some(p) => p,
+            None => return Err(ENOMEM),
+        };
+
+        if let Err(_) = crate::mem::paging::map_and_copy_segment_to(
+            pt_phys,
+            map_start,
+            0,
+            size,
+            &[],
+            true,
+            false,
+        ) {
+            return Err(ENOMEM);
+        }
+
+        // heap_end を更新してアドレス空間が重ならないようにする
+        if addr == 0 {
+            process.set_heap_end(map_start + size);
+        }
+
+        Ok(map_start)
+    });
+
+    match result {
+        Some(Ok(va)) => va,
+        Some(Err(e)) => e,
+        None => ENOMEM,
+    }
+}
+
+/// Munmapシステムコール (スタブ)
+pub fn munmap(_addr: u64, _length: u64) -> u64 {
+    // TODO: ページテーブルからマッピングを削除する
+    SUCCESS
+}
+
+/// Futexシステムコール (最小実装)
+///
+/// FUTEX_WAIT と FUTEX_WAKE のみサポート
+pub fn futex(uaddr: u64, op: u32, val: u64, _timeout: u64) -> u64 {
+    use super::types::EAGAIN;
+    const FUTEX_WAIT: u32 = 0;
+    const FUTEX_WAKE: u32 = 1;
+    const FUTEX_PRIVATE_FLAG: u32 = 128;
+
+    let op_base = op & !FUTEX_PRIVATE_FLAG;
+
+    match op_base {
+        FUTEX_WAIT => {
+            if uaddr == 0 {
+                return EFAULT;
+            }
+            let current_val = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+            if current_val != val as u32 {
+                return EAGAIN;
+            }
+            // 簡易実装: yield して再試行させる
+            crate::task::yield_now();
+            SUCCESS
+        }
+        FUTEX_WAKE => {
+            // Wake は何もしなくても yield ベースで動く
+            SUCCESS
+        }
+        _ => ENOSYS,
+    }
+}
+
+/// arch_prctlシステムコール
+///
+/// TLS 用の FS ベースレジスタを設定する
+pub fn arch_prctl(code: u64, addr: u64) -> u64 {
+    const ARCH_SET_FS: u64 = 0x1002;
+    const ARCH_GET_FS: u64 = 0x1003;
+
+    match code {
+        ARCH_SET_FS => {
+            // FS ベースレジスタを設定 (WRFSBASE または IA32_FS_BASE MSR)
+            unsafe { crate::cpu::write_fs_base(addr); }
+            // 現在のスレッドに FS base を記録 (コンテキストスイッチ時に復元するため)
+            if let Some(tid) = crate::task::current_thread_id() {
+                crate::task::with_thread_mut(tid, |t| t.set_fs_base(addr));
+            }
+            SUCCESS
+        }
+        ARCH_GET_FS => {
+            let val = unsafe { crate::cpu::read_fs_base() };
+            // addrが指すメモリに書き込む
+            if addr == 0 {
+                return EFAULT;
+            }
+            unsafe { core::ptr::write(addr as *mut u64, val) };
+            SUCCESS
+        }
+        _ => EINVAL,
+    }
 }
 
 /// FindProcessByNameシステムコール

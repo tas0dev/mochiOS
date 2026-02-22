@@ -145,20 +145,39 @@ pub fn build_service(
         emit_rerun_if_changed(&src_dir);
     }
 
-    // カスタムターゲットファイルを探す
-    let target_spec = find_target_spec(&service_dir);
+    // .cargo/config.toml にtargetが設定されているか確認
+    let cargo_config = service_dir.join(".cargo/config.toml");
+    let has_config_target = std::fs::read_to_string(&cargo_config)
+        .map(|s| s.contains("[build]") && s.contains("target"))
+        .unwrap_or(false);
 
     // cargoでサービスをビルド
     let mut cmd = Command::new("cargo");
-    cmd.args(["build", "--release"]);
+    cmd.args(["build"]);
 
-    if let Some(target) = &target_spec {
-        cmd.arg("--target").arg(target);
-        println!("  Using target: {}", target);
+    // 外側の cargo ビルドの環境変数をクリア (干渉を防ぐ)
+    // ジョブサーバーとビルドシステムの変数をクリアして独立したビルドにする
+    for key in &[
+        "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET", "CARGO_MAKEFLAGS", "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
+        "CARGO_BUILD_RUSTC", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+    ] {
+        cmd.env_remove(key);
+    }
+
+    if !has_config_target {
+        // .cargo/config.toml にtargetがない場合のみ --target を渡す
+        let target_spec = find_target_spec(&service_dir);
+        if let Some(target) = &target_spec {
+            cmd.arg("--target").arg(target);
+            println!("  Using target from JSON: {}", target);
+        } else {
+            let default_target = "x86_64-unknown-none";
+            cmd.arg("--target").arg(default_target);
+            println!("  Using default target: {}", default_target);
+        }
     } else {
-        let default_target = "x86_64-unknown-none";
-        cmd.arg("--target").arg(default_target);
-        println!("  Using default target: {}", default_target);
+        println!("  Using target from .cargo/config.toml");
     }
 
     if service.name == "core" {
@@ -173,17 +192,29 @@ pub fn build_service(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to build service {}: {}", service.name, stderr));
+        // 末尾 4000 文字を優先表示 (エラー部分が末尾に多い)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let err_tail = if stderr.len() > 2000 {
+            &stderr[stderr.len() - 2000..]
+        } else {
+            &stderr
+        };
+        let out_tail = if stdout.len() > 2000 {
+            &stdout[stdout.len() - 2000..]
+        } else {
+            &stdout
+        };
+        return Err(format!("Failed to build service {}: status={} STDERR={} STDOUT={}", 
+            service.name, output.status, err_tail, out_tail));
     }
 
     // ビルド成果物を探してコピー
     let target_dir = service_dir.join("target");
-    let target_name = if let Some(p) = &target_spec {
-        Path::new(p)
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
+    // .cargo/config.toml のターゲットかデフォルト名を使用
+    let target_name: Option<String> = if has_config_target {
+        Some("x86_64-swiftcore".to_string())
     } else {
-        Some("x86_64-unknown-none".to_string())
+        None
     };
 
     if let Some(binary_path) = find_built_binary(&target_dir, target_name.as_deref()) {
@@ -212,26 +243,28 @@ pub fn build_service(
 }
 
 fn find_built_binary(target_dir: &Path, target_name: Option<&str>) -> Option<PathBuf> {
-    if let Some(target) = target_name {
-        let custom_target = target_dir.join(format!("{}/release", target));
-        if custom_target.is_dir() {
-            if let Some(binary) = find_binary_in_dir(&custom_target) {
+    for profile in &["debug", "release"] {
+        if let Some(target) = target_name {
+            let dir = target_dir.join(format!("{}/{}", target, profile));
+            if dir.is_dir() {
+                if let Some(binary) = find_binary_in_dir(&dir) {
+                    return Some(binary);
+                }
+            }
+        }
+
+        let dir = target_dir.join(format!("x86_64-swiftcore/{}", profile));
+        if dir.is_dir() {
+            if let Some(binary) = find_binary_in_dir(&dir) {
                 return Some(binary);
             }
         }
-    }
 
-    let custom_target = target_dir.join("x86_64-swiftcore/release");
-    if custom_target.is_dir() {
-        if let Some(binary) = find_binary_in_dir(&custom_target) {
-            return Some(binary);
-        }
-    }
-
-    let release_dir = target_dir.join("release");
-    if release_dir.is_dir() {
-        if let Some(binary) = find_binary_in_dir(&release_dir) {
-            return Some(binary);
+        let dir = target_dir.join(profile);
+        if dir.is_dir() {
+            if let Some(binary) = find_binary_in_dir(&dir) {
+                return Some(binary);
+            }
         }
     }
 

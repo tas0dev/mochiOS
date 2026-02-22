@@ -144,10 +144,11 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
     };
 
     // 次のスレッドのコンテキストへのポインタとカーネルスタックトップを取得
-    let (new_context_ptr, next_kstack_top, next_process_id) = if let Some(thread) = queue.get(next_id) {
+    let (new_context_ptr, next_kstack_top, next_process_id, next_fs_base) = if let Some(thread) = queue.get(next_id) {
         let ptr = thread.context() as *const Context;
         let kstack = thread.kernel_stack_top();
         let pid = thread.process_id();
+        let fs = thread.fs_base();
         crate::debug!(
             "  Next context ptr: {:p}, rsp={:#x}, rip={:#x}, kstack={:#x}",
             ptr,
@@ -155,7 +156,7 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
             thread.context().rip,
             kstack
         );
-        (ptr, kstack, pid)
+        (ptr, kstack, pid, fs)
     } else {
         return; // 次のスレッドが見つからない
     };
@@ -165,6 +166,14 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
 
     // TSSのRSP0を更新
     crate::mem::tss::set_rsp0(next_kstack_top);
+
+    // SYSCALL用カーネルスタックも更新 (次のスレッドのカーネルスタックを使う)
+    crate::syscall::syscall_entry::update_kernel_rsp(next_kstack_top);
+
+    // 次のスレッドの FS ベースを復元 (TLS)
+    if next_fs_base != 0 {
+        crate::cpu::write_fs_base(next_fs_base);
+    }
 
     // 次のプロセスのページテーブルに切り替え
     if let Some(pt_phys) = crate::task::with_process(next_process_id, |p| p.page_table()).flatten() {

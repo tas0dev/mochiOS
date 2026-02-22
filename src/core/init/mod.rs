@@ -50,5 +50,8 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     interrupt::init_pit();
     interrupt::enable_timer_interrupt();
 
+    // SYSCALL/SYSRET 命令サポートを初期化
+    crate::syscall::syscall_entry::init_syscall();
+
     Ok(memory_map)
 }

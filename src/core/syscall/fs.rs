@@ -133,3 +133,28 @@ pub fn chdir(_path_ptr: u64) -> u64 {
     ENOSYS
 }
 
+/// Getcwdシステムコール（簡易実装）
+///
+/// カレントディレクトリを取得する
+///
+/// # 引数
+/// - `buf_ptr`: バッファへのポインタ
+/// - `size`: バッファサイズ
+///
+/// # 戻り値
+/// 成功時はbuf_ptr、エラー時はエラーコード
+pub fn getcwd(buf_ptr: u64, size: u64) -> u64 {
+    if buf_ptr == 0 || size == 0 {
+        return super::types::EINVAL;
+    }
+    // 暫定実装: "/" を返す
+    let cwd = b"/\0";
+    if (size as usize) < cwd.len() {
+        return super::types::EINVAL;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf_ptr as *mut u8, cwd.len());
+    }
+    buf_ptr
+}
+

@@ -21,7 +21,18 @@ pub unsafe extern "C" fn read(fd: i32, buf: *mut u8, count: usize) -> isize {
 }
 
 pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
-    -1isize as *mut u8 // 仮の戻り値
+    // newlib の malloc に委譲 (newlib は内部で _sbrk を呼ぶ)
+    extern "C" {
+        fn malloc(size: usize) -> *mut u8;
+    }
+    // アライメントが標準以下なら malloc を使う
+    let ptr = malloc(size + alignment);
+    if ptr.is_null() {
+        return core::ptr::null_mut();
+    }
+    let addr = ptr as usize;
+    let aligned = (addr + alignment - 1) & !(alignment - 1);
+    aligned as *mut u8
 }
 
 pub unsafe extern "C" fn free(ptr: *mut u8) {

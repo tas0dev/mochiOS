@@ -1,14 +1,9 @@
 #![no_std]
-#![no_main]
-#![allow(non_camel_case_types, unused_imports)]
-
-pub use swiftlib::*;
+#![allow(non_camel_case_types)]
 
 pub mod prelude {
     pub use core::prelude::v1::*;
 }
-
-extern crate rustc_std_workspace_core as core;
 
 pub type c_int = i32;
 pub type c_long = i64;
@@ -16,6 +11,7 @@ pub type c_ulong = u64;
 pub type c_char = i8;
 pub type c_uchar = u8;
 pub type c_uint = u32;
+pub type c_void = core::ffi::c_void;
 pub type size_t = usize;
 pub type ssize_t = isize;
 pub type off_t = i64;
@@ -23,6 +19,17 @@ pub type regoff_t = i64;
 pub type __u64 = u64;
 pub type __s64 = i64;
 pub type Ioctl = u64;
+pub type pid_t = i32;
+pub type uid_t = u32;
+pub type gid_t = u32;
+pub type mode_t = u32;
+pub type dev_t = u64;
+pub type ino_t = u64;
+pub type nlink_t = u64;
+pub type blksize_t = i64;
+pub type blkcnt_t = i64;
+pub type time_t = i64;
+pub type nfds_t = u64;
 
 pub enum sigset_t {}
 pub enum siginfo_t {}

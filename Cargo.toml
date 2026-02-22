@@ -35,4 +35,4 @@ panic = "abort"
 panic = "abort"
 
 [patch.crates-io]
-libc = { path = "src/libc" }
+libc = { path = "src/libc-rs" }

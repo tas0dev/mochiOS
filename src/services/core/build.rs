@@ -16,6 +16,13 @@ fn main() {
         .unwrap()
         .parent()
         .unwrap();
+
+    // リンカスクリプトを指定 (target JSON から削除したため build.rs で指定)
+    let linker_script = Path::new(&manifest_dir).join("linker.ld");
+    if linker_script.exists() {
+        println!("cargo:rustc-link-arg=-T{}", linker_script.display());
+        println!("cargo:rerun-if-changed={}", linker_script.display());
+    }
     
     let newlib_dir = root_dir
         .join("target")

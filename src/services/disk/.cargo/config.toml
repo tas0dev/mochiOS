@@ -3,7 +3,5 @@ target = "../../x86_64-swiftcore.json"
 
 [target.x86_64-swiftcore]
 rustflags = [
-    "--cfg", "unix",
-    "--cfg", "target_os=\"linux\"",
     "-C", "link-arg=-nostdlib",
 ]

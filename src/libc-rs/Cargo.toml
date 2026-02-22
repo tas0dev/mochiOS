@@ -1,6 +1,8 @@
 [package]
-name = "libc-rs"
-version = "0.1.0"
-edition = "2024"
+name = "libc"
+version = "0.2.0"
+authors = ["tas0dev"]
+edition = "2021"
 
-[dependencies]
+[lib]
+name = "libc"

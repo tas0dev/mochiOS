@@ -4,6 +4,8 @@ extern crate alloc;
 
 use alloc::alloc::{GlobalAlloc, Layout};
 
+/// C関数ラッパーとポートI/O
+pub mod cfunc;
 /// システムコールの共通インターフェース
 pub mod sys;
 /// CランタイムとNewlibサポート
@@ -24,20 +26,20 @@ pub mod fs;
 pub mod port;
 /// libcのC関数
 pub mod libc;
+/// Linux/POSIX 互換スタブ (std リンク用)
+pub mod posix_stubs;
 
 use core::panic::PanicInfo;
 use crate::libc::*;
+use crate::sys::SyscallNumber;
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    // TODO: 今後改修する
     unsafe {
-       // 強制終了
-       let sys_exit = 6;
        core::arch::asm!(
            "int 0x80",
-           in("rax") sys_exit,
-           in("rdi") 1,
+           in("rax") SyscallNumber::ExitGroup as u64,
+           in("rdi") 1u64,
            options(nostack, noreturn)
        )
     }

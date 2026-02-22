@@ -38,6 +38,8 @@ pub struct Thread {
     user_entry: u64,
     /// ユーザースタックトップ（0の場合はカーネルモードスレッド）
     user_stack: u64,
+    /// TLS用 FS ベースレジスタ (arch_prctl ARCH_SET_FS で設定)
+    fs_base: u64,
 }
 
 // Simple kernel stack pool for creating kernel stacks for threads
@@ -126,6 +128,7 @@ impl Thread {
             kernel_stack_size,
             user_entry: 0,
             user_stack: 0,
+            fs_base: 0,
         }
     }
 
@@ -199,6 +202,7 @@ impl Thread {
             kernel_stack_size,
             user_entry,
             user_stack,
+            fs_base: 0,
         }
     }
 
@@ -210,6 +214,16 @@ impl Thread {
     /// ユーザースタックを取得
     pub fn user_stack(&self) -> u64 {
         self.user_stack
+    }
+
+    /// TLS FSベースを取得
+    pub fn fs_base(&self) -> u64 {
+        self.fs_base
+    }
+
+    /// TLS FSベースを設定
+    pub fn set_fs_base(&mut self, base: u64) {
+        self.fs_base = base;
     }
 
     /// スレッドIDを取得
