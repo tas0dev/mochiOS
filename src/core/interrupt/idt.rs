@@ -53,7 +53,6 @@ pub fn init() {
 
         // ハードウェア割り込みハンドラ（32-47番）
         idt[32].set_handler_fn(super::timer::timer_interrupt_handler); // Timer
-        idt[33].set_handler_fn(keyboard_interrupt_handler); // Keyboard
 
         // それ以外のハードウェア割り込みはとりあえずスタブ
         for i in 34..48 {
@@ -307,15 +306,6 @@ extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFram
     error!("EXCEPTION: VIRTUALIZATION");
     debug!("{:#?}", stack_frame);
     halt_cpu();
-}
-
-// ========================================
-// ハードウェア割り込みハンドラ
-// ========================================
-
-extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    crate::driver::ps2_keyboard::handle_interrupt();
-    super::send_eoi(33);
 }
 
 extern "x86-interrupt" fn generic_interrupt_handler(_stack_frame: InterruptStackFrame) {

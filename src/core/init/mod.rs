@@ -33,8 +33,6 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         );
     }
 
-    crate::driver::ps2_keyboard::init();
-
     // 先にフレームアロケータを初期化
     mem::init_frame_allocator(memory_map)?;
 
