@@ -49,3 +49,33 @@ pub unsafe extern "C" fn open(_path: *const u8, _flags: i32) -> i32 { -1 }
 pub unsafe extern "C" fn close(fd: i32) -> i32 {
     crate::io::close(fd as u64) as i32
 }
+
+#[inline]
+pub fn inb(port: u16) -> u8 {
+    crate::port::inb(port)
+}
+
+#[inline]
+pub fn outb(port: u16, value: u8) {
+    crate::port::outb(port, value)
+}
+
+#[inline]
+pub fn inw(port: u16) -> u16 {
+    crate::port::inw(port)
+}
+
+#[inline]
+pub fn outw(port: u16, value: u16) {
+    crate::port::outw(port, value)
+}
+
+#[inline]
+pub fn inl(port: u16) -> u32 {
+    crate::port::inl(port)
+}
+
+#[inline]
+pub fn outl(port: u16, value: u32) {
+    crate::port::outl(port, value)
+}
