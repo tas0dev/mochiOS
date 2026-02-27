@@ -35,11 +35,11 @@ pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
     aligned as *mut u8
 }
 
-pub unsafe extern "C" fn free(ptr: *mut u8) {
+pub unsafe extern "C" fn free(_ptr: *mut u8) {
     // TODO: メモリ解放のシステムコールを実装
 }
 
-pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
+pub unsafe extern "C" fn realloc(ptr: *mut u8, _size: usize) -> *mut u8 {
     // TODO: リサイズのシステムコールを実装
     ptr
 }

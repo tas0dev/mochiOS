@@ -3,12 +3,9 @@
 //! Rust std (build-std) がリンク時に要求する C ライブラリ関数を実装する。
 //! 各関数は最小限の実装か、成功を返すスタブ。
 
-use crate::sys::{syscall1, syscall2, syscall3, syscall6, SyscallNumber};
+use crate::sys::{syscall1, syscall2, syscall6, SyscallNumber};
 
-// ─────────────────────────────────────────────────────────────
 // errno
-// ─────────────────────────────────────────────────────────────
-
 static mut ERRNO_VAL: i32 = 0;
 
 #[unsafe(no_mangle)]
@@ -16,9 +13,7 @@ pub unsafe extern "C" fn __errno_location() -> *mut i32 {
     &raw mut ERRNO_VAL
 }
 
-// ─────────────────────────────────────────────────────────────
 // メモリ管理
-// ─────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmap(
@@ -56,10 +51,6 @@ pub unsafe extern "C" fn mprotect(_addr: *mut u8, _len: usize, _prot: i32) -> i3
     0 // 成功
 }
 
-// ─────────────────────────────────────────────────────────────
-// C ライブラリ syscall ラッパー
-// ─────────────────────────────────────────────────────────────
-
 /// C の syscall(nr, arg0, arg1, arg2, arg3, arg4, arg5) の実装
 /// SysV ABI: nr=rdi, arg0=rsi, arg1=rdx, arg2=rcx, arg3=r8, arg4=r9
 #[unsafe(naked)]
@@ -78,9 +69,6 @@ pub unsafe extern "C" fn syscall() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────
-// pthread 互換スタブ
-// ─────────────────────────────────────────────────────────────
 
 // 単純なスレッドローカルストレージ (シングルスレッド用)
 const MAX_TLS_KEYS: usize = 128;
@@ -190,10 +178,6 @@ pub unsafe extern "C" fn pthread_getattr_np(
     pthread_attr_init(attr)
 }
 
-// ─────────────────────────────────────────────────────────────
-// シグナル
-// ─────────────────────────────────────────────────────────────
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
     _signum: i32,
@@ -207,10 +191,6 @@ pub unsafe extern "C" fn sigaction(
 pub unsafe extern "C" fn sigaltstack(_ss: *const u8, _oss: *mut u8) -> i32 {
     0
 }
-
-// ─────────────────────────────────────────────────────────────
-// 時間・待機
-// ─────────────────────────────────────────────────────────────
 
 /// nanosleep(req, rem) - 簡易実装 (yield で代用)
 #[unsafe(no_mangle)]
@@ -227,10 +207,6 @@ pub unsafe extern "C" fn nanosleep(_req: *const u8, _rem: *mut u8) -> i32 {
 pub unsafe extern "C" fn pause() -> i32 {
     -1 // EINTR
 }
-
-// ─────────────────────────────────────────────────────────────
-// I/O
-// ─────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fcntl(_fd: i32, _cmd: i32, _arg: i64) -> i32 {
@@ -262,18 +238,10 @@ pub unsafe extern "C" fn socketpair(
     -1 // ENOSYS
 }
 
-// ─────────────────────────────────────────────────────────────
-// Linux AUX ベクタ
-// ─────────────────────────────────────────────────────────────
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getauxval(_type_: u64) -> u64 {
     0
 }
-
-// ─────────────────────────────────────────────────────────────
-// プロセス管理スタブ
-// ─────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn waitpid(_pid: i32, _status: *mut i32, _options: i32) -> i32 {
@@ -314,10 +282,6 @@ pub unsafe extern "C" fn setgid(_gid: u32) -> i32 {
 pub unsafe extern "C" fn setgroups(_size: usize, _list: *const u32) -> i32 {
     0
 }
-
-// ─────────────────────────────────────────────────────────────
-// posix_spawn スタブ
-// ─────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn_file_actions_init(_actions: *mut u8) -> i32 {
@@ -386,10 +350,6 @@ pub unsafe extern "C" fn posix_spawnp(
     posix_spawn(pid_out, file, file_actions, attr, argv, envp)
 }
 
-// ─────────────────────────────────────────────────────────────
-// シグナルセット
-// ─────────────────────────────────────────────────────────────
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigemptyset(set: *mut u8) -> i32 {
     if !set.is_null() {
@@ -403,10 +363,6 @@ pub unsafe extern "C" fn sigaddset(_set: *mut u8, _signum: i32) -> i32 {
     0
 }
 
-// ─────────────────────────────────────────────────────────────
-// ソケット追加スタブ
-// ─────────────────────────────────────────────────────────────
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recvmsg(_fd: i32, _msg: *mut u8, _flags: i32) -> isize {
     -1
@@ -416,10 +372,6 @@ pub unsafe extern "C" fn recvmsg(_fd: i32, _msg: *mut u8, _flags: i32) -> isize 
 pub unsafe extern "C" fn sendmsg(_fd: i32, _msg: *const u8, _flags: i32) -> isize {
     -1
 }
-
-// ─────────────────────────────────────────────────────────────
-// システム設定
-// ─────────────────────────────────────────────────────────────
 
 /// sysconf - システム設定値を取得
 #[unsafe(no_mangle)]
@@ -442,10 +394,6 @@ pub unsafe extern "C" fn sysconf(name: i32) -> i64 {
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// プロセス制御追加スタブ
-// ─────────────────────────────────────────────────────────────
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setpgid(_pid: i32, _pgid: i32) -> i32 { 0 }
 
@@ -464,10 +412,6 @@ pub unsafe extern "C" fn poll(_fds: *mut u8, _nfds: u64, _timeout: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ioctl(_fd: i32, _request: u64, _arg: u64) -> i32 { -1 }
 
-// ─────────────────────────────────────────────────────────────
-// posix_spawn 追加スタブ
-// ─────────────────────────────────────────────────────────────
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn_file_actions_destroy(_actions: *mut u8) -> i32 { 0 }
 
@@ -478,10 +422,6 @@ pub unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_destroy(_attr: *mut u8) -> i32 { 0 }
-
-// ─────────────────────────────────────────────────────────────
-// メモリ
-// ─────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_memalign(
@@ -496,12 +436,8 @@ pub unsafe extern "C" fn posix_memalign(
     0
 }
 
-// ─────────────────────────────────────────────────────────────
-// 時刻 (clock_gettime の C ラッパー)
-// ─────────────────────────────────────────────────────────────
-
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn clock_gettime(clk_id: i32, tp: *mut u8) -> i32 {
+pub unsafe extern "C" fn clock_gettime(_clk_id: i32, tp: *mut u8) -> i32 {
     // timespec: { tv_sec: i64, tv_nsec: i64 }
     // タイマーティック (1ティック = 1ms) から計算
     let ticks = syscall1(SyscallNumber::GetTicks as u64, 0);
