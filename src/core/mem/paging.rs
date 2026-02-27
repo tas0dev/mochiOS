@@ -302,7 +302,7 @@ pub fn map_and_copy_segment(
         
         if is_mapped {
              // Already mapped. Ensure it is writable for loading.
-             phys_frame_addr = translate_addr(VirtAddr::new(page_addr)).unwrap().as_u64();
+             phys_frame_addr = translate_addr(VirtAddr::new(page_addr)).expect("Failed to translate virtual address").as_u64();
              
              // Temporarily map as writable for loading, but preserve execute permission
              // to avoid conflicts with final flags
@@ -409,7 +409,7 @@ pub fn map_and_copy_segment(
                 
                 // 同じ物理フレームに新しいフラグで再マップ
                 let phys_frame = PhysFrame::containing_address(x86_64::PhysAddr::new(phys_frame_addr));
-                match pt.map_to(page, phys_frame, new_flags, &mut *crate::mem::frame::FRAME_ALLOCATOR.lock().as_mut().unwrap()) {
+                match pt.map_to(page, phys_frame, new_flags, &mut *crate::mem::frame::FRAME_ALLOCATOR.lock().as_mut().expect("Frame allocator not initialized")) {
                     Ok(flush) => flush.flush(),
                     Err(e) => crate::warn!("Failed to remap page {:#x}: {:?}", page_addr, e),
                 }
@@ -564,14 +564,14 @@ pub fn map_and_copy_segment_to(
         // マップ（既にマップ済みの場合はアンマップして再マップ）
         unsafe {
             let mut alloc = frame::FRAME_ALLOCATOR.lock();
-            match pt.map_to(page, frame, final_flags, alloc.as_mut().unwrap()) {
+            match pt.map_to(page, frame, final_flags, alloc.as_mut().expect("Frame allocator not initialized")) {
                 Ok(flush) => { flush.ignore(); }
                 Err(x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(_)) => {
                     // カーネルのアイデンティティマップが残っている場合：アンマップして再マップ
                     drop(alloc);
                     pt.unmap(page).map_err(|_| Kernel::Memory(Memory::InvalidAddress))?.1.ignore();
                     let mut alloc = frame::FRAME_ALLOCATOR.lock();
-                    pt.map_to(page, frame, final_flags, alloc.as_mut().unwrap())
+                    pt.map_to(page, frame, final_flags, alloc.as_mut().expect("Frame allocator not initialized"))
                         .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?
                         .ignore();
                 }

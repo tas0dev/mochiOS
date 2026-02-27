@@ -25,8 +25,8 @@ pub fn init(boot_info: &'static crate::BootInfo) {
     paging::init(boot_info);
 
     allocator::init_heap(
-        &mut *paging::PAGE_TABLE.lock().as_mut().unwrap(),
-        &mut *frame::FRAME_ALLOCATOR.lock().as_mut().unwrap(),
+        &mut *paging::PAGE_TABLE.lock().as_mut().expect("PAGE_TABLE not initialized"),
+        &mut *frame::FRAME_ALLOCATOR.lock().as_mut().expect("FRAME_ALLOCATOR not initialized"),
         boot_info.kernel_heap_addr,
     ).expect("Heap initialization failed");
 

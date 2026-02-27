@@ -6,16 +6,13 @@ fn main() {
     
     // newlib ライブラリへのパスを設定
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     
     // ルートのtargetディレクトリを使用
     let root_dir = Path::new(&manifest_dir)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+        .ancestors()
+        .nth(3)
+        .expect("failed to determine project root");
 
     // リンカスクリプトを指定 (target JSON から削除したため build.rs で指定)
     let linker_script = Path::new(&manifest_dir).join("linker.ld");

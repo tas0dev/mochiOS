@@ -96,11 +96,11 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
                 for si in 0..shnum {
                     let sh_off = shoff + si * shentsz;
                     if sh_off + shentsz > data.len() { break; }
-                    let sh_type = u32::from_le_bytes(data[sh_off + 4..sh_off + 8].try_into().unwrap());
-                    let sh_offset = u64::from_le_bytes(data[sh_off + 24..sh_off + 32].try_into().unwrap()) as usize;
-                    let sh_size = u64::from_le_bytes(data[sh_off + 32..sh_off + 40].try_into().unwrap()) as usize;
-                    let sh_link = u32::from_le_bytes(data[sh_off + 40..sh_off + 44].try_into().unwrap());
-                    let sh_entsize = u64::from_le_bytes(data[sh_off + 56..sh_off + 64].try_into().unwrap()) as usize;
+                    let sh_type = u32::from_le_bytes(data[sh_off + 4..sh_off + 8].try_into().expect("ELF section header truncated"));
+                    let sh_offset = u64::from_le_bytes(data[sh_off + 24..sh_off + 32].try_into().expect("ELF section header truncated")) as usize;
+                    let sh_size = u64::from_le_bytes(data[sh_off + 32..sh_off + 40].try_into().expect("ELF section header truncated")) as usize;
+                    let sh_link = u32::from_le_bytes(data[sh_off + 40..sh_off + 44].try_into().expect("ELF section header truncated"));
+                    let sh_entsize = u64::from_le_bytes(data[sh_off + 56..sh_off + 64].try_into().expect("ELF section header truncated")) as usize;
                     // SHT_SYMTAB == 2
                     if sh_type == 2 {
                         symtab_offset = sh_offset;
@@ -110,8 +110,8 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
                         let link_idx = sh_link as usize;
                         if link_idx < shnum {
                             let link_sh_off = shoff + link_idx * shentsz;
-                            strtab_offset = u64::from_le_bytes(data[link_sh_off + 24..link_sh_off + 32].try_into().unwrap()) as usize;
-                            strtab_size = u64::from_le_bytes(data[link_sh_off + 32..link_sh_off + 40].try_into().unwrap()) as usize;
+                            strtab_offset = u64::from_le_bytes(data[link_sh_off + 24..link_sh_off + 32].try_into().expect("ELF section header truncated")) as usize;
+                            strtab_size = u64::from_le_bytes(data[link_sh_off + 32..link_sh_off + 40].try_into().expect("ELF section header truncated")) as usize;
                         }
                         break;
                     }
@@ -121,8 +121,8 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
                     for i_sym in 0..nsyms {
                         let sym_off = symtab_offset + i_sym * symtab_entsize;
                         if sym_off + symtab_entsize > data.len() { break; }
-                        let st_name = u32::from_le_bytes(data[sym_off..sym_off+4].try_into().unwrap()) as usize;
-                        let st_value = u64::from_le_bytes(data[sym_off+8..sym_off+16].try_into().unwrap());
+                        let st_name = u32::from_le_bytes(data[sym_off..sym_off+4].try_into().expect("ELF symbol entry truncated")) as usize;
+                        let st_value = u64::from_le_bytes(data[sym_off+8..sym_off+16].try_into().expect("ELF symbol entry truncated"));
                         if st_name < strtab_size {
                             let name_off = strtab_offset + st_name;
                             if name_off < data.len() {

@@ -49,7 +49,8 @@ const KSTACK_POOL_SIZE: usize = 4096 * 64; // 256 KiB
 static mut KSTACK_POOL: [u8; KSTACK_POOL_SIZE] = [0; KSTACK_POOL_SIZE];
 static NEXT_KSTACK_OFFSET: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// Allocate a kernel stack from the internal pool. Returns base address (bottom) of stack.
+/// カーネルスタックを内部プールから割り当てます。
+/// Returns base address (bottom) of stack.
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
     if size == 0 || size > KSTACK_POOL_SIZE {
         return None;

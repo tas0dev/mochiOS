@@ -2,8 +2,11 @@ use std::env;
 use std::path::Path;
 
 fn main() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let project_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap().parent().unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let project_root = Path::new(&manifest_dir)
+        .ancestors()
+        .nth(3)
+        .expect("failed to determine project root");
 
     // 生成されたnewlibとcrt0の場所
     let fs_dir = project_root.join("fs");
