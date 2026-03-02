@@ -411,6 +411,10 @@ fn read_path(path: &str) -> Option<Vec<u8>> {
     }
 
     while let Some(part) = parts.next() {
+        // ディレクトリトラバーサル防止: ".." および "." を拒否する (C-7修正)
+        if part == ".." || part == "." {
+            return None;
+        }
         let is_last = parts.peek().is_none();
         let inode_num = find_inode_in_dir(EXT2_IMAGE, sb, current, part)?;
         let next_inode = inode(EXT2_IMAGE, sb, inode_num)?;

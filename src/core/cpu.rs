@@ -55,6 +55,14 @@ unsafe fn enable_sse() {
         crate::info!("FSGSBASE not supported, using IA32_FS_BASE MSR");
     }
 
+    // ビット20 (SMEP) をセット - カーネルモードでのユーザーページ実行禁止 (L-1修正)
+    // ret2usr 等のカーネルモード特権昇格攻撃を防ぐ
+    cr4 |= 1 << 20;
+
+    // ビット21 (SMAP) をセット - カーネルモードでのユーザーページアクセス禁止 (L-1修正)
+    // カーネルが誤ってユーザー空間メモリを読み書きする脆弱性を防ぐ
+    cr4 |= 1 << 21;
+
     // CR4レジスタに書き込み
     asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
 }

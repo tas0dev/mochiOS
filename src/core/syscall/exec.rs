@@ -59,7 +59,15 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
 
     if let Some(data) = crate::init::fs::read(path) {
         let data: &[u8] = &data;
-        let mut entry = elf_loader::entry_point(data).unwrap_or(0);
+        // MED-27修正: エントリポイントが0の場合はELFが無効として拒否する
+        // 以前はentry=0のままプロセスを作成し、仮想アドレス0にジャンプしていた
+        let mut entry = match elf_loader::entry_point(data) {
+            Some(e) if e != 0 => e,
+            _ => {
+                crate::warn!("exec: ELF entry point is 0 or missing, rejecting");
+                return crate::syscall::types::EINVAL;
+            }
+        };
         crate::debug!("ELF entry: {:#x}", entry);
 
         // プロセス固有のページテーブルを作成

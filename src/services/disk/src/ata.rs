@@ -155,15 +155,21 @@ impl AtaDrive {
         // ビジー待ち
         self.wait_not_busy()?;
 
-        // DRQまたはERRを待つ
-        loop {
+        // DRQまたはERRを待つ (H-15修正: タイムアウトを追加して無限ループを防ぐ)
+        let mut drq_waited = false;
+        for _ in 0..1_000_000 {
             let status = unsafe { self.read_status() };
             if status & status::ERR != 0 {
                 return Err(AtaError::IoError);
             }
             if status & status::DRQ != 0 {
+                drq_waited = true;
                 break;
             }
+            core::hint::spin_loop();
+        }
+        if !drq_waited {
+            return Err(AtaError::Timeout);
         }
 
         // IDENTIFY情報を読み取る（512バイト）
@@ -304,7 +310,13 @@ impl AtaDrive {
         let lba_low = (lba & 0xFF) as u8;
         let lba_mid = ((lba >> 8) & 0xFF) as u8;
         let lba_high = ((lba >> 16) & 0xFF) as u8;
-        let lba_top = (((lba >> 24) & 0x0F) | 0xE0) as u8;
+        // H-16修正: ドライブ種別に応じてマスタ(0xE0)またはスレーブ(0xF0)を選択する
+        // 以前は常に 0xE0 (マスタ) を使用しておりスレーブへのアクセスでデータ破壊の恐れがあった
+        let drive_sel: u8 = match self.drive_type {
+            DriveType::Master => 0xE0,
+            DriveType::Slave => 0xF0,
+        };
+        let lba_top = (((lba >> 24) & 0x0F) | drive_sel) as u8;
 
         outb(self.ports.lba_low, lba_low);
         outb(self.ports.lba_mid, lba_mid);

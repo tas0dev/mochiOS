@@ -1,6 +1,6 @@
 //! 時間関連システムコール
 
-use super::types::{EINVAL, SUCCESS};
+use super::types::{EFAULT, EINVAL, SUCCESS};
 
 /// GetTicksシステムコール
 ///
@@ -28,6 +28,10 @@ pub fn clock_gettime(clk_id: u64, ts_ptr: u64) -> u64 {
 
     if ts_ptr == 0 {
         return EINVAL;
+    }
+    // ユーザー空間アドレスの有効性を検証する (timespec = 16バイト)
+    if !crate::syscall::validate_user_ptr(ts_ptr, 16) {
+        return EFAULT;
     }
 
     // タイマーティックを使って時刻を計算 (1ティック = 1ms と仮定)
@@ -58,15 +62,17 @@ pub fn clock_gettime(clk_id: u64, ts_ptr: u64) -> u64 {
 /// # 戻り値
 /// 成功時は0
 pub fn sleep_until(ticks: u64) -> u64 {
+    // H-17修正: sleep_thread()でSleeping状態にした後にyield_now()を呼ぶと
+    // スケジューラが現スレッドを選択しなくなりwake_thread()が永遠に実行されない(永眠バグ)。
+    // 代わりに目標ティックに達するまでyield_now()を繰り返すビジーウェイトに変更。
     let current_ticks = get_ticks();
     if ticks > current_ticks {
         let wait_ticks = ticks - current_ticks;
-        if let Some(tid) = crate::task::current_thread_id() {
-            crate::task::sleep_thread(tid);
-            for _ in 0..wait_ticks.min(1000) {
-                crate::task::yield_now();
+        for _ in 0..wait_ticks.min(10000) {
+            crate::task::yield_now();
+            if get_ticks() >= ticks {
+                break;
             }
-            crate::task::wake_thread(tid);
         }
     }
     0
