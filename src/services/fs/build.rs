@@ -20,6 +20,10 @@ fn main() {
     // 静的リンクを指定し、PIEを無効化する
     println!("cargo:rustc-link-arg=-static");
     println!("cargo:rustc-link-arg=-no-pie");
+
+    // カスタムリンカースクリプトを使用してロードアドレスを0x800000に設定
+    println!("cargo:rustc-link-arg=-T{}/linker.ld", manifest_dir);
+    println!("cargo:rerun-if-changed=linker.ld");
     
     // 重複シンボルを許可（最初に見つかったものを使用）
     println!("cargo:rustc-link-arg=--allow-multiple-definition");
