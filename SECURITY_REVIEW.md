@@ -754,8 +754,8 @@ const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
 | ADD-SEC-02 | アライメント依存書き込み | **修正済み** | `clock_gettime` の `timespec` 書き込みが aligned write 前提 | `ptr::write_unaligned` に変更 |
 | ADD-SEC-03 | アライメント依存書き込み | **修正済み** | `arch_prctl(ARCH_GET_FS)` が aligned write 前提 | `ptr::write_unaligned` に変更 |
 | ADD-SEC-04 | User pointer 検証漏れ | **修正済み** | `syscall::task::get_thread_id_by_name` が未検証 `from_raw_parts` | `validate_user_ptr` を追加し `EFAULT` を返却 |
-| ADD-SEC-05 | ELF オフセット加算オーバーフロー | **修正済み** | `task::elf` 内の `phoff + i * phentsize` / `p_offset + filesz` が非 checked | `checked_add/checked_mul` へ変更し異常入力を拒否 |
-| ADD-SEC-06 | ELF 範囲計算オーバーフロー | **修正済み** | `vaddr_to_offset` で `p_vaddr + p_memsz` が非 checked | `checked_add` へ変更して不正ELFを拒否 |
+| ADD-SEC-05 | ELF オフセット加算オーバーフロー | **修正済み** | `task::elf` 内の `phoff + i * phentsize` / `p_offset + filesz` が未チェック | `checked_add/checked_mul` へ変更し異常入力を拒否 |
+| ADD-SEC-06 | ELF 範囲計算オーバーフロー | **修正済み** | `vaddr_to_offset` で `p_vaddr + p_memsz` が未チェック | `checked_add` へ変更して不正ELFを拒否 |
 
 ### 追補で確認した非セキュリティ不具合
 

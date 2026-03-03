@@ -459,6 +459,10 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
             );
             let mut stub_page = vec![0u8; 4096];
             let mut cur = 0usize;
+            if cur + 24 > stub_page.len() {
+                crate::warn!("__sinit stub size overflow: {}", cur + 24);
+                return crate::syscall::types::EINVAL;
+            }
             // movabs rax, <sinit>
             stub_page[cur..cur + 2].copy_from_slice(&[0x48, 0xB8]);
             cur += 2;
@@ -475,10 +479,6 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
             // jmp rax
             stub_page[cur..cur + 2].copy_from_slice(&[0xFF, 0xE0]);
             cur += 2;
-            if cur > stub_page.len() {
-                crate::warn!("__sinit stub size overflow: {}", cur);
-                return crate::syscall::types::EINVAL;
-            }
 
             if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
                 new_pt_phys,
