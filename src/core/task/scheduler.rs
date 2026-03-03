@@ -3,8 +3,8 @@ use crate::interrupt::spinlock::SpinLock;
 use super::context::switch_to_thread;
 use super::ids::{ThreadId, ThreadState};
 use super::thread::{
-    current_thread_id, remove_thread, set_current_thread, with_thread_mut, CURRENT_THREAD,
-    THREAD_QUEUE,
+    current_thread_id, remove_thread, set_current_thread, with_thread, with_thread_mut,
+    CURRENT_THREAD, THREAD_QUEUE,
 };
 
 /// スケジューラ
@@ -109,6 +109,11 @@ pub fn is_scheduler_enabled() -> bool {
 /// # Returns
 /// スケジューリングが必要な場合はtrue
 pub fn scheduler_tick() -> bool {
+    if let Some(tid) = current_thread_id() {
+        if with_thread(tid, |t| t.in_syscall()).unwrap_or(false) {
+            return false;
+        }
+    }
     SCHEDULER.lock().tick()
 }
 
@@ -239,10 +244,26 @@ pub fn terminate_thread(id: ThreadId) {
 pub fn exit_current_task(exit_code: u64) -> ! {
     if let Some(current_id) = current_thread_id() {
         crate::debug!("Exiting thread {:?} with code {}", current_id, exit_code);
+        let current_pid = with_thread(current_id, |thread| thread.process_id());
 
         with_thread_mut(current_id, |thread| {
             thread.set_state(ThreadState::Terminated);
         });
+
+        if let Some(pid) = current_pid {
+            let mut has_other_live_threads = false;
+            crate::task::for_each_thread(|thread| {
+                if thread.process_id() == pid
+                    && thread.id() != current_id
+                    && thread.state() != ThreadState::Terminated
+                {
+                    has_other_live_threads = true;
+                }
+            });
+            if !has_other_live_threads {
+                crate::task::mark_process_exited(pid, exit_code);
+            }
+        }
 
         // 現在のスレッドをクリア（先にクリアしないとschedule()が正しく動作しない）
         set_current_thread(None);

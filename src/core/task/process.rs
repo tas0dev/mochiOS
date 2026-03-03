@@ -27,6 +27,8 @@ pub struct Process {
     heap_end: u64,
     /// 優先度（0が最高、値が大きいほど低い）
     priority: u8,
+    /// 終了コード（生存中はNone）
+    exit_code: Option<u64>,
 }
 
 impl Process {
@@ -63,6 +65,7 @@ impl Process {
             heap_start,
             heap_end: heap_start,
             priority,
+            exit_code: None,
         }
     }
 
@@ -99,6 +102,17 @@ impl Process {
     /// 優先度を取得
     pub fn priority(&self) -> u8 {
         self.priority
+    }
+
+    /// 終了コードを取得
+    pub fn exit_code(&self) -> Option<u64> {
+        self.exit_code
+    }
+
+    /// 終了状態へ遷移
+    pub fn mark_exited(&mut self, exit_code: u64) {
+        self.state = ProcessState::Zombie;
+        self.exit_code = Some(exit_code);
     }
 
     /// ページテーブルアドレスを取得
@@ -141,7 +155,8 @@ impl core::fmt::Debug for Process {
             .field("state", &self.state)
             .field("privilege", &self.privilege)
             .field("parent_id", &self.parent_id)
-            .field("priority", &self.priority);
+            .field("priority", &self.priority)
+            .field("exit_code", &self.exit_code);
 
         if let Some(pt) = self.page_table {
             debug_struct.field("page_table", &format_args!("{:#x}", pt));
@@ -250,6 +265,47 @@ impl ProcessTable {
             .find(|p| p.name() == name || (p.name().len() > 0 && p.name() == name))
     }
 
+    fn is_child_match(process: &Process, parent: ProcessId, target: Option<ProcessId>) -> bool {
+        if process.parent_id() != Some(parent) {
+            return false;
+        }
+        if let Some(target_id) = target {
+            process.id() == target_id
+        } else {
+            true
+        }
+    }
+
+    /// 対象に一致する子プロセスが存在するかを返す
+    pub fn has_child(&self, parent: ProcessId, target: Option<ProcessId>) -> bool {
+        self.processes
+            .iter()
+            .filter_map(|slot| slot.as_ref())
+            .any(|p| Self::is_child_match(p, parent, target))
+    }
+
+    /// ゾンビ子プロセスを1つ回収する
+    pub fn reap_zombie_child(
+        &mut self,
+        parent: ProcessId,
+        target: Option<ProcessId>,
+    ) -> Option<(ProcessId, u64)> {
+        for slot in &mut self.processes {
+            if let Some(proc) = slot.as_ref() {
+                if Self::is_child_match(proc, parent, target)
+                    && proc.state() == ProcessState::Zombie
+                {
+                    let pid = proc.id();
+                    let exit_code = proc.exit_code().unwrap_or(0);
+                    *slot = None;
+                    self.count = self.count.saturating_sub(1);
+                    return Some((pid, exit_code));
+                }
+            }
+        }
+        None
+    }
+
     /// 現在のプロセス数を取得
     pub fn count(&self) -> usize {
         self.count
@@ -297,6 +353,27 @@ where
     for process in table.iter() {
         f(process);
     }
+}
+
+/// プロセスを終了状態（Zombie）へ遷移させる
+pub fn mark_process_exited(id: ProcessId, exit_code: u64) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(id) {
+        proc.mark_exited(exit_code);
+    }
+}
+
+/// 一致する子プロセスが存在するか確認する
+pub fn has_child_process(parent: ProcessId, target: Option<ProcessId>) -> bool {
+    PROCESS_TABLE.lock().has_child(parent, target)
+}
+
+/// 一致するゾンビ子プロセスを回収する
+pub fn reap_zombie_child_process(
+    parent: ProcessId,
+    target: Option<ProcessId>,
+) -> Option<(ProcessId, u64)> {
+    PROCESS_TABLE.lock().reap_zombie_child(parent, target)
 }
 
 /// 現在のプロセス数を取得

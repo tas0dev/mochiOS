@@ -133,23 +133,32 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
     };
 
     // 次のスレッドのコンテキストへのポインタとカーネルスタックトップを取得
-    let (new_context_ptr, next_kstack_top, next_process_id, next_fs_base) =
-        if let Some(thread) = queue.get(next_id) {
-            let ptr = thread.context() as *const Context;
-            let kstack = thread.kernel_stack_top();
-            let pid = thread.process_id();
-            let fs = thread.fs_base();
-            crate::debug!(
-                "  Next context ptr: {:p}, rsp={:#x}, rip={:#x}, kstack={:#x}",
-                ptr,
-                thread.context().rsp,
-                thread.context().rip,
-                kstack
-            );
-            (ptr, kstack, pid, fs)
-        } else {
-            return; // 次のスレッドが見つからない
-        };
+    let (
+        new_context_ptr,
+        next_kstack_top,
+        next_process_id,
+        next_fs_base,
+        next_in_syscall,
+        next_priv,
+    ) = if let Some(thread) = queue.get(next_id) {
+        let ptr = thread.context() as *const Context;
+        let kstack = thread.kernel_stack_top();
+        let pid = thread.process_id();
+        let fs = thread.fs_base();
+        let in_syscall = thread.in_syscall();
+        let priv_level = crate::task::with_process(pid, |p| p.privilege())
+            .unwrap_or(crate::task::PrivilegeLevel::Core);
+        crate::debug!(
+            "  Next context ptr: {:p}, rsp={:#x}, rip={:#x}, kstack={:#x}",
+            ptr,
+            thread.context().rsp,
+            thread.context().rip,
+            kstack
+        );
+        (ptr, kstack, pid, fs, in_syscall, priv_level)
+    } else {
+        return; // 次のスレッドが見つからない
+    };
 
     drop(queue);
 
@@ -164,8 +173,14 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
         }
     }
 
-    // 次のプロセスのページテーブルに切り替え
-    if let Some(pt_phys) = crate::task::with_process(next_process_id, |p| p.page_table()).flatten()
+    // 次のコンテキストがカーネル実行の場合はカーネルCR3に固定する
+    if next_priv == crate::task::PrivilegeLevel::Core || next_in_syscall {
+        let kernel_cr3 = crate::percpu::kernel_cr3();
+        if kernel_cr3 != 0 {
+            crate::mem::paging::switch_page_table(kernel_cr3);
+        }
+    } else if let Some(pt_phys) =
+        crate::task::with_process(next_process_id, |p| p.page_table()).flatten()
     {
         crate::mem::paging::switch_page_table(pt_phys);
     }
@@ -217,12 +232,6 @@ pub unsafe fn switch_to_thread_from_isr(
     next_id: ThreadId,
     saved: Context,
 ) {
-    crate::debug!(
-        "switch_to_thread_from_isr: current={:?}, next={:?}",
-        current_id,
-        next_id
-    );
-
     let mut queue = THREAD_QUEUE.lock();
 
     let old_ctx_ptr = if let Some(id) = current_id {
@@ -235,7 +244,7 @@ pub unsafe fn switch_to_thread_from_isr(
         unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXT) }
     };
 
-    let (new_ctx_ptr, next_priv, next_kstack_top, next_fs_base, next_process_id) =
+    let (new_ctx_ptr, next_priv, next_kstack_top, next_fs_base, next_process_id, next_in_syscall) =
         if let Some(thread) = queue.get(next_id) {
             let ptr = thread.context() as *const Context;
             let proc = thread.process_id();
@@ -243,7 +252,8 @@ pub unsafe fn switch_to_thread_from_isr(
                 .unwrap_or(crate::task::PrivilegeLevel::Core);
             let kstack = thread.kernel_stack_top();
             let fs = thread.fs_base();
-            (ptr, priv_level, kstack, fs, proc)
+            let in_syscall = thread.in_syscall();
+            (ptr, priv_level, kstack, fs, proc, in_syscall)
         } else {
             return;
         };
@@ -267,13 +277,17 @@ pub unsafe fn switch_to_thread_from_isr(
         crate::cpu::write_fs_base(next_fs_base);
     }
 
-    // 次のプロセスのページテーブルに切り替え
-    if let Some(pt_phys) = crate::task::with_process(next_process_id, |p| p.page_table()).flatten()
+    // 次のコンテキストがカーネル実行の場合はカーネルCR3に固定する
+    if next_priv == crate::task::PrivilegeLevel::Core || next_in_syscall {
+        let kernel_cr3 = crate::percpu::kernel_cr3();
+        if kernel_cr3 != 0 {
+            crate::mem::paging::switch_page_table(kernel_cr3);
+        }
+    } else if let Some(pt_phys) =
+        crate::task::with_process(next_process_id, |p| p.page_table()).flatten()
     {
         crate::mem::paging::switch_page_table(pt_phys);
     }
-
-    crate::debug!("About to perform context switch...");
 
     if next_priv == crate::task::PrivilegeLevel::Core {
         core::arch::asm!(
@@ -339,5 +353,4 @@ pub unsafe fn switch_to_thread_from_isr(
             options(noreturn)
         );
     }
-    crate::debug!("  End of switch_to_thread");
 }

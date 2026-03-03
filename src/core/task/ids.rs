@@ -20,6 +20,11 @@ impl ProcessId {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
+    /// 数値からProcessIdを生成（外部入力をIDとして扱う用途）
+    pub const fn from_u64(id: u64) -> Self {
+        Self(id)
+    }
 }
 
 /// スレッドID
@@ -35,6 +40,11 @@ impl ThreadId {
     /// スレッドIDの値を取得
     pub fn as_u64(&self) -> u64 {
         self.0
+    }
+
+    /// 数値からThreadIdを生成
+    pub const fn from_u64(id: u64) -> Self {
+        Self(id)
     }
 }
 

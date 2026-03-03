@@ -16,13 +16,22 @@ pub fn write(buf_ptr: u64, len: u64) -> u64 {
         return EFAULT;
     }
 
-    let bytes = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
-    let text = match core::str::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => return EINVAL,
-    };
-
-    util::console::print(format_args!("{}", text));
-    util::vga::print(format_args!("{}", text));
-    len as u64
+    let mut ok = true;
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let bytes = core::slice::from_raw_parts(buf_ptr as *const u8, len);
+        let text = match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                ok = false;
+                return;
+            }
+        };
+        util::console::print(format_args!("{}", text));
+        util::vga::print(format_args!("{}", text));
+    });
+    if ok {
+        len as u64
+    } else {
+        EINVAL
+    }
 }

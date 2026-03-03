@@ -8,6 +8,44 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// `.service` 実行を許可するサービスマネージャープロセスID
 /// 0 は未登録。
 static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);
+static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0x7c4a_7f73_d3e1_9b1d);
+
+/// サービスマネージャーPIDを登録する（IDベース認可）
+pub fn register_service_manager_pid(pid: u64) {
+    SERVICE_MANAGER_PID.store(pid, Ordering::SeqCst);
+}
+
+#[inline]
+fn aslr_mix64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+fn next_aslr_seed(tag: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for b in tag.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    let ctr = EXEC_ASLR_COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+    let ticks = crate::interrupt::timer::get_ticks();
+    let tid = crate::task::current_thread_id()
+        .map(|t| t.as_u64())
+        .unwrap_or(0);
+    aslr_mix64(hash ^ ctr ^ ticks.rotate_left(17) ^ tid.rotate_left(7))
+}
+
+#[inline]
+fn aslr_offset_pages(seed: u64, max_pages: u64) -> u64 {
+    if max_pages == 0 {
+        0
+    } else {
+        aslr_mix64(seed) % max_pages
+    }
+}
 
 fn caller_can_launch_service() -> bool {
     let caller = crate::task::current_thread_id()
@@ -29,29 +67,36 @@ fn caller_can_launch_service() -> bool {
 
 /// カーネル内から実行可能ファイルを読み込み実行するシステムコール
 pub fn exec_kernel(path_ptr: u64) -> u64 {
-    let mut provided_path: Option<&str> = None;
+    let mut provided_path: Option<String> = None;
     if path_ptr != 0 {
         // ユーザー空間アドレスの有効性を検証する
         if !crate::syscall::validate_user_ptr(path_ptr, 256) {
             return crate::syscall::types::EINVAL;
         }
-        let mut len = 0usize;
-        unsafe {
+        let mut path_len = 0usize;
+        let mut path_buf = [0u8; 256];
+        let parsed = crate::syscall::with_user_memory_access(|| unsafe {
             let mut p = path_ptr as *const u8;
             while *p != 0 {
-                len += 1;
-                p = p.add(1);
-                if len > 256 {
-                    return crate::syscall::types::EINVAL;
+                if path_len >= path_buf.len() {
+                    return Err(crate::syscall::types::EINVAL);
                 }
+                path_buf[path_len] = *p;
+                path_len += 1;
+                p = p.add(1);
             }
-            let slice = core::slice::from_raw_parts(path_ptr as *const u8, len);
-            if let Ok(path) = core::str::from_utf8(slice) {
-                provided_path = Some(path);
-            }
+            Ok(())
+        });
+        if let Err(e) = parsed {
+            return e;
         }
+        let text = match core::str::from_utf8(&path_buf[..path_len]) {
+            Ok(s) => s,
+            Err(_) => return crate::syscall::types::EINVAL,
+        };
+        provided_path = Some(String::from(text));
     }
-    let path = provided_path.unwrap_or("/hello.bin");
+    let path = provided_path.as_deref().unwrap_or("/hello.bin");
 
     // ユーザー空間からはサービス（.serviceで終わる名前）を起動できない
     if path.ends_with(".service") {
@@ -71,6 +116,7 @@ pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
 fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
     let process_name = name_override.unwrap_or(path);
     crate::debug!("exec: path={}, name={}", path, process_name);
+    let aslr_seed = next_aslr_seed(process_name);
 
     if let Some(data) = crate::init::fs::read(path) {
         let data: &[u8] = &data;
@@ -311,7 +357,11 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
             }
         }
 
-        let stack_end_vaddr: u64 = 0x0000_7FFF_FFF0_0000;
+        const STACK_TOP_BASE: u64 = 0x0000_7FFF_FFF0_0000;
+        const STACK_ASLR_MAX_PAGES: u64 = 4096; // 16MiB
+        let stack_end_vaddr = STACK_TOP_BASE.saturating_sub(
+            aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, STACK_ASLR_MAX_PAGES) * 4096,
+        );
         let stack_size_pages: usize = 8; // 32KiB stack
         let stack_base_vaddr = stack_end_vaddr - (stack_size_pages as u64 * 4096);
 
@@ -439,7 +489,10 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
 
         // Pre-map initial heap pages to avoid immediate page faults from user allocations.
         // Map two pages at the default heap base so small early allocations won't fault.
-        let default_heap_base: u64 = 0x4000_0000;
+        const HEAP_BASE_MIN: u64 = 0x4000_0000;
+        const HEAP_ASLR_MAX_PAGES: u64 = 0x8000; // 128MiB
+        let default_heap_base = HEAP_BASE_MIN
+            .saturating_add(aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, HEAP_ASLR_MAX_PAGES) * 4096);
         let heap_map_size: u64 = 4096 * 2;
         if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
             new_pt_phys,
@@ -525,10 +578,6 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
         if crate::task::add_process(proc).is_none() {
             return crate::syscall::types::EINVAL;
         }
-        if process_name.ends_with("core.service") || path.ends_with("core.service") {
-            SERVICE_MANAGER_PID.store(pid.as_u64(), Ordering::SeqCst);
-        }
-
         // allocate kernel stack for the new thread
         const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
         let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
@@ -596,22 +645,29 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     }
 
     // ユーザー空間から null 終端パスを読み込む
-    let mut len = 0usize;
-    unsafe {
+    let mut path_len = 0usize;
+    let mut path_buf = [0u8; 256];
+    let parsed = crate::syscall::with_user_memory_access(|| unsafe {
         let mut p = path_ptr as *const u8;
         while *p != 0 {
-            len += 1;
-            p = p.add(1);
-            if len > 256 {
-                return EINVAL;
+            if path_len >= path_buf.len() {
+                return Err(EINVAL);
             }
+            path_buf[path_len] = *p;
+            path_len += 1;
+            p = p.add(1);
         }
+        Ok(())
+    });
+    if let Err(e) = parsed {
+        return e;
     }
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr as *const u8, len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
+    let path_owned = match core::str::from_utf8(&path_buf[..path_len]) {
+        Ok(s) => String::from(s),
         Err(_) => return EINVAL,
     };
+    let path = path_owned.as_str();
+    let aslr_seed = next_aslr_seed(path);
 
     // サービス起動はサービスマネージャー(Coreまたは登録PID)に限定
     if path.ends_with(".service") {
@@ -709,7 +765,10 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     }
 
     // ユーザースタックをセットアップ (exec_internal と同じレイアウト)
-    let stack_end_vaddr: u64 = 0x0000_7FFF_FFF0_0000;
+    const STACK_TOP_BASE: u64 = 0x0000_7FFF_FFF0_0000;
+    const STACK_ASLR_MAX_PAGES: u64 = 4096; // 16MiB
+    let stack_end_vaddr = STACK_TOP_BASE
+        .saturating_sub(aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, STACK_ASLR_MAX_PAGES) * 4096);
     let stack_size_pages: usize = 8;
     let stack_base_vaddr = stack_end_vaddr - (stack_size_pages as u64 * 4096);
 
@@ -775,6 +834,24 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
         return EINVAL;
     }
 
+    // 初期ヒープをASLR付きで確保
+    const HEAP_BASE_MIN: u64 = 0x4000_0000;
+    const HEAP_ASLR_MAX_PAGES: u64 = 0x8000; // 128MiB
+    let heap_base = HEAP_BASE_MIN
+        .saturating_add(aslr_offset_pages(aslr_seed ^ 0x4a11_6b5c, HEAP_ASLR_MAX_PAGES) * 4096);
+    let heap_map_size: u64 = 4096 * 2;
+    if let Err(_) = crate::mem::paging::map_and_copy_segment_to(
+        new_pt_phys,
+        heap_base,
+        0,
+        heap_map_size,
+        &[],
+        true,
+        false,
+    ) {
+        return EINVAL;
+    }
+
     // 現在のプロセスのページテーブルとヒープを更新
     let current_tid = match crate::task::current_thread_id() {
         Some(t) => t,
@@ -786,8 +863,8 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     };
     crate::task::with_process_mut(pid, |p| {
         p.set_page_table(new_pt_phys);
-        p.set_heap_start(0);
-        p.set_heap_end(0);
+        p.set_heap_start(heap_base);
+        p.set_heap_end(heap_base + heap_map_size);
     });
 
     // 新しいページテーブルに切り替えてジャンプ

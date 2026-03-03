@@ -511,7 +511,9 @@ pub fn create_user_page_table() -> Result<u64> {
     let new_l4 = unsafe { &mut *((new_l4_phys + phys_off) as *mut PageTable) };
     new_l4.zero();
 
-    // L4[0]: カーネルコード/スタックとユーザーコードが共存するエントリ
+    // KPTI強化: L4[0]（低位512GiB）のみ最小限コピーする。
+    // これにより上位L4エントリを通じた広域カーネルマッピングをユーザーテーブルから除外する。
+    // 実際のユーザー領域は exec/mmap 時に個別マップされる。
     if !kernel_l4[0].is_unused() {
         let kernel_l3_phys = kernel_l4[0].addr().as_u64();
         let kernel_l3 = unsafe { &*((kernel_l3_phys + phys_off) as *const PageTable) };
@@ -542,25 +544,118 @@ pub fn create_user_page_table() -> Result<u64> {
             new_l3[0].set_addr(x86_64::PhysAddr::new(new_l2_phys), kernel_l3[0].flags());
         }
 
-        // L3[1..512]: 1GB以上のカーネルメモリをそのままコピー
-        for i in 1..512 {
-            new_l3[i] = kernel_l3[i].clone();
-        }
-
         new_l4[0].set_addr(x86_64::PhysAddr::new(new_l3_phys), kernel_l4[0].flags());
     }
 
-    // L4[1..255]: その他の物理メモリ領域をカーネルからコピー
-    for i in 1..255 {
-        new_l4[i] = kernel_l4[i].clone();
-    }
-    // L4[255]: ユーザースタック領域（プロセス固有 - 空のままにする）
-    // L4[256..512]: カーネル上位半分をカーネルからコピー
-    for i in 256..512 {
-        new_l4[i] = kernel_l4[i].clone();
+    Ok(new_l4_phys)
+}
+
+/// 既存のユーザーページテーブルをフルコピーして新しいページテーブルを返す
+///
+/// - カーネル共有マッピングは `create_user_page_table()` により初期化
+/// - USER_ACCESSIBLE な4KiBページを新規フレームへコピー
+pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
+    use x86_64::structures::paging::PageTableFlags as Flags;
+
+    let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    let dst_table_phys = create_user_page_table()?;
+
+    let src_l4 = unsafe { &*((src_table_phys + phys_off) as *const PageTable) };
+    let dst_l4 = unsafe { &mut *((dst_table_phys + phys_off) as *mut PageTable) };
+    let mut dst_pt = unsafe { OffsetPageTable::new(dst_l4, VirtAddr::new(phys_off)) };
+
+    for l4i in 0usize..256 {
+        let l4e = &src_l4[l4i];
+        if l4e.is_unused() || !l4e.flags().contains(Flags::PRESENT) {
+            continue;
+        }
+        let src_l3 = unsafe { &*((l4e.addr().as_u64() + phys_off) as *const PageTable) };
+        for l3i in 0usize..512 {
+            let l3e = &src_l3[l3i];
+            if l3e.is_unused() || !l3e.flags().contains(Flags::PRESENT) {
+                continue;
+            }
+            if l3e.flags().contains(Flags::HUGE_PAGE) {
+                continue;
+            }
+            let src_l2 = unsafe { &*((l3e.addr().as_u64() + phys_off) as *const PageTable) };
+            for l2i in 0usize..512 {
+                let l2e = &src_l2[l2i];
+                if l2e.is_unused() || !l2e.flags().contains(Flags::PRESENT) {
+                    continue;
+                }
+                if l2e.flags().contains(Flags::HUGE_PAGE) {
+                    continue;
+                }
+                let src_l1 = unsafe { &*((l2e.addr().as_u64() + phys_off) as *const PageTable) };
+                for l1i in 0usize..512 {
+                    let pte = &src_l1[l1i];
+                    if pte.is_unused() {
+                        continue;
+                    }
+                    let src_flags = pte.flags();
+                    if !src_flags.contains(Flags::PRESENT)
+                        || !src_flags.contains(Flags::USER_ACCESSIBLE)
+                    {
+                        continue;
+                    }
+
+                    let vaddr = ((l4i as u64) << 39)
+                        | ((l3i as u64) << 30)
+                        | ((l2i as u64) << 21)
+                        | ((l1i as u64) << 12);
+                    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
+
+                    let new_frame = frame::allocate_frame()?;
+                    let mut dst_flags = Flags::PRESENT | Flags::USER_ACCESSIBLE;
+                    if src_flags.contains(Flags::WRITABLE) {
+                        dst_flags |= Flags::WRITABLE;
+                    }
+                    if src_flags.contains(Flags::NO_EXECUTE) {
+                        dst_flags |= Flags::NO_EXECUTE;
+                    }
+
+                    unsafe {
+                        let mut alloc_lock = frame::FRAME_ALLOCATOR.lock();
+                        let alloc_ref = alloc_lock
+                            .as_mut()
+                            .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+                        match dst_pt.map_to(page, new_frame, dst_flags, alloc_ref) {
+                            Ok(flush) => flush.ignore(),
+                            Err(
+                                x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(
+                                    _,
+                                ),
+                            ) => {
+                                let (old_frame, flush) = dst_pt
+                                    .unmap(page)
+                                    .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?;
+                                flush.ignore();
+                                let _ = frame::deallocate_frame(old_frame);
+                                let mut alloc_lock2 = frame::FRAME_ALLOCATOR.lock();
+                                let alloc_ref2 = alloc_lock2
+                                    .as_mut()
+                                    .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+                                dst_pt
+                                    .map_to(page, new_frame, dst_flags, alloc_ref2)
+                                    .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?
+                                    .ignore();
+                            }
+                            Err(_) => return Err(Kernel::Memory(Memory::InvalidAddress)),
+                        }
+                    }
+
+                    let src_ptr = (pte.addr().as_u64() + phys_off) as *const u8;
+                    let dst_ptr = (new_frame.start_address().as_u64() + phys_off) as *mut u8;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 4096);
+                    }
+                }
+            }
+        }
     }
 
-    Ok(new_l4_phys)
+    Ok(dst_table_phys)
 }
 
 /// 指定したページテーブル（物理アドレス）にセグメントをマップしてコピーする

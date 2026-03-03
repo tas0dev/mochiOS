@@ -31,20 +31,25 @@ fn read_cstring(ptr: u64) -> Result<String, u64> {
         return Err(EFAULT);
     }
     let mut len = 0usize;
-    unsafe {
+    let mut buf = [0u8; 1024];
+    let copied = crate::syscall::with_user_memory_access(|| unsafe {
         let mut p = ptr as *const u8;
         while ptr::read(p) != 0 {
-            len += 1;
-            p = p.add(1);
-            if len > 1024 {
+            if len >= buf.len() {
                 return Err(EINVAL);
             }
+            buf[len] = ptr::read(p);
+            len += 1;
+            p = p.add(1);
         }
-        let slice = core::slice::from_raw_parts(ptr as *const u8, len);
-        match core::str::from_utf8(slice) {
-            Ok(s) => Ok(s.to_string()),
-            Err(_) => Err(EINVAL),
-        }
+        Ok(())
+    });
+    if let Err(e) = copied {
+        return Err(e);
+    }
+    match core::str::from_utf8(&buf[..len]) {
+        Ok(s) => Ok(s.to_string()),
+        Err(_) => Err(EINVAL),
     }
 }
 
@@ -169,9 +174,9 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
         return EBADF;
     }
 
-    unsafe {
+    crate::syscall::with_user_memory_access(|| unsafe {
         core::ptr::write_bytes(stat_ptr as *mut u8, 0, MIN_STAT_SIZE as usize);
-    }
+    });
     SUCCESS
 }
 
@@ -218,10 +223,10 @@ pub fn readdir(_fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     let joined = names.join("\n");
     let bytes = joined.as_bytes();
     let to_copy = core::cmp::min(bytes.len(), buf_len as usize);
-    unsafe {
+    crate::syscall::with_user_memory_access(|| unsafe {
         let dst = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, to_copy);
         dst.copy_from_slice(&bytes[..to_copy]);
-    }
+    });
     to_copy as u64
 }
 
@@ -255,9 +260,9 @@ pub fn getcwd(buf_ptr: u64, size: u64) -> u64 {
     if (size as usize) < cwd.len() {
         return EINVAL;
     }
-    unsafe {
+    crate::syscall::with_user_memory_access(|| unsafe {
         core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf_ptr as *mut u8, cwd.len());
-    }
+    });
     buf_ptr
 }
 
@@ -294,10 +299,10 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return 0;
     }
     let to_read = core::cmp::min(avail, len as usize);
-    unsafe {
+    crate::syscall::with_user_memory_access(|| unsafe {
         let dst = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, to_read);
         dst.copy_from_slice(&fh.data[fh.pos..fh.pos + to_read]);
-    }
+    });
     fh.pos += to_read;
     drop(table);
     to_read as u64

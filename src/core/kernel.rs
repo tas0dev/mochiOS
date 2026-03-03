@@ -19,7 +19,17 @@ fn kernel_main() -> ! {
 
     // core.serviceのみ起動（他のサービスはcore.serviceが管理）
     info!("Starting core.service");
-    exec_kernel_with_name("core.service", "core.service");
+    let manager_pid = exec_kernel_with_name("core.service", "core.service");
+    if manager_pid != 0
+        && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
+    {
+        crate::syscall::exec::register_service_manager_pid(manager_pid);
+    } else {
+        crate::warn!(
+            "Failed to register core.service as service manager (ret={:#x})",
+            manager_pid
+        );
+    }
 
     // カーネルはアイドル状態に入る
     info!("Kernel initialization complete. Entering idle loop...");

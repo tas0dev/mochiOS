@@ -734,10 +734,10 @@ const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
 
 ### フェーズ4: 長期対応（根本的なアーキテクチャ改善）
 
-13. **KPTI（カーネルページテーブル分離）の実装**
-14. **per-CPU データ構造の導入（マルチコア対応）**
-15. **ID-based プロセス認可機能**
-16. **wait()/munmap() の完全実装**
+13. **KPTI（カーネルページテーブル分離）の実装**（実装済み）
+14. **per-CPU データ構造の導入（マルチコア対応）**（実装済み）
+15. **ID-based プロセス認可機能**（実装済み）
+16. **wait()/munmap() の完全実装**（実装済み）
 
 ---
 
@@ -769,18 +769,24 @@ const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
 
 | ID | 種別 | 状態 | 内容 | 対応 |
 |---|---|---|---|---|
-| ADD-SEC-07 | `fork()` 分離欠如 | **緩和済み** | 子プロセスが親と同一ページテーブルを共有していた | `fork()` を fail-closed (`ENOSYS`) に変更し、危険経路を停止 |
+| ADD-SEC-07 | `fork()` 分離欠如 | **修正済み** | 子プロセスが親と同一ページテーブルを共有していた | 初期緩和（fail-closed）後に `clone_user_page_table()` ベースの分離実装へ移行 |
 | ADD-SEC-08 | `.service` 認可のなりすまし余地 | **修正済み** | プロセス名比較ベースの実行制御 | `core.service` 起動時に PID を登録し、Core または登録PIDのみ `.service` 実行可能に変更 |
 | ADD-SEC-09 | `mmap/brk/munmap` 範囲検証不足 | **修正済み** | ユーザー空間境界・加算オーバーフロー・未実装 `munmap` | checked 演算による境界検証、`munmap` 実装、ページ解放経路を追加 |
 | ADD-SEC-10 | 物理フレーム解放不能 | **修正済み** | フレームアロケータが割り当てのみ対応 | recycle スタックを導入し `deallocate_frame` を実装 |
 | ADD-SEC-11 | カーネル `.text` 書き込み可能 | **緩和済み** | 初期ページングでカーネルコードを RW マップ | リンカ依存を避けるため、起動時に現在実行中のカーネルコードページを RO 化する保守的緩和を追加 |
 | ADD-SEC-12 | カーネルスタックプール unsafe 共有 | **修正済み** | `static mut KSTACK_POOL` に raw pointer でアクセス | `SpinLock<[u8; ...]>` へ置換し論理ガード領域を追加 |
+| ADD-SEC-13 | KPTI 未実装 | **修正済み** | syscall/interrupt 経路でユーザーCR3のままカーネル処理を継続 | syscall と timer IRQ 入口で kernel CR3 へ切替し、復帰スレッドの user CR3 へ戻す経路を追加。`create_user_page_table()` も L4[0] 最小コピーへ縮小 |
+| ADD-SEC-14 | per-CPU 基盤欠如 | **修正済み** | CPUローカルなカーネルCR3/stack管理の土台がない | `percpu` を APIC ID ベースの CPU スロット配列へ拡張し、`kernel_cr3`/`syscall_kernel_rsp` を CPU毎に保持 |
+| ADD-SEC-15 | `.service` 管理者登録が名前依存 | **修正済み** | `core.service` 文字列一致で管理者PIDを決定 | kernel 起動時に実際に生成された PID を `register_service_manager_pid()` で登録する ID ベースへ変更 |
+| ADD-SEC-16 | `wait()` の回収セマンティクス不足 | **修正済み** | 子終了状態を回収せず POSIX 互換性が低い | process に Zombie/exit_code を保持し `wait(WNOHANG含む)` で回収 (`ECHILD/0/child pid`) を実装 |
+| ADD-SEC-17 | `fork()` 分離未実装 | **修正済み** | `fork` が fail-closed で実運用不能 | `clone_user_page_table()` を追加し USER_ACCESSIBLE ページを新規フレームへ複製、`new_fork_child` で子を生成 |
+| ADD-SEC-18 | ASLR 固定配置 | **修正済み** | stack/heap/PIE load bias が固定値で予測可能 | exec/execve に stack/heap ASLR を追加、`task::elf` の PIE load bias をランダム化 |
+| ADD-SEC-19 | KPTI下の user pointer 参照不整合 | **修正済み** | kernel CR3実行中にユーザー仮想アドレスを直接参照しうる | `with_user_memory_access()` を追加し、syscall内の user pointer 参照区間のみ安全に user CR3 へ切替 |
 
 ### 追補で確認した検証結果（再検証）
 
 - `cargo fmt --all -- --check`: **成功**
-- `cargo check --quiet`: **失敗（既知前提）**
-  `builders/newlib.rs` が `src/lib/configure` の存在を前提としており、未配置環境ではビルド前に panic することを再確認。
+- `MAKEINFO=makeinfo CC_FOR_TARGET=cc CXX_FOR_TARGET=c++ AR_FOR_TARGET=ar RANLIB_FOR_TARGET=ranlib cargo build --quiet`: **成功**
 
 ### 追補レビューの要約（リファクタリング観点）
 

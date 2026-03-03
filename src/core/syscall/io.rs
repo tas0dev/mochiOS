@@ -51,35 +51,34 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return EFAULT;
     }
 
-    let buf = unsafe {
+    crate::syscall::with_user_memory_access(|| unsafe {
         debug!("write: creating slice from {:#x}, len={}", buf_ptr, len);
-        slice::from_raw_parts(buf_ptr as *const u8, len as usize)
-    };
+        let buf = slice::from_raw_parts(buf_ptr as *const u8, len as usize);
+        debug!(
+            "write: successfully created slice, first byte={:#x}",
+            buf[0]
+        );
 
-    debug!(
-        "write: successfully created slice, first byte={:#x}",
-        buf[0]
-    );
-
-    // UTF-8として解釈を試みる
-    if let Ok(s) = core::str::from_utf8(buf) {
-        debug!("write: valid UTF-8: {:?}", s);
-        // シリアルポートとフレームバッファの両方に出力
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            let mut console = console::SERIAL.lock();
-            let _ = console.write_str(s);
-        });
-        crate::util::vga::print(format_args!("{}", s));
-    } else {
-        debug!("write: invalid UTF-8, writing bytes");
-        // UTF-8でない場合はバイト列として出力
-        for &byte in buf {
+        // UTF-8として解釈を試みる
+        if let Ok(s) = core::str::from_utf8(buf) {
+            debug!("write: valid UTF-8: {:?}", s);
+            // シリアルポートとフレームバッファの両方に出力
             x86_64::instructions::interrupts::without_interrupts(|| {
                 let mut console = console::SERIAL.lock();
-                console.send_byte(byte);
+                let _ = console.write_str(s);
             });
+            crate::util::vga::print(format_args!("{}", s));
+        } else {
+            debug!("write: invalid UTF-8, writing bytes");
+            // UTF-8でない場合はバイト列として出力
+            for &byte in buf {
+                x86_64::instructions::interrupts::without_interrupts(|| {
+                    let mut console = console::SERIAL.lock();
+                    console.send_byte(byte);
+                });
+            }
         }
-    }
+    });
 
     debug!("write: returning {}", len);
     // 書き込んだバイト数を返す
@@ -110,10 +109,10 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             return EFAULT;
         }
         // 返された値を1バイトとしてコピー
-        unsafe {
+        crate::syscall::with_user_memory_access(|| unsafe {
             let dst = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, 1);
             dst[0] = ch as u8;
-        }
+        });
         return 1;
     }
 
@@ -141,19 +140,24 @@ pub fn log(msg: u64, len: u64, level: u64) -> u64 {
         return super::types::EFAULT;
     }
 
-    let slice = unsafe { slice::from_raw_parts(msg as *const u8, len as usize) };
-    let msg = match core::str::from_utf8(slice) {
-        Ok(s) => s,
-        Err(_) => return super::types::EINVAL,
-    };
+    let mut result = SUCCESS;
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let slice = slice::from_raw_parts(msg as *const u8, len as usize);
+        let msg = match core::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(_) => {
+                result = super::types::EINVAL;
+                return;
+            }
+        };
 
-    match level {
-        0 => error!("{}", msg),
-        1 => warn!("{}", msg),
-        2 => info!("{}", msg),
-        3 => debug!("{}", msg),
-        _ => return super::types::EINVAL,
-    }
-
-    SUCCESS
+        match level {
+            0 => error!("{}", msg),
+            1 => warn!("{}", msg),
+            2 => info!("{}", msg),
+            3 => debug!("{}", msg),
+            _ => result = super::types::EINVAL,
+        }
+    });
+    result
 }

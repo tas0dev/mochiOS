@@ -42,6 +42,10 @@ pub struct Thread {
     fork_user_rflags: u64,
     /// TLS用 FS ベースレジスタ (arch_prctl ARCH_SET_FS で設定)
     fs_base: u64,
+    /// 現在システムコールコンテキスト中かどうか
+    in_syscall: bool,
+    /// KPTI 復帰用のユーザーCR3
+    syscall_user_cr3: u64,
 }
 
 // Simple kernel stack pool for creating kernel stacks for threads
@@ -138,6 +142,8 @@ impl Thread {
             user_stack: 0,
             fork_user_rflags: 0,
             fs_base: 0,
+            in_syscall: false,
+            syscall_user_cr3: 0,
         }
     }
 
@@ -232,6 +238,8 @@ impl Thread {
             user_stack,
             fork_user_rflags: 0,
             fs_base: 0,
+            in_syscall: false,
+            syscall_user_cr3: 0,
         }
     }
 
@@ -327,12 +335,31 @@ impl Thread {
             user_stack: user_rsp,
             fork_user_rflags: user_rflags,
             fs_base,
+            in_syscall: false,
+            syscall_user_cr3: 0,
         }
     }
 
     /// TLS FSベースを設定
     pub fn set_fs_base(&mut self, base: u64) {
         self.fs_base = base;
+    }
+
+    /// システムコールコンテキスト中かどうか
+    pub fn in_syscall(&self) -> bool {
+        self.in_syscall
+    }
+
+    pub fn set_in_syscall(&mut self, in_syscall: bool) {
+        self.in_syscall = in_syscall;
+    }
+
+    pub fn syscall_user_cr3(&self) -> u64 {
+        self.syscall_user_cr3
+    }
+
+    pub fn set_syscall_user_cr3(&mut self, cr3: u64) {
+        self.syscall_user_cr3 = cr3;
     }
 
     /// スレッドIDを取得

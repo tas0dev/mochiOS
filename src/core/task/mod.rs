@@ -12,8 +12,9 @@ pub mod usermode;
 pub use context::{switch_context, switch_to_thread, Context};
 pub use ids::{PrivilegeLevel, ProcessId, ProcessState, ThreadId, ThreadState};
 pub use process::{
-    add_process, find_process_id_by_name, for_each_process, process_count, with_process,
-    with_process_mut, Process, ProcessTable,
+    add_process, find_process_id_by_name, for_each_process, has_child_process, mark_process_exited,
+    process_count, reap_zombie_child_process, with_process, with_process_mut, Process,
+    ProcessTable,
 };
 pub use scheduler::{
     block_current_thread, disable_scheduler, enable_scheduler, exit_current_task, init_scheduler,

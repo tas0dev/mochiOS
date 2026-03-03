@@ -100,8 +100,10 @@ pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         if !crate::syscall::validate_user_ptr(buf_ptr, len as u64) {
             return EFAULT;
         }
-        let src_slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
-        data[..len].copy_from_slice(src_slice);
+        crate::syscall::with_user_memory_access(|| unsafe {
+            let src_slice = core::slice::from_raw_parts(buf_ptr as *const u8, len);
+            data[..len].copy_from_slice(src_slice);
+        });
     }
 
     let msg = Message {
@@ -146,8 +148,10 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
         if !crate::syscall::validate_user_ptr(buf_ptr, copy_len as u64) {
             return EFAULT;
         }
-        let dest_slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, copy_len) };
-        dest_slice.copy_from_slice(&msg.data[..copy_len]);
+        crate::syscall::with_user_memory_access(|| unsafe {
+            let dest_slice = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, copy_len);
+            dest_slice.copy_from_slice(&msg.data[..copy_len]);
+        });
     }
 
     // 上位32bitに送信元ID、下位32bitに長さ

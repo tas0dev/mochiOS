@@ -1,4 +1,5 @@
 /// タスク関連システムコール
+
 pub fn yield_now() -> u64 {
     crate::task::yield_now();
     0
@@ -65,8 +66,12 @@ pub fn get_thread_id_by_name(name_ptr: u64, name_len: u64) -> u64 {
         return crate::syscall::EFAULT;
     }
 
-    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, name_len) };
-    let name = match core::str::from_utf8(name_bytes) {
+    let mut name_buf = [0u8; MAX_NAME_LEN];
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let src = core::slice::from_raw_parts(name_ptr as *const u8, name_len);
+        name_buf[..name_len].copy_from_slice(src);
+    });
+    let name = match core::str::from_utf8(&name_buf[..name_len]) {
         Ok(s) => s,
         Err(_) => return crate::syscall::EINVAL,
     };

@@ -1,12 +1,13 @@
 //! ELFローダ
 
 use crate::error::{KernelError, MemoryError, ProcessError, Result};
-use crate::mem::{self, user, frame};
-use x86_64::structures::paging::Page;
-use x86_64::VirtAddr;
-use x86_64::structures::paging::PageTableFlags;
-use crate::task::{add_process, add_thread, Process, PrivilegeLevel, Thread};
 use crate::init;
+use crate::mem::{frame, user};
+use crate::task::{add_process, add_thread, PrivilegeLevel, Process, Thread};
+use core::sync::atomic::{AtomicU64, Ordering};
+use x86_64::structures::paging::Page;
+use x86_64::structures::paging::PageTableFlags;
+use x86_64::VirtAddr;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const PT_LOAD: u32 = 1;
@@ -24,6 +25,8 @@ const DT_RELAENT: i64 = 9;
 const R_X86_64_RELATIVE: u32 = 8;
 
 const PIE_LOAD_BIAS: u64 = 0x2000_0000;
+const PIE_ASLR_WINDOW_PAGES: u64 = 0x4000; // 64MiB
+static PIE_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0xa726_f38d_c941_5e2b);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -60,15 +63,36 @@ struct Elf64Phdr {
 #[derive(Debug, Clone, Copy)]
 pub struct LoadedElf {
     pub entry: u64,
+    pub load_bias: u64,
     pub stack_top: u64,
     pub stack_bottom: u64,
+}
+
+#[inline]
+fn aslr_mix64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+fn next_pie_load_bias() -> u64 {
+    let ctr = PIE_ASLR_COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+    let ticks = crate::interrupt::timer::get_ticks();
+    let offset_pages = aslr_mix64(ctr ^ ticks.rotate_left(13)) % PIE_ASLR_WINDOW_PAGES;
+    PIE_LOAD_BIAS + offset_pages * 4096
 }
 
 pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
     let header = parse_header(data)?;
     validate_header(header)?;
 
-    let load_bias = if header.e_type == ET_DYN { PIE_LOAD_BIAS } else { 0 };
+    let load_bias = if header.e_type == ET_DYN {
+        next_pie_load_bias()
+    } else {
+        0
+    };
 
     let phoff = header.e_phoff as usize;
     let phentsize = header.e_phentsize as usize;
@@ -128,6 +152,7 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
 
     Ok(LoadedElf {
         entry: header.e_entry.wrapping_add(load_bias),
+        load_bias,
         stack_top: stack.top,
         stack_bottom: stack.bottom,
     })
@@ -201,7 +226,7 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
 
     // Fetch ELF header again to compute phdr addr and counts
     let header = parse_header(data)?;
-    let load_bias = if header.e_type == ET_DYN { PIE_LOAD_BIAS } else { 0 };
+    let load_bias = loaded.load_bias;
     let at_phdr = load_bias.wrapping_add(header.e_phoff);
     let at_phent = header.e_phentsize as u64;
     let at_phnum = header.e_phnum as u64;

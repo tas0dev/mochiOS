@@ -32,6 +32,40 @@ pub fn validate_user_ptr(ptr: u64, len: u64) -> bool {
     ptr < USER_SPACE_END && end <= USER_SPACE_END
 }
 
+/// ユーザーポインタを実際に参照する短い区間を、必要に応じてユーザーCR3で実行する。
+///
+/// KPTI有効時、syscall本体はkernel CR3で実行されるため、ユーザー仮想アドレスを
+/// 直接参照する区間だけ一時的にuser CR3へ切り替える。
+pub fn with_user_memory_access<R>(f: impl FnOnce() -> R) -> R {
+    use x86_64::registers::control::Cr3;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let kernel_cr3 = crate::percpu::kernel_cr3();
+        if kernel_cr3 == 0 {
+            return f();
+        }
+
+        let (cur, _) = Cr3::read();
+        let current_cr3 = cur.start_address().as_u64();
+        if current_cr3 != kernel_cr3 {
+            return f();
+        }
+
+        let user_pt = crate::task::current_thread_id()
+            .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+            .and_then(|pid| crate::task::with_process(pid, |p| p.page_table()))
+            .flatten()
+            .unwrap_or(0);
+        if user_pt == 0 {
+            return f();
+        }
+
+        crate::mem::paging::switch_page_table(user_pt);
+        let out = f();
+        crate::mem::paging::switch_page_table(kernel_cr3);
+        out
+    })
+}
+
 pub use types::{
     SyscallNumber, EAGAIN, EBADF, EFAULT, EINVAL, ENODATA, ENOENT, ENOSYS, EPERM, SUCCESS,
 };
@@ -182,9 +216,17 @@ extern "C" fn syscall_handler_rust(
     arg3: u64,
     arg4: u64,
 ) -> u64 {
-    // ユーザーのページテーブルはカーネルのマッピングをすべて含んでいるため、
-    // CR3の切り替えは不要。ユーザーメモリへのアクセスもそのまま可能。
-    dispatch(num, arg0, arg1, arg2, arg3, arg4)
+    let current_tid = crate::task::current_thread_id();
+    if let Some(tid) = current_tid {
+        crate::task::with_thread_mut(tid, |t| t.set_in_syscall(true));
+    }
+    let prev_cr3 = syscall_entry::switch_to_kernel_page_table();
+    let ret = dispatch(num, arg0, arg1, arg2, arg3, arg4);
+    syscall_entry::restore_page_table(prev_cr3);
+    if let Some(tid) = current_tid {
+        crate::task::with_thread_mut(tid, |t| t.set_in_syscall(false));
+    }
+    ret
 }
 
 /// SYSCALL 命令エントリから呼ばれる System V ABI ディスパッチ関数

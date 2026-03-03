@@ -40,6 +40,8 @@ pub mod util;
 
 /// CPU機能の初期化
 pub mod cpu;
+/// per-CPU状態管理
+pub mod percpu;
 
 pub use kernel::kernel_entry;
 pub use result::{Kernel, Result};

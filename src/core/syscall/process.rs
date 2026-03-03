@@ -1,6 +1,7 @@
 //! プロセス管理関連のシステムコール
 
 use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, SUCCESS};
+use core::sync::atomic::Ordering;
 
 /// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
 const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
@@ -160,12 +161,76 @@ pub fn brk(addr: u64) -> u64 {
 ///
 /// プロセスを複製する
 pub fn fork() -> u64 {
-    // CRIT-03/HIGH-01 対応: ページテーブル共有実装とグローバル一時保存値依存は
-    // プロセス分離/整合性を破るため、安全な複製実装が入るまで fail-closed とする。
-    crate::warn!(
-        "fork is temporarily disabled until isolated address-space cloning is implemented"
+    let parent_tid = match current_thread_id() {
+        Some(tid) => tid,
+        None => return ENOSYS,
+    };
+    let parent_pid = match crate::task::with_thread(parent_tid, |t| t.process_id()) {
+        Some(pid) => pid,
+        None => return ENOSYS,
+    };
+
+    let (parent_priv, parent_priority, parent_pt, heap_start, heap_end) =
+        match crate::task::with_process(parent_pid, |p| {
+            (
+                p.privilege(),
+                p.priority(),
+                p.page_table(),
+                p.heap_start(),
+                p.heap_end(),
+            )
+        }) {
+            Some(v) => v,
+            None => return ENOSYS,
+        };
+    let parent_pt = match parent_pt {
+        Some(pt) => pt,
+        None => return ENOSYS,
+    };
+
+    let child_pt = match crate::mem::paging::clone_user_page_table(parent_pt) {
+        Ok(pt) => pt,
+        Err(_) => return ENOMEM,
+    };
+
+    let user_rip = crate::syscall::syscall_entry::SYSCALL_SAVED_USER_RIP.load(Ordering::SeqCst);
+    let user_rsp = crate::syscall::syscall_entry::SYSCALL_TEMP_USER_RSP.load(Ordering::SeqCst);
+    let user_rflags =
+        crate::syscall::syscall_entry::SYSCALL_SAVED_USER_RFLAGS.load(Ordering::SeqCst);
+    let parent_fs = crate::task::with_thread(parent_tid, |t| t.fs_base()).unwrap_or(0);
+    if user_rip == 0 || user_rsp == 0 {
+        return ENOSYS;
+    }
+
+    let mut child_proc =
+        crate::task::Process::new("fork", parent_priv, Some(parent_pid), parent_priority);
+    child_proc.set_page_table(child_pt);
+    child_proc.set_heap_start(heap_start);
+    child_proc.set_heap_end(heap_end);
+    let child_pid = child_proc.id();
+    if crate::task::add_process(child_proc).is_none() {
+        return ENOMEM;
+    }
+
+    const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
+    let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
+        Some(s) => s,
+        None => return ENOMEM,
+    };
+    let child_thread = crate::task::Thread::new_fork_child(
+        child_pid,
+        user_rip,
+        user_rsp,
+        user_rflags,
+        parent_fs,
+        kstack,
+        KERNEL_THREAD_STACK_SIZE,
     );
-    ENOSYS
+    if crate::task::add_thread(child_thread).is_none() {
+        return ENOMEM;
+    }
+
+    child_pid.as_u64()
 }
 
 /// Sleepシステムコール
@@ -218,51 +283,34 @@ pub fn wait(_pid: u64, status_ptr: u64, options: u64) -> u64 {
         None => return ECHILD,
     };
 
-    // 対象子プロセスを列挙
-    let mut target_children = [0u64; 64];
-    let mut target_count = 0usize;
-    crate::task::for_each_process(|proc| {
-        if proc.parent_id() != Some(current_pid) {
-            return;
-        }
-        let child_pid = proc.id().as_u64();
-        if pid == -1 || pid as u64 == child_pid {
-            if target_count < target_children.len() {
-                target_children[target_count] = child_pid;
-                target_count += 1;
-            }
-        }
-    });
-    if target_count == 0 {
-        return ECHILD;
-    }
+    let target_pid = if pid == -1 {
+        None
+    } else {
+        Some(crate::task::ProcessId::from_u64(pid as u64))
+    };
 
-    if options & WNOHANG != 0 {
-        // ノンブロッキング: まだ回収可能な子がなければ0
-        return 0;
-    }
-
-    // 簡易ブロッキング: 子スレッドが消えるまで待機
+    // POSIX互換の待機: ゾンビを回収、存在しなければブロックまたはWNOHANGで0
     loop {
-        for idx in 0..target_count {
-            let child_pid = target_children[idx];
-            let mut child_has_live_thread = false;
-            crate::task::for_each_thread(|thread| {
-                if thread.process_id().as_u64() == child_pid
-                    && thread.state() != crate::task::ThreadState::Terminated
-                {
-                    child_has_live_thread = true;
-                }
-            });
-            if !child_has_live_thread {
-                if status_ptr != 0 {
-                    unsafe {
-                        *(status_ptr as *mut i32) = 0;
-                    }
-                }
-                return child_pid;
+        if let Some((reaped_pid, exit_code)) =
+            crate::task::reap_zombie_child_process(current_pid, target_pid)
+        {
+            if status_ptr != 0 {
+                let status = ((exit_code & 0xff) << 8) as i32;
+                crate::syscall::with_user_memory_access(|| unsafe {
+                    core::ptr::write_unaligned(status_ptr as *mut i32, status);
+                });
             }
+            return reaped_pid.as_u64();
         }
+
+        if !crate::task::has_child_process(current_pid, target_pid) {
+            return ECHILD;
+        }
+
+        if options & WNOHANG != 0 {
+            return 0;
+        }
+
         crate::task::yield_now();
     }
 }
@@ -434,7 +482,9 @@ pub fn futex(uaddr: u64, op: u32, val: u64, _timeout: u64) -> u64 {
             if !super::validate_user_ptr(uaddr, 4) {
                 return EFAULT;
             }
-            let current_val = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+            let current_val = crate::syscall::with_user_memory_access(|| unsafe {
+                core::ptr::read_volatile(uaddr as *const u32)
+            });
             if current_val != val as u32 {
                 return EAGAIN;
             }
@@ -479,7 +529,9 @@ pub fn arch_prctl(code: u64, addr: u64) -> u64 {
             if !super::validate_user_ptr(addr, 8) {
                 return EFAULT;
             }
-            unsafe { core::ptr::write_unaligned(addr as *mut u64, val) };
+            crate::syscall::with_user_memory_access(|| unsafe {
+                core::ptr::write_unaligned(addr as *mut u64, val)
+            });
             SUCCESS
         }
         _ => EINVAL,
@@ -509,8 +561,12 @@ pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
         return 0;
     }
 
-    let name_slice = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len as usize) };
-    let name = match str::from_utf8(name_slice) {
+    let mut name_buf = [0u8; 64];
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let src = core::slice::from_raw_parts(name_ptr as *const u8, len as usize);
+        name_buf[..len as usize].copy_from_slice(src);
+    });
+    let name = match str::from_utf8(&name_buf[..len as usize]) {
         Ok(s) => s,
         Err(_) => return 0,
     };

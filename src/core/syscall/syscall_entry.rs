@@ -87,6 +87,7 @@ pub fn init_syscall() {
     };
 
     SYSCALL_KERNEL_RSP.store(kstack_top, Ordering::SeqCst);
+    crate::percpu::init_boot_cpu(kstack_top);
 
     crate::info!("SYSCALL/SYSRET initialized: LSTAR={:#x}", lstar_val);
 }
@@ -95,6 +96,71 @@ pub fn init_syscall() {
 pub fn update_kernel_rsp(rsp: u64) {
     // SeqCst を使用してメモリ順序を保証する (MED-05)
     SYSCALL_KERNEL_RSP.store(rsp, Ordering::SeqCst);
+    crate::percpu::set_syscall_kernel_rsp(rsp);
+}
+
+/// KPTI: 現在CR3がユーザーならカーネルCR3へ切り替え、元のCR3を返す
+pub fn switch_to_kernel_page_table() -> u64 {
+    let kernel_cr3 = crate::percpu::kernel_cr3();
+    if kernel_cr3 == 0 {
+        return 0;
+    }
+    let (current_cr3, _) = x86_64::registers::control::Cr3::read();
+    let current = current_cr3.start_address().as_u64();
+    if current == kernel_cr3 {
+        return 0;
+    }
+    crate::mem::paging::switch_page_table(kernel_cr3);
+    current
+}
+
+/// KPTI: 以前のCR3へ戻す（0はno-op）
+pub fn restore_page_table(previous_cr3: u64) {
+    if previous_cr3 != 0 {
+        crate::mem::paging::switch_page_table(previous_cr3);
+    }
+}
+
+/// KPTI: 現在スレッドがユーザー権限なら、そのプロセスのユーザーCR3へ切り替える
+pub fn switch_to_current_thread_user_page_table() {
+    let tid = match crate::task::current_thread_id() {
+        Some(t) => t,
+        None => return,
+    };
+    let pid = match crate::task::with_thread(tid, |t| t.process_id()) {
+        Some(p) => p,
+        None => return,
+    };
+    let is_core = crate::task::with_process(pid, |p| p.privilege())
+        .is_some_and(|lvl| lvl == crate::task::PrivilegeLevel::Core);
+    if is_core {
+        return;
+    }
+    if let Some(user_pt) = crate::task::with_process(pid, |p| p.page_table()).flatten() {
+        crate::mem::paging::switch_page_table(user_pt);
+    }
+}
+
+/// KPTI: SYSCALL/INT入口でカーネルCR3へ切り替える
+pub fn kpti_enter_for_current_thread() {
+    let previous = switch_to_kernel_page_table();
+    if let Some(tid) = crate::task::current_thread_id() {
+        crate::task::with_thread_mut(tid, |t| t.set_syscall_user_cr3(previous));
+    }
+}
+
+/// KPTI: SYSCALL/INT出口でユーザーCR3へ戻す
+pub fn kpti_leave_for_current_thread() {
+    let restore = crate::task::current_thread_id()
+        .and_then(|tid| {
+            crate::task::with_thread_mut(tid, |t| {
+                let cr3 = t.syscall_user_cr3();
+                t.set_syscall_user_cr3(0);
+                cr3
+            })
+        })
+        .unwrap_or(0);
+    restore_page_table(restore);
 }
 
 /// SYSCALL エントリポイント (naked function)
