@@ -46,23 +46,27 @@ pub struct Thread {
 
 // Simple kernel stack pool for creating kernel stacks for threads
 const KSTACK_POOL_SIZE: usize = 4096 * 64; // 256 KiB
-static mut KSTACK_POOL: [u8; KSTACK_POOL_SIZE] = [0; KSTACK_POOL_SIZE];
+const KSTACK_GUARD_BYTES: usize = 4096;
+static KSTACK_POOL: SpinLock<[u8; KSTACK_POOL_SIZE]> = SpinLock::new([0; KSTACK_POOL_SIZE]);
 static NEXT_KSTACK_OFFSET: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 /// カーネルスタックを内部プールから割り当てます。
 /// Returns base address (bottom) of stack.
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
-    if size == 0 || size > KSTACK_POOL_SIZE {
+    if size == 0 || size > KSTACK_POOL_SIZE.saturating_sub(KSTACK_GUARD_BYTES) {
         return None;
     }
     // align size to 16
     let size = (size + 0xF) & !0xF;
-    let off = NEXT_KSTACK_OFFSET.fetch_add(size, core::sync::atomic::Ordering::SeqCst);
-    if off + size > KSTACK_POOL_SIZE {
+    let alloc_size = size.checked_add(KSTACK_GUARD_BYTES)?;
+    let off = NEXT_KSTACK_OFFSET.fetch_add(alloc_size, core::sync::atomic::Ordering::SeqCst);
+    if off + alloc_size > KSTACK_POOL_SIZE {
         return None;
     }
-    let ptr = unsafe { &raw const KSTACK_POOL as *const _ as usize + off } as u64;
+    // ガード領域を確保してから実スタックを返す（論理ガード）
+    let pool = KSTACK_POOL.lock();
+    let ptr = (pool.as_ptr() as usize + off + KSTACK_GUARD_BYTES) as u64;
     Some(ptr)
 }
 
@@ -613,6 +617,13 @@ where
 /// 現在のスレッド数を取得
 pub fn thread_count() -> usize {
     THREAD_QUEUE.lock().count()
+}
+
+/// 指定した u64 IDのスレッドが存在するか確認 (IPC送信先検証用)
+pub fn thread_id_exists(id_val: u64) -> bool {
+    let queue = THREAD_QUEUE.lock();
+    let exists = queue.iter().any(|t| t.id().as_u64() == id_val);
+    exists
 }
 
 /// 現在実行中のスレッドIDを取得

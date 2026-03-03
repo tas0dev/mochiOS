@@ -26,6 +26,10 @@ fn read_cstring(ptr: u64) -> Result<String, u64> {
     if ptr == 0 {
         return Err(EINVAL);
     }
+    // ユーザー空間アドレスの有効性を検証する (最大長分)
+    if !crate::syscall::validate_user_ptr(ptr, 1024) {
+        return Err(EFAULT);
+    }
     let mut len = 0usize;
     unsafe {
         let mut p = ptr as *const u8;
@@ -143,8 +147,31 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
     if stat_ptr == 0 {
         return EFAULT;
     }
-    // 最小限の実装: 成功を返す（ユーザーland が構造体の全フィールドを必要としない前提）
-    let _ = fd; // 将来的には st_mode, st_size を書き込む
+    // 互換性のため最小サイズ分をゼロ初期化する
+    const MIN_STAT_SIZE: u64 = 64;
+    if !crate::syscall::validate_user_ptr(stat_ptr, MIN_STAT_SIZE) {
+        return EFAULT;
+    }
+
+    let fd_valid = if fd < FD_BASE as u64 {
+        // stdin/stdout/stderr
+        true
+    } else {
+        let idx = fd as usize;
+        if idx >= MAX_FDS {
+            false
+        } else {
+            let table = FD_TABLE.lock();
+            table[idx] != 0
+        }
+    };
+    if !fd_valid {
+        return EBADF;
+    }
+
+    unsafe {
+        core::ptr::write_bytes(stat_ptr as *mut u8, 0, MIN_STAT_SIZE as usize);
+    }
     SUCCESS
 }
 
@@ -179,6 +206,10 @@ pub fn rmdir(_path_ptr: u64) -> u64 {
 pub fn readdir(_fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     if buf_ptr == 0 || buf_len == 0 {
         return EINVAL;
+    }
+    // ユーザー空間アドレスの有効性を検証する
+    if !crate::syscall::validate_user_ptr(buf_ptr, buf_len) {
+        return EFAULT;
     }
     let mut names = Vec::new();
     for e in crate::init::fs::entries() {
@@ -216,6 +247,10 @@ pub fn getcwd(buf_ptr: u64, size: u64) -> u64 {
     if buf_ptr == 0 || size == 0 {
         return EINVAL;
     }
+    // ユーザー空間アドレスの有効性を検証する
+    if !crate::syscall::validate_user_ptr(buf_ptr, size) {
+        return EFAULT;
+    }
     let cwd = b"/\0";
     if (size as usize) < cwd.len() {
         return EINVAL;
@@ -234,6 +269,10 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
     }
+    // ユーザー空間アドレスの有効性を事前に検証する
+    if !crate::syscall::validate_user_ptr(buf_ptr, len) {
+        return EFAULT;
+    }
     if fd < FD_BASE as u64 {
         return EBADF;
     }
@@ -241,14 +280,13 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     if idx >= MAX_FDS {
         return EBADF;
     }
+    // UAF修正: ロックを保持したままFileHandleにアクセスする
+    // (ロック保持中はclose()がブロックされるため解放済みメモリアクセスを防ぐ)
     let mut table = FD_TABLE.lock();
     let ptr = table[idx];
     if ptr == 0 {
         return EBADF;
     }
-    // ロックを解放してからユーザーメモリへアクセス
-    table[idx] = table[idx];
-    drop(table);
 
     let fh = unsafe { &mut *(ptr as *mut FileHandle) };
     let avail = fh.data.len().saturating_sub(fh.pos);
@@ -261,5 +299,6 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         dst.copy_from_slice(&fh.data[fh.pos..fh.pos + to_read]);
     }
     fh.pos += to_read;
+    drop(table);
     to_read as u64
 }

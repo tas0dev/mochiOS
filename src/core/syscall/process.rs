@@ -1,7 +1,31 @@
 //! プロセス管理関連のシステムコール
 
 use super::types::{EFAULT, EINVAL, ENOMEM, ENOSYS, SUCCESS};
+
+/// ユーザー空間の上限アドレス (x86-64 canonical hole 下側)
+const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+/// Linux互換: 子プロセスが存在しない
+const ECHILD: u64 = (-10i64) as u64;
+/// PIT割り込み周期 (10ms)
+const TICK_MS: u64 = 10;
 use crate::task::{current_thread_id, exit_current_task};
+
+#[inline]
+fn page_align_up(addr: u64) -> Option<u64> {
+    addr.checked_add(4095).map(|v| v & !4095)
+}
+
+#[inline]
+fn is_user_range(addr: u64, len: u64) -> bool {
+    if len == 0 {
+        return addr <= USER_SPACE_END;
+    }
+    let end = match addr.checked_add(len.saturating_sub(1)) {
+        Some(e) => e,
+        None => return false,
+    };
+    addr <= USER_SPACE_END && end <= USER_SPACE_END
+}
 
 /// Exitシステムコール
 ///
@@ -64,18 +88,26 @@ pub fn brk(addr: u64) -> u64 {
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
+        if process.heap_start() == 0 {
+            let default_heap_base = 0x4000_0000;
+            process.set_heap_start(default_heap_base);
+            process.set_heap_end(default_heap_base);
+        }
         // addr == 0 なら現在の位置を返す
         if addr == 0 {
-            if process.heap_start() == 0 {
-                // ヒープ領域初期化（暫定）
-                let default_heap_base = 0x4000_0000;
-                process.set_heap_start(default_heap_base);
-                process.set_heap_end(default_heap_base);
-            }
             return Ok(process.heap_end());
         }
 
+        if addr < process.heap_start() {
+            return Err(EINVAL);
+        }
+
         let current_brk = process.heap_end();
+
+        // ユーザー空間の上限アドレスを超えるbrkを拒否
+        if !is_user_range(addr, 1) {
+            return Err(EINVAL);
+        }
 
         // 縮小または変化なし
         if addr <= current_brk {
@@ -93,7 +125,10 @@ pub fn brk(addr: u64) -> u64 {
         // 現在の brk がページ境界でない場合に、既に存在するページを含めてマップするために
         // floor(current_brk) を使用する。
         let start_page = current_brk & !4095;
-        let end_page = (addr + 4095) & !4095;
+        let end_page = match page_align_up(addr) {
+            Some(v) if is_user_range(v.saturating_sub(1), 1) => v,
+            _ => return Err(EINVAL),
+        };
 
         if end_page > start_page {
             let size = end_page - start_page;
@@ -125,79 +160,12 @@ pub fn brk(addr: u64) -> u64 {
 ///
 /// プロセスを複製する
 pub fn fork() -> u64 {
-    use crate::syscall::syscall_entry::{
-        SYSCALL_SAVED_USER_RFLAGS, SYSCALL_SAVED_USER_RIP, SYSCALL_TEMP_USER_RSP,
-    };
-    use core::sync::atomic::Ordering;
-
-    let user_rsp = SYSCALL_TEMP_USER_RSP.load(Ordering::Relaxed);
-    let user_rip = SYSCALL_SAVED_USER_RIP.load(Ordering::Relaxed);
-    let user_rflags = SYSCALL_SAVED_USER_RFLAGS.load(Ordering::Relaxed);
-
-    if user_rip == 0 {
-        return ENOSYS;
-    }
-
-    // 現在のスレッド/プロセスを取得
-    let parent_tid = match crate::task::current_thread_id() {
-        Some(t) => t,
-        None => return ENOSYS,
-    };
-    let parent_pid = match crate::task::with_thread(parent_tid, |t| t.process_id()) {
-        Some(p) => p,
-        None => return ENOSYS,
-    };
-
-    // 親のページテーブルとヒープ状態を取得
-    let parent_pt = match crate::task::with_process(parent_pid, |p| p.page_table()) {
-        Some(Some(pt)) => pt,
-        _ => return ENOSYS,
-    };
-    let (parent_heap_start, parent_heap_end) =
-        crate::task::with_process(parent_pid, |p| (p.heap_start(), p.heap_end())).unwrap_or((0, 0));
-
-    // 親の FS ベース (TLS) を取得
-    let fs_base = unsafe { crate::cpu::read_fs_base() };
-
-    // 子プロセスを作成 (親のページテーブルを共有: シングルプロセス前提)
-    let mut child_proc = crate::task::Process::new(
-        "fork_child",
-        crate::task::PrivilegeLevel::User,
-        Some(parent_pid),
-        0,
+    // CRIT-03/HIGH-01 対応: ページテーブル共有実装とグローバル一時保存値依存は
+    // プロセス分離/整合性を破るため、安全な複製実装が入るまで fail-closed とする。
+    crate::warn!(
+        "fork is temporarily disabled until isolated address-space cloning is implemented"
     );
-    child_proc.set_page_table(parent_pt);
-    child_proc.set_heap_start(parent_heap_start);
-    child_proc.set_heap_end(parent_heap_end);
-    let child_pid = child_proc.id();
-
-    if crate::task::add_process(child_proc).is_none() {
-        return ENOSYS;
-    }
-
-    // 子スレッド用カーネルスタックを確保
-    let kstack = match crate::task::thread::allocate_kernel_stack(4096 * 4) {
-        Some(a) => a,
-        None => return ENOSYS,
-    };
-
-    // fork() で rax=0 を返す子スレッドを作成
-    let child_thread = crate::task::Thread::new_fork_child(
-        child_pid,
-        user_rip,
-        user_rsp,
-        user_rflags,
-        fs_base,
-        kstack,
-        4096 * 4,
-    );
-
-    if crate::task::add_thread(child_thread).is_none() {
-        return ENOSYS;
-    }
-
-    // 子 PID を親に返す
-    child_pid.as_u64()
+    ENOSYS
 }
 
 /// Sleepシステムコール
@@ -210,15 +178,15 @@ pub fn fork() -> u64 {
 /// # 戻り値
 /// 成功時はSUCCESS
 pub fn sleep(milliseconds: u64) -> u64 {
-    // TODO: 正確なタイマーベースのスリープを実装
-    // 現在は単純にyieldするだけ（タイマー割り込みがあるので時間は経過する）
-    // 最大でも数回yieldするだけにする
-    let yield_count = (milliseconds / 10).max(1).min(100);
-
-    for _ in 0..yield_count {
-        crate::task::yield_now();
+    if milliseconds == 0 {
+        return SUCCESS;
     }
-
+    let wait_ticks = milliseconds
+        .checked_add(TICK_MS - 1)
+        .map(|v| v / TICK_MS)
+        .unwrap_or(u64::MAX);
+    let target = crate::syscall::time::get_ticks().saturating_add(wait_ticks);
+    crate::syscall::time::sleep_until(target);
     SUCCESS
 }
 
@@ -230,19 +198,73 @@ pub fn sleep(milliseconds: u64) -> u64 {
 /// - `options`: WNOHANG(0x1) = ノンブロッキング
 pub fn wait(_pid: u64, status_ptr: u64, options: u64) -> u64 {
     const WNOHANG: u64 = 0x1;
-    // status = 0 (terminated normally, exit code 0)
-    if status_ptr != 0 {
-        unsafe {
-            *(status_ptr as *mut i32) = 0;
-        }
+    let pid = _pid as i64;
+    if options & !WNOHANG != 0 {
+        return EINVAL;
     }
+    if pid < -1 || pid == 0 {
+        return EINVAL;
+    }
+
+    if status_ptr != 0 && !super::validate_user_ptr(status_ptr, 4) {
+        return EFAULT;
+    }
+
+    // 呼び出し元プロセス
+    let current_pid = match current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+    {
+        Some(pid) => pid,
+        None => return ECHILD,
+    };
+
+    // 対象子プロセスを列挙
+    let mut target_children = [0u64; 64];
+    let mut target_count = 0usize;
+    crate::task::for_each_process(|proc| {
+        if proc.parent_id() != Some(current_pid) {
+            return;
+        }
+        let child_pid = proc.id().as_u64();
+        if pid == -1 || pid as u64 == child_pid {
+            if target_count < target_children.len() {
+                target_children[target_count] = child_pid;
+                target_count += 1;
+            }
+        }
+    });
+    if target_count == 0 {
+        return ECHILD;
+    }
+
     if options & WNOHANG != 0 {
-        // ノンブロッキング: まだ終了していない (pid=0 = 子プロセス実行中)
+        // ノンブロッキング: まだ回収可能な子がなければ0
         return 0;
     }
-    // ブロッキング wait: 子プロセスが存在しない場合 ECHILD を返す
-    // 本来はここでスリープするが、シンプル実装のため ECHILD を返す
-    (-10i64) as u64 // ECHILD
+
+    // 簡易ブロッキング: 子スレッドが消えるまで待機
+    loop {
+        for idx in 0..target_count {
+            let child_pid = target_children[idx];
+            let mut child_has_live_thread = false;
+            crate::task::for_each_thread(|thread| {
+                if thread.process_id().as_u64() == child_pid
+                    && thread.state() != crate::task::ThreadState::Terminated
+                {
+                    child_has_live_thread = true;
+                }
+            });
+            if !child_has_live_thread {
+                if status_ptr != 0 {
+                    unsafe {
+                        *(status_ptr as *mut i32) = 0;
+                    }
+                }
+                return child_pid;
+            }
+        }
+        crate::task::yield_now();
+    }
 }
 
 /// Mmapシステムコール
@@ -280,8 +302,11 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
         None => return ENOMEM,
     };
 
-    // ページ境界に切り上げ
-    let size = (length + 4095) & !4095;
+    // ページ境界に切り上げ（オーバーフロー安全）
+    let size = match page_align_up(length) {
+        Some(v) if v > 0 => v,
+        _ => return EINVAL,
+    };
 
     let result = crate::task::with_process_mut(pid, |process| {
         // mmap用のヒープ領域を現在のbrk以降に割り当てる
@@ -292,14 +317,29 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
             process.set_heap_end(default_heap_base);
         }
 
+        // ユーザー空間の上限アドレスを超えるaddrを拒否
+        if addr != 0 && addr > USER_SPACE_END {
+            return Err(EINVAL);
+        }
+
         let map_start = if addr != 0 {
-            (addr + 4095) & !4095
+            match page_align_up(addr) {
+                Some(v) => v,
+                None => return Err(EINVAL),
+            }
         } else {
             // heap_endを mmap_base として使う（簡易実装）
             // 実際は別のアドレス空間管理が必要
             let base = process.heap_end();
-            (base + 4095) & !4095
+            match page_align_up(base) {
+                Some(v) => v,
+                None => return Err(EINVAL),
+            }
         };
+
+        if !is_user_range(map_start, size) {
+            return Err(EINVAL);
+        }
 
         let pt_phys = match process.page_table() {
             Some(p) => p,
@@ -320,7 +360,11 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
 
         // heap_end を更新してアドレス空間が重ならないようにする
         if addr == 0 {
-            process.set_heap_end(map_start + size);
+            let new_heap_end = match map_start.checked_add(size) {
+                Some(v) => v,
+                None => return Err(EINVAL),
+            };
+            process.set_heap_end(new_heap_end);
         }
 
         Ok(map_start)
@@ -333,10 +377,41 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
     }
 }
 
-/// Munmapシステムコール (スタブ)
-pub fn munmap(_addr: u64, _length: u64) -> u64 {
-    // TODO: ページテーブルからマッピングを削除する
-    SUCCESS
+/// Munmapシステムコール
+pub fn munmap(addr: u64, length: u64) -> u64 {
+    if addr == 0 || length == 0 {
+        return EINVAL;
+    }
+    let unmap_start = addr & !4095;
+    let unmap_end = match addr.checked_add(length).and_then(page_align_up) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    let unmap_len = match unmap_end.checked_sub(unmap_start) {
+        Some(v) if v > 0 => v,
+        _ => return EINVAL,
+    };
+    if !is_user_range(unmap_start, unmap_len) {
+        return EINVAL;
+    }
+
+    let tid = match current_thread_id() {
+        Some(t) => t,
+        None => return ENOSYS,
+    };
+    let pid = match crate::task::with_thread(tid, |t| t.process_id()) {
+        Some(p) => p,
+        None => return ENOSYS,
+    };
+    let pt_phys = match crate::task::with_process(pid, |p| p.page_table()).flatten() {
+        Some(p) => p,
+        None => return ENOSYS,
+    };
+
+    match crate::mem::paging::unmap_range_in_table(pt_phys, unmap_start, unmap_len) {
+        Ok(()) => SUCCESS,
+        Err(_) => EINVAL,
+    }
 }
 
 /// Futexシステムコール (最小実装)
@@ -353,6 +428,10 @@ pub fn futex(uaddr: u64, op: u32, val: u64, _timeout: u64) -> u64 {
     match op_base {
         FUTEX_WAIT => {
             if uaddr == 0 {
+                return EFAULT;
+            }
+            // ユーザー空間アドレスの有効性を検証する
+            if !super::validate_user_ptr(uaddr, 4) {
                 return EFAULT;
             }
             let current_val = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
@@ -396,7 +475,11 @@ pub fn arch_prctl(code: u64, addr: u64) -> u64 {
             if addr == 0 {
                 return EFAULT;
             }
-            unsafe { core::ptr::write(addr as *mut u64, val) };
+            // ユーザー空間アドレスの有効性を検証する
+            if !super::validate_user_ptr(addr, 8) {
+                return EFAULT;
+            }
+            unsafe { core::ptr::write_unaligned(addr as *mut u64, val) };
             SUCCESS
         }
         _ => EINVAL,
@@ -421,8 +504,11 @@ pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
         return 0;
     }
 
-    // ユーザー空間から名前をコピー（安全のため制限付き）
-    // 本来はユーザーメモリチェックが必要
+    // ユーザー空間アドレスの有効性を検証する
+    if !super::validate_user_ptr(name_ptr, len) {
+        return 0;
+    }
+
     let name_slice = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len as usize) };
     let name = match str::from_utf8(name_slice) {
         Ok(s) => s,

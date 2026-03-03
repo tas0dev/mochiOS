@@ -45,8 +45,12 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return EFAULT;
     }
 
-    // バッファを安全にスライスとして扱う
-    // TODO: ユーザー空間のアドレスが有効か適切に検証する
+    // ユーザー空間アドレスの有効性を検証する
+    if !super::validate_user_ptr(buf_ptr, len) {
+        debug!("write: invalid user ptr {:#x}", buf_ptr);
+        return EFAULT;
+    }
+
     let buf = unsafe {
         debug!("write: creating slice from {:#x}, len={}", buf_ptr, len);
         slice::from_raw_parts(buf_ptr as *const u8, len as usize)
@@ -101,6 +105,10 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         if ch == ENODATA {
             return ENODATA;
         }
+        // ユーザー空間アドレスの有効性を検証する
+        if !super::validate_user_ptr(buf_ptr, 1) {
+            return EFAULT;
+        }
         // 返された値を1バイトとしてコピー
         unsafe {
             let dst = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, 1);
@@ -126,6 +134,11 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
 pub fn log(msg: u64, len: u64, level: u64) -> u64 {
     if msg == 0 || len == 0 {
         return super::types::EINVAL;
+    }
+
+    // ユーザー空間アドレスの有効性を検証する
+    if !super::validate_user_ptr(msg, len) {
+        return super::types::EFAULT;
     }
 
     let slice = unsafe { slice::from_raw_parts(msg as *const u8, len as usize) };

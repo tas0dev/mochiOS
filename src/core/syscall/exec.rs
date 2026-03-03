@@ -3,11 +3,38 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::TryInto;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// `.service` 実行を許可するサービスマネージャープロセスID
+/// 0 は未登録。
+static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);
+
+fn caller_can_launch_service() -> bool {
+    let caller = crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()));
+    let Some(caller_pid) = caller else {
+        // カーネルコンテキストからの起動は許可
+        return true;
+    };
+
+    if crate::task::with_process(caller_pid, |p| p.privilege())
+        .is_some_and(|lvl| lvl == crate::task::PrivilegeLevel::Core)
+    {
+        return true;
+    }
+
+    let manager_pid = SERVICE_MANAGER_PID.load(Ordering::SeqCst);
+    manager_pid != 0 && caller_pid.as_u64() == manager_pid
+}
 
 /// カーネル内から実行可能ファイルを読み込み実行するシステムコール
 pub fn exec_kernel(path_ptr: u64) -> u64 {
     let mut provided_path: Option<&str> = None;
     if path_ptr != 0 {
+        // ユーザー空間アドレスの有効性を検証する
+        if !crate::syscall::validate_user_ptr(path_ptr, 256) {
+            return crate::syscall::types::EINVAL;
+        }
         let mut len = 0usize;
         unsafe {
             let mut p = path_ptr as *const u8;
@@ -27,16 +54,8 @@ pub fn exec_kernel(path_ptr: u64) -> u64 {
     let path = provided_path.unwrap_or("/hello.bin");
 
     // ユーザー空間からはサービス（.serviceで終わる名前）を起動できない
-    // ただし core.service はサービスマネージャーとして他のサービスを起動できる
     if path.ends_with(".service") {
-        let caller_is_core = crate::task::current_thread_id()
-            .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-            .and_then(|pid| crate::task::with_process(pid, |p| {
-                let name = p.name();
-                name == "core.service" || name == "core"
-            }))
-            .unwrap_or(false);
-        if !caller_is_core {
+        if !caller_can_launch_service() {
             return crate::syscall::types::EPERM;
         }
     }
@@ -55,7 +74,15 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
 
     if let Some(data) = crate::init::fs::read(path) {
         let data: &[u8] = &data;
-        let mut entry = elf_loader::entry_point(data).unwrap_or(0);
+        // MED-27修正: エントリポイントが0の場合はELFが無効として拒否する
+        // 以前はentry=0のままプロセスを作成し、仮想アドレス0にジャンプしていた
+        let mut entry = match elf_loader::entry_point(data) {
+            Some(e) if e != 0 => e,
+            _ => {
+                crate::warn!("exec: ELF entry point is 0 or missing, rejecting");
+                return crate::syscall::types::EINVAL;
+            }
+        };
         crate::debug!("ELF entry: {:#x}", entry);
 
         // プロセス固有のページテーブルを作成
@@ -72,12 +99,30 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
         };
         crate::debug!("Created user page table at {:#x}", new_pt_phys);
 
+        // ELFアーキテクチャ検証 (MED-07)
+        const EM_X86_64: u16 = 0x3E;
         if let Some(eh) = elf_loader::parse_elf_header(data) {
+            if eh.e_machine != EM_X86_64 {
+                crate::warn!("ELF e_machine {:#x} is not x86-64, rejecting", eh.e_machine);
+                return crate::syscall::types::EINVAL;
+            }
             let phoff = eh.e_phoff as usize;
             let phentsz = eh.e_phentsize as usize;
+            // phentszが0の場合は無限ループを防ぐため拒否 (MED-08)
+            if phentsz == 0 {
+                crate::warn!("ELF phentsize is 0, rejecting");
+                return crate::syscall::types::EINVAL;
+            }
             let phnum = eh.e_phnum as usize;
             for i in 0..phnum {
-                let off_hdr = phoff + i * phentsz;
+                // オーバーフロー安全な乗算と加算 (MED-08)
+                let off_hdr = match i.checked_mul(phentsz).and_then(|x| phoff.checked_add(x)) {
+                    Some(o) if o < data.len() => o,
+                    _ => {
+                        crate::warn!("ELF program header offset overflow or out of bounds");
+                        return crate::syscall::types::EINVAL;
+                    }
+                };
                 if let Some(ph) = elf_loader::parse_phdr(data, off_hdr) {
                     if ph.p_type == elf_loader::PT_LOAD {
                         let vaddr = ph.p_vaddr;
@@ -88,6 +133,32 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
                         let writable = (flags & 0x2) != 0;
                         let executable = (flags & 0x1) != 0;
 
+                        // ELFセグメントのvaddrがユーザー空間内であることを検証 (CRIT-05)
+                        const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+                        if vaddr >= USER_SPACE_END {
+                            crate::warn!("ELF segment vaddr {:#x} is in kernel space", vaddr);
+                            return crate::syscall::types::EINVAL;
+                        }
+                        if memsz > 0 {
+                            let vend = match vaddr.checked_add(memsz) {
+                                Some(e) if e <= USER_SPACE_END => e,
+                                _ => {
+                                    crate::warn!("ELF segment vaddr+memsz overflows user space");
+                                    return crate::syscall::types::EINVAL;
+                                }
+                            };
+                            let _ = vend;
+                        }
+
+                        // ELFセグメントの境界チェック (CRIT-04)
+                        let src_end = match src_off.checked_add(filesz as usize) {
+                            Some(e) if e <= data.len() => e,
+                            _ => {
+                                crate::warn!("ELF segment src offset+filesz out of bounds");
+                                return crate::syscall::types::EINVAL;
+                            }
+                        };
+
                         crate::debug!(
                             "Mapping seg {} -> {:#x} (filesz={}, memsz={})",
                             i,
@@ -95,7 +166,7 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
                             filesz,
                             memsz
                         );
-                        let seg_src = &data[src_off..src_off + filesz as usize];
+                        let seg_src = &data[src_off..src_end];
 
                         if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
                             new_pt_phys,
@@ -403,6 +474,10 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
             );
             let mut stub_page = vec![0u8; 4096];
             let mut cur = 0usize;
+            if cur + 24 > stub_page.len() {
+                crate::warn!("__sinit stub size overflow: {}", cur + 24);
+                return crate::syscall::types::EINVAL;
+            }
             // movabs rax, <sinit>
             stub_page[cur..cur + 2].copy_from_slice(&[0x48, 0xB8]);
             cur += 2;
@@ -437,12 +512,21 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
         }
 
         // プロセスを作成してページテーブルをセット
-        let mut proc =
-            crate::task::Process::new(process_name, crate::task::PrivilegeLevel::User, None, 0);
+        let parent_pid = crate::task::current_thread_id()
+            .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()));
+        let privilege = if path.ends_with(".service") {
+            crate::task::PrivilegeLevel::Service
+        } else {
+            crate::task::PrivilegeLevel::User
+        };
+        let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, 0);
         proc.set_page_table(new_pt_phys);
         let pid = proc.id();
         if crate::task::add_process(proc).is_none() {
             return crate::syscall::types::EINVAL;
+        }
+        if process_name.ends_with("core.service") || path.ends_with("core.service") {
+            SERVICE_MANAGER_PID.store(pid.as_u64(), Ordering::SeqCst);
         }
 
         // allocate kernel stack for the new thread
@@ -506,6 +590,11 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
         return EINVAL;
     }
 
+    // ユーザー空間アドレスの有効性を検証する
+    if !crate::syscall::validate_user_ptr(path_ptr, 256) {
+        return EINVAL;
+    }
+
     // ユーザー空間から null 終端パスを読み込む
     let mut len = 0usize;
     unsafe {
@@ -524,9 +613,11 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
         Err(_) => return EINVAL,
     };
 
-    // ユーザー空間からはサービス（.serviceで終わる名前）を起動できない
+    // サービス起動はサービスマネージャー(Coreまたは登録PID)に限定
     if path.ends_with(".service") {
-        return EPERM;
+        if !caller_can_launch_service() {
+            return EPERM;
+        }
     }
 
     // initfs からファイルを読み込む
@@ -549,16 +640,58 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     };
 
     // PT_LOAD セグメントをマップ
+    const EM_X86_64_EXECVE: u16 = 0x3E;
+    const USER_SPACE_END_EXECVE: u64 = 0x0000_7FFF_FFFF_FFFF;
     if let Some(eh) = crate::elf::loader::parse_elf_header(data) {
+        // ELFアーキテクチャ検証 (MED-07)
+        if eh.e_machine != EM_X86_64_EXECVE {
+            crate::warn!("execve: ELF e_machine {:#x} is not x86-64", eh.e_machine);
+            return EINVAL;
+        }
         let phoff = eh.e_phoff as usize;
         let phentsz = eh.e_phentsize as usize;
+        // phentszが0の場合は無限ループを防ぐ (MED-08)
+        if phentsz == 0 {
+            return EINVAL;
+        }
         let phnum = eh.e_phnum as usize;
         for i in 0..phnum {
-            let off_hdr = phoff + i * phentsz;
+            // オーバーフロー安全な乗算と加算 (MED-08)
+            let off_hdr = match i.checked_mul(phentsz).and_then(|x| phoff.checked_add(x)) {
+                Some(o) if o < data.len() => o,
+                _ => return EINVAL,
+            };
             if let Some(ph) = crate::elf::loader::parse_phdr(data, off_hdr) {
                 if ph.p_type == crate::elf::loader::PT_LOAD {
-                    let seg_src =
-                        &data[ph.p_offset as usize..ph.p_offset as usize + ph.p_filesz as usize];
+                    // ELFセグメントのvaddrがユーザー空間内であることを検証 (CRIT-05)
+                    if ph.p_vaddr >= USER_SPACE_END_EXECVE {
+                        crate::warn!(
+                            "execve: ELF segment vaddr {:#x} is in kernel space",
+                            ph.p_vaddr
+                        );
+                        return EINVAL;
+                    }
+                    if ph.p_memsz > 0 {
+                        match ph.p_vaddr.checked_add(ph.p_memsz) {
+                            Some(e) if e <= USER_SPACE_END_EXECVE => {}
+                            _ => {
+                                crate::warn!(
+                                    "execve: ELF segment vaddr+memsz overflows user space"
+                                );
+                                return EINVAL;
+                            }
+                        }
+                    }
+                    // ELFセグメントの境界チェック (CRIT-04)
+                    let src_off = ph.p_offset as usize;
+                    let src_end = match src_off.checked_add(ph.p_filesz as usize) {
+                        Some(e) if e <= data.len() => e,
+                        _ => {
+                            crate::warn!("execve: ELF segment src offset+filesz out of bounds");
+                            return EINVAL;
+                        }
+                    };
+                    let seg_src = &data[src_off..src_end];
                     if let Err(_) = crate::mem::paging::map_and_copy_segment_to(
                         new_pt_phys,
                         ph.p_vaddr,

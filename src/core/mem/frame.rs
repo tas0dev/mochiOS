@@ -12,6 +12,8 @@ use x86_64::{
     PhysAddr,
 };
 
+const RECYCLED_FRAME_CAP: usize = 4096;
+
 /// グローバルフレームアロケータ
 pub static FRAME_ALLOCATOR: Mutex<Option<BitmapFrameAllocator>> = Mutex::new(None);
 
@@ -21,6 +23,9 @@ pub struct BitmapFrameAllocator {
     memory_map: &'static [MemoryRegion],
     /// 次に割り当てるフレーム
     next_frame: usize,
+    /// 解放されたフレームの再利用スタック
+    recycled_frames: [u64; RECYCLED_FRAME_CAP],
+    recycled_count: usize,
 }
 
 impl BitmapFrameAllocator {
@@ -35,7 +40,36 @@ impl BitmapFrameAllocator {
         Self {
             memory_map,
             next_frame: 0,
+            recycled_frames: [0; RECYCLED_FRAME_CAP],
+            recycled_count: 0,
         }
+    }
+
+    fn is_usable_frame_addr(&self, phys_addr: u64) -> bool {
+        self.memory_map.iter().any(|r| {
+            r.region_type == MemoryType::Usable
+                && phys_addr >= r.start
+                && phys_addr < r.start + r.len
+        })
+    }
+
+    pub fn deallocate_frame(&mut self, frame: PhysFrame) -> bool {
+        let phys_addr = frame.start_address().as_u64();
+        if phys_addr & 0xfff != 0 || !self.is_usable_frame_addr(phys_addr) {
+            return false;
+        }
+        if self.recycled_count >= RECYCLED_FRAME_CAP {
+            return false;
+        }
+        // double-free 防止
+        for i in 0..self.recycled_count {
+            if self.recycled_frames[i] == phys_addr {
+                return false;
+            }
+        }
+        self.recycled_frames[self.recycled_count] = phys_addr;
+        self.recycled_count += 1;
+        true
     }
 
     /// 使用可能な物理メモリの総量を計算（バイト）
@@ -80,6 +114,12 @@ impl BitmapFrameAllocator {
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
     /// フレームを割り当て
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        if self.recycled_count > 0 {
+            self.recycled_count -= 1;
+            let phys = self.recycled_frames[self.recycled_count];
+            return Some(PhysFrame::containing_address(PhysAddr::new(phys)));
+        }
+
         let mut f = self.next_frame as u64;
         let max_frame = self
             .memory_map
@@ -131,6 +171,17 @@ pub fn allocate_frame() -> Result<PhysFrame> {
         .as_mut()
         .and_then(|a| a.allocate_frame())
         .ok_or(Kernel::Memory(Memory::OutOfMemory))
+}
+
+/// フレームを解放
+pub fn deallocate_frame(frame: PhysFrame) -> Result<()> {
+    let mut guard = FRAME_ALLOCATOR.lock();
+    let allocator = guard.as_mut().ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+    if allocator.deallocate_frame(frame) {
+        Ok(())
+    } else {
+        Err(Kernel::Memory(Memory::InvalidAddress))
+    }
 }
 
 /// 使用可能なメモリ情報を取得

@@ -13,6 +13,25 @@ pub mod time;
 
 mod types;
 
+/// ユーザー空間ポインタの有効性を検証する
+///
+/// ポインタが null でなく、ユーザー空間のアドレス範囲内にあること、
+/// かつ `ptr + len` がオーバーフローしないことを確認する。
+///
+/// x86-64 canonical ユーザー空間上限: 0x0000_7FFF_FFFF_FFFF
+pub fn validate_user_ptr(ptr: u64, len: u64) -> bool {
+    if ptr == 0 {
+        return false;
+    }
+    // x86-64 ユーザー空間の上限アドレス (canonical hole 下側)
+    const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+    let end = match ptr.checked_add(len) {
+        Some(e) => e,
+        None => return false, // 整数オーバーフロー
+    };
+    ptr < USER_SPACE_END && end <= USER_SPACE_END
+}
+
 pub use types::{
     SyscallNumber, EAGAIN, EBADF, EFAULT, EINVAL, ENODATA, ENOENT, ENOSYS, EPERM, SUCCESS,
 };
@@ -69,6 +88,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::FindProcessByName as u64 => {
             process::find_process_by_name(arg0, arg1)
         }
+        x if x == SyscallNumber::GetThreadPrivilege as u64 => task::get_thread_privilege(arg0),
         _ => ENOSYS,
     }
 }

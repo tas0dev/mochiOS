@@ -22,7 +22,7 @@ pub use scheduler::{
 };
 pub use thread::{
     add_thread, count_threads_by_state, current_thread_id, for_each_thread, peek_next_thread,
-    remove_thread, set_current_thread, thread_count, with_thread, with_thread_mut, Thread,
-    ThreadQueue,
+    remove_thread, set_current_thread, thread_count, thread_id_exists, with_thread,
+    with_thread_mut, Thread, ThreadQueue,
 };
 pub use usermode::{jump_to_usermode, jump_to_usermode_fork_child};

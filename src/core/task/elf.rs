@@ -75,7 +75,10 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
     let phnum = header.e_phnum as usize;
 
     for i in 0..phnum {
-        let off = phoff + i * phentsize;
+        let off = match i.checked_mul(phentsize).and_then(|x| phoff.checked_add(x)) {
+            Some(o) => o,
+            None => return Err(KernelError::InvalidParam),
+        };
         let phdr = read_phdr(data, off)?;
         if phdr.p_type != PT_LOAD {
             continue;
@@ -87,7 +90,10 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
             continue;
         }
 
-        let file_end = phdr.p_offset as usize + filesz;
+        let file_end = match (phdr.p_offset as usize).checked_add(filesz) {
+            Some(v) => v,
+            None => return Err(KernelError::Memory(MemoryError::InvalidAddress)),
+        };
         if file_end > data.len() {
             return Err(KernelError::Memory(MemoryError::InvalidAddress));
         }
@@ -343,7 +349,10 @@ fn dynamic_file_range(data: &[u8], header: Elf64Header) -> Result<Option<(usize,
     let phnum = header.e_phnum as usize;
 
     for i in 0..phnum {
-        let off = phoff + i * phentsize;
+        let off = match i.checked_mul(phentsize).and_then(|x| phoff.checked_add(x)) {
+            Some(o) => o,
+            None => return Err(KernelError::InvalidParam),
+        };
         let phdr = read_phdr(data, off)?;
         if phdr.p_type == PT_DYNAMIC {
             return Ok(Some((phdr.p_offset as usize, phdr.p_filesz as usize)));
@@ -359,13 +368,19 @@ fn vaddr_to_offset(data: &[u8], header: Elf64Header, vaddr: u64) -> Result<usize
     let phnum = header.e_phnum as usize;
 
     for i in 0..phnum {
-        let off = phoff + i * phentsize;
+        let off = match i.checked_mul(phentsize).and_then(|x| phoff.checked_add(x)) {
+            Some(o) => o,
+            None => return Err(KernelError::InvalidParam),
+        };
         let phdr = read_phdr(data, off)?;
         if phdr.p_type != PT_LOAD {
             continue;
         }
         let start = phdr.p_vaddr;
-        let end = phdr.p_vaddr + phdr.p_memsz;
+        let end = match phdr.p_vaddr.checked_add(phdr.p_memsz) {
+            Some(v) => v,
+            None => return Err(KernelError::InvalidParam),
+        };
         if vaddr >= start && vaddr < end {
             let delta = vaddr - start;
             let file_off = phdr.p_offset + delta;

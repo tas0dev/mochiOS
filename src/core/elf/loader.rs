@@ -88,6 +88,13 @@ pub fn parse_elf_header(data: &[u8]) -> Option<Elf64Ehdr> {
     // 怒涛のパースと代入（）
     let e_type = u16::from_le_bytes(data[16..18].try_into().ok()?);
     let e_machine = u16::from_le_bytes(data[18..20].try_into().ok()?);
+
+    // ELFアーキテクチャ検証: x86-64 (EM_X86_64 = 0x3E) のみ受け付ける (MED-07)
+    const EM_X86_64: u16 = 0x3E;
+    if e_machine != EM_X86_64 {
+        return None;
+    }
+
     let e_version = u32::from_le_bytes(data[20..24].try_into().ok()?);
     let e_entry = u64::from_le_bytes(data[24..32].try_into().ok()?);
     let e_phoff = u64::from_le_bytes(data[32..40].try_into().ok()?);

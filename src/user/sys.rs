@@ -82,6 +82,8 @@ pub enum SyscallNumber {
     Chdir = 525,
     /// キーボードから1文字読み取る（ユーザー側）
     KeyboardRead = 526,
+    /// スレッドIDからプロセスの権限レベルを取得 (0=Core, 1=Service, 2=User)
+    GetThreadPrivilege = 527,
 }
 
 /// 入力が空

@@ -8,13 +8,38 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 static FSGSBASE_SUPPORTED: AtomicBool = AtomicBool::new(false);
 
-/// CPUの初期化（SSE/FPU有効化）
+/// CPUの初期化（SSE/FPU有効化、NXE有効化）
 pub fn init() {
     crate::info!("Initializing CPU features...");
 
     unsafe {
+        enable_nxe();
         enable_fpu();
         enable_sse();
+    }
+}
+
+/// EFER.NXEを有効化（NO_EXECUTEページテーブルフラグを機能させる）
+///
+/// NXE (No-Execute Enable) を IA32_EFER MSR (0xC0000080) のビット11にセットする。
+/// これにより PTE の bit 63 (NO_EXECUTE) が有効になり、データページでのコード実行を防ぐ。
+unsafe fn enable_nxe() {
+    const IA32_EFER: u32 = 0xC000_0080;
+    const NXE_BIT: u64 = 1 << 11;
+    let lo: u32;
+    let hi: u32;
+    asm!("rdmsr", in("ecx") IA32_EFER, out("eax") lo, out("edx") hi, options(nomem, nostack));
+    let efer = ((hi as u64) << 32) | (lo as u64);
+    if efer & NXE_BIT == 0 {
+        let new_efer = efer | NXE_BIT;
+        asm!(
+            "wrmsr",
+            in("ecx") IA32_EFER,
+            in("eax") (new_efer as u32),
+            in("edx") ((new_efer >> 32) as u32),
+            options(nomem, nostack)
+        );
+        crate::info!("EFER.NXE enabled");
     }
 }
 
@@ -54,6 +79,14 @@ unsafe fn enable_sse() {
     } else {
         crate::info!("FSGSBASE not supported, using IA32_FS_BASE MSR");
     }
+
+    // ビット20 (SMEP) をセット - カーネルモードでのユーザーページ実行禁止 (L-1修正)
+    // ret2usr 等のカーネルモード特権昇格攻撃を防ぐ
+    cr4 |= 1 << 20;
+
+    // ビット21 (SMAP) をセット - カーネルモードでのユーザーページアクセス禁止 (L-1修正)
+    // カーネルが誤ってユーザー空間メモリを読み書きする脆弱性を防ぐ
+    cr4 |= 1 << 21;
 
     // CR4レジスタに書き込み
     asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));

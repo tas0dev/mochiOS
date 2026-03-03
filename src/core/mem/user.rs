@@ -54,9 +54,11 @@ pub fn alloc_user_stack(pages: u64) -> Result<UserStack> {
     let stack_bottom = new_top + USER_STACK_GUARD_PAGES * PAGE_SIZE;
     let stack_top = new_top + total;
 
+    // NO_EXECUTE フラグを設定してスタックの実行を禁止する (MED-03)
     let flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
-        | PageTableFlags::USER_ACCESSIBLE;
+        | PageTableFlags::USER_ACCESSIBLE
+        | PageTableFlags::NO_EXECUTE;
 
     map_user_range(stack_bottom, stack_size, flags)?;
 

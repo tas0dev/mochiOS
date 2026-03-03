@@ -147,6 +147,22 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
 
         if sender != 0 && (len as usize) >= size_of::<DiskRequest>() {
+            // 送信元スレッドの権限を確認 (#22: 非特権プロセスからのディスクアクセスを拒否)
+            // 0=Core, 1=Service のみ許可。2=User は拒否
+            let sender_privilege = task::get_thread_privilege(sender);
+            if sender_privilege > 1 {
+                println!("[DISK] Rejecting request from unprivileged thread {}", sender);
+                let resp = DiskResponse { status: -1, len: 0, data: [0; 512] };
+                let resp_slice = unsafe {
+                    core::slice::from_raw_parts(
+                        &resp as *const _ as *const u8,
+                        size_of::<DiskResponse>(),
+                    )
+                };
+                let _ = ipc::ipc_send(sender, resp_slice);
+                continue;
+            }
+
             let req: DiskRequest = unsafe { core::ptr::read(recv_buf.0.as_ptr() as *const _) };
             println!(
                 "[DISK] REQ op={} disk={} lba={} from PID={}",

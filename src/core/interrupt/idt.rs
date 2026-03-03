@@ -52,7 +52,8 @@ pub fn init() {
         idt.virtualization.set_handler_fn(virtualization_handler);
 
         // ハードウェア割り込みハンドラ（32-47番）
-        idt[32].set_handler_fn(super::timer::timer_interrupt_handler); // Timer
+        idt[32].set_handler_fn(super::timer::timer_interrupt_handler); // Timer IRQ0
+        idt[33].set_handler_fn(keyboard_interrupt_handler); // Keyboard IRQ1 (C-2修正)
 
         // それ以外のハードウェア割り込みはとりあえずスタブ
         for i in 34..48 {
@@ -757,6 +758,22 @@ extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFram
     }
 }
 
+/// キーボード割り込みハンドラ (IRQ1 / ベクタ 33)
+///
+/// IRQ1 をIDTに登録せずに放置するとキーストロークのたびに #GP が発生し
+/// OS全体が停止する (C-2修正)。このハンドラはスキャンコードを読み捨て EOI を送る。
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // スキャンコードを読み取りコントローラをクリアする
+    let _scancode: u8 = unsafe {
+        let mut port = x86_64::instructions::port::Port::<u8>::new(0x60);
+        port.read()
+    };
+    // マスターPICにEOIを送信 (IRQ1はマスターPICが担当)
+    unsafe {
+        super::pic::PIC_MASTER.end_of_interrupt();
+    }
+}
+
 /// 一般的な割り込みハンドラ（スタブ）
 ///
 /// 一般的なハードウェア割り込み（例: キーボード、マウス、ネットワークカードなど）を処理するためのスタブハンドラ
@@ -768,9 +785,11 @@ extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFram
 /// このハンドラは、将来的に各デバイスに対応した具体的な処理を実装するためのプレースホルダとして使用される予定
 extern "x86-interrupt" fn generic_interrupt_handler(_stack_frame: InterruptStackFrame) {
     debug!("INTERRUPT: GENERIC");
-    // EOIを送信
+    // マスターPICのみにEOIを送信する (LOW-01)
+    // このハンドラはどのIRQから呼ばれるか不明のため、IRQ 0-7 (マスターのみ) を想定して
+    // スレーブPICへの不正なEOI送信によるスプリアス割り込みを防ぐ。
+    // IRQ 8-15 が必要なデバイスは専用ハンドラで両PICにEOIを送る。
     unsafe {
-        super::pic::PIC_SLAVE.end_of_interrupt();
         super::pic::PIC_MASTER.end_of_interrupt();
     }
 }

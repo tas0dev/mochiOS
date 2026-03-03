@@ -51,3 +51,11 @@ pub fn exit(code: i32) -> ! {
     }
 }
 
+/// スレッドIDからプロセスの権限レベルを取得
+///
+/// # 戻り値
+/// 0=Core, 1=Service, 2=User, または u64::MAX (エラー)
+pub fn get_thread_privilege(tid: u64) -> u64 {
+    syscall1(SyscallNumber::GetThreadPrivilege as u64, tid)
+}
+

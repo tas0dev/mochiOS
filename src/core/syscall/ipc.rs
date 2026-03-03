@@ -1,6 +1,6 @@
 use crate::interrupt::spinlock::SpinLock;
 
-use super::{EAGAIN, EINVAL};
+use super::{EAGAIN, EFAULT, EINVAL};
 
 const MAX_THREADS: usize = crate::task::ThreadQueue::MAX_THREADS;
 const MAILBOX_CAP: usize = 64;
@@ -88,9 +88,18 @@ pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
         return EINVAL;
     }
 
+    // 送信先スレッドが実際に存在するか確認 (#14: ゴーストメッセージ注入防止)
+    if !crate::task::thread_id_exists(dest_thread_id) {
+        return EINVAL;
+    }
+
     // データをユーザー空間からコピー
     let mut data = [0u8; MAX_MSG_SIZE];
     if len > 0 && buf_ptr != 0 {
+        // ユーザー空間アドレスの有効性を検証する
+        if !crate::syscall::validate_user_ptr(buf_ptr, len as u64) {
+            return EFAULT;
+        }
         let src_slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
         data[..len].copy_from_slice(src_slice);
     }
@@ -133,6 +142,10 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
 
     let copy_len = core::cmp::min(msg.len, max_len as usize);
     if copy_len > 0 && buf_ptr != 0 {
+        // ユーザー空間アドレスの有効性を検証する
+        if !crate::syscall::validate_user_ptr(buf_ptr, copy_len as u64) {
+            return EFAULT;
+        }
         let dest_slice = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, copy_len) };
         dest_slice.copy_from_slice(&msg.data[..copy_len]);
     }
