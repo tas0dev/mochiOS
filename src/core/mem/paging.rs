@@ -704,8 +704,23 @@ pub fn create_user_page_table() -> Result<u64> {
 pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
     use x86_64::structures::paging::PageTableFlags as Flags;
 
+    struct DstTableGuard(Option<u64>);
+    impl DstTableGuard {
+        fn disarm(&mut self) {
+            self.0 = None;
+        }
+    }
+    impl Drop for DstTableGuard {
+        fn drop(&mut self) {
+            if let Some(phys) = self.0 {
+                let _ = destroy_user_page_table(phys);
+            }
+        }
+    }
+
     let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
     let dst_table_phys = create_user_page_table()?;
+    let mut dst_guard = DstTableGuard(Some(dst_table_phys));
 
     let src_l4 = unsafe { &*((src_table_phys + phys_off) as *const PageTable) };
     let dst_l4 = unsafe { &mut *((dst_table_phys + phys_off) as *mut PageTable) };
@@ -802,6 +817,7 @@ pub fn clone_user_page_table(src_table_phys: u64) -> Result<u64> {
         }
     }
 
+    dst_guard.disarm();
     Ok(dst_table_phys)
 }
 
