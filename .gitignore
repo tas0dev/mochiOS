@@ -22,3 +22,7 @@ target/
 rustc-ice-*.txt
 *.log
 *.lock
+
+# Pull Request diff and patch files
+*.diff
+*.patch
