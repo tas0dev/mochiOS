@@ -201,6 +201,264 @@ extern "x86-interrupt" fn bound_range_exceeded_handler(stack_frame: InterruptSta
     }
 }
 
+fn read_phys_u8(phys_off: u64, phys_addr: u64) -> Option<u8> {
+    let virt = phys_addr.checked_add(phys_off)? as *const u8;
+    Some(unsafe { core::ptr::read_volatile(virt) })
+}
+
+fn read_phys_u64_le(phys_off: u64, phys_addr: u64) -> Option<u64> {
+    let mut bytes = [0u8; 8];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        let addr = phys_addr.checked_add(i as u64)?;
+        *b = read_phys_u8(phys_off, addr)?;
+    }
+    Some(u64::from_le_bytes(bytes))
+}
+
+fn read_page_table_entry(phys_off: u64, table_phys: u64, index: usize) -> Option<u64> {
+    let entry_addr = table_phys.checked_add((index as u64).checked_mul(8)?)?;
+    read_phys_u64_le(phys_off, entry_addr)
+}
+
+fn log_page_table_entry(level: &str, index: usize, entry: u64) {
+    const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+    error!(
+        "{} entry {}: raw={:#018x}, addr={:#x}, P={}, W={}, U={}, PS={}, NX={}",
+        level,
+        index,
+        entry,
+        entry & ADDR_MASK,
+        (entry & (1 << 0)) != 0,
+        (entry & (1 << 1)) != 0,
+        (entry & (1 << 2)) != 0,
+        (entry & (1 << 7)) != 0,
+        (entry & (1 << 63)) != 0
+    );
+}
+
+fn translate_virt_to_phys(l4_phys: u64, phys_off: u64, virt_addr: u64) -> Option<u64> {
+    use x86_64::VirtAddr;
+
+    const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+
+    let _ = VirtAddr::try_new(virt_addr).ok()?;
+
+    let l4_idx = ((virt_addr >> 39) & 0x1ff) as usize;
+    let l3_idx = ((virt_addr >> 30) & 0x1ff) as usize;
+    let l2_idx = ((virt_addr >> 21) & 0x1ff) as usize;
+    let l1_idx = ((virt_addr >> 12) & 0x1ff) as usize;
+
+    let e4 = read_page_table_entry(phys_off, l4_phys, l4_idx)?;
+    if (e4 & 1) == 0 {
+        return None;
+    }
+
+    let l3_phys = e4 & ADDR_MASK;
+    let e3 = read_page_table_entry(phys_off, l3_phys, l3_idx)?;
+    if (e3 & 1) == 0 {
+        return None;
+    }
+    if (e3 & (1 << 7)) != 0 {
+        let base = e3 & 0x000f_ffff_c000_0000;
+        return Some(base | (virt_addr & 0x3fff_ffff));
+    }
+
+    let l2_phys = e3 & ADDR_MASK;
+    let e2 = read_page_table_entry(phys_off, l2_phys, l2_idx)?;
+    if (e2 & 1) == 0 {
+        return None;
+    }
+    if (e2 & (1 << 7)) != 0 {
+        let base = e2 & 0x000f_ffff_ffe0_0000;
+        return Some(base | (virt_addr & 0x1f_ffff));
+    }
+
+    let l1_phys = e2 & ADDR_MASK;
+    let e1 = read_page_table_entry(phys_off, l1_phys, l1_idx)?;
+    if (e1 & 1) == 0 {
+        return None;
+    }
+
+    let base = e1 & ADDR_MASK;
+    Some(base | (virt_addr & 0xfff))
+}
+
+fn read_virtual_u8(l4_phys: u64, phys_off: u64, virt_addr: u64) -> Option<u8> {
+    let phys = translate_virt_to_phys(l4_phys, phys_off, virt_addr)?;
+    read_phys_u8(phys_off, phys)
+}
+
+fn read_virtual_u64_le(l4_phys: u64, phys_off: u64, virt_addr: u64) -> Option<u64> {
+    let mut bytes = [0u8; 8];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        let addr = virt_addr.checked_add(i as u64)?;
+        *b = read_virtual_u8(l4_phys, phys_off, addr)?;
+    }
+    Some(u64::from_le_bytes(bytes))
+}
+
+fn dump_invalid_opcode_diagnostics(stack_frame: &InterruptStackFrame) {
+    use x86_64::registers::control::Cr3;
+
+    const DUMP_BYTES: usize = 16;
+    const STACK_WORDS: usize = 8;
+    const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+    const UNREADABLE_BYTE: u8 = 0xff;
+    const UNREADABLE_WORD: u64 = u64::MAX;
+
+    error!("===== INVALID OPCODE DEBUG DUMP BEGIN =====");
+    error!("{:#?}", stack_frame);
+
+    let current_tid = crate::task::current_thread_id();
+    error!("Current context: tid={:?}", current_tid);
+
+    let Some(phys_off) = crate::mem::paging::physical_memory_offset() else {
+        error!("Cannot dump address-space details: physical_memory_offset unavailable");
+        error!("===== INVALID OPCODE DEBUG DUMP END =====");
+        return;
+    };
+
+    let (cr3_frame, _) = Cr3::read();
+    let l4_phys = cr3_frame.start_address().as_u64();
+    error!("Active CR3 L4 physical address: {:#x}", l4_phys);
+
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let rsp = stack_frame.stack_pointer.as_u64();
+
+    if let Some(pa) = translate_virt_to_phys(l4_phys, phys_off, rip) {
+        error!("RIP mapping: virt={:#x} -> phys={:#x}", rip, pa);
+    } else {
+        error!(
+            "RIP mapping: virt={:#x} is not mapped or non-canonical",
+            rip
+        );
+    }
+
+    let mut inst = [UNREADABLE_BYTE; DUMP_BYTES];
+    for (i, b) in inst.iter_mut().enumerate() {
+        let Some(addr) = rip.checked_add(i as u64) else {
+            break;
+        };
+        if let Some(v) = read_virtual_u8(l4_phys, phys_off, addr) {
+            *b = v;
+        }
+    }
+    error!(
+        "Instruction bytes @ {:#x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+        rip,
+        inst[0], inst[1], inst[2], inst[3],
+        inst[4], inst[5], inst[6], inst[7],
+        inst[8], inst[9], inst[10], inst[11],
+        inst[12], inst[13], inst[14], inst[15],
+    );
+
+    let l4_idx = ((rip >> 39) & 0x1ff) as usize;
+    let l3_idx = ((rip >> 30) & 0x1ff) as usize;
+    let l2_idx = ((rip >> 21) & 0x1ff) as usize;
+    let l1_idx = ((rip >> 12) & 0x1ff) as usize;
+
+    if let Some(e4) = read_page_table_entry(phys_off, l4_phys, l4_idx) {
+        log_page_table_entry("P4", l4_idx, e4);
+        if (e4 & 1) != 0 {
+            let l3_phys = e4 & ADDR_MASK;
+            if let Some(e3) = read_page_table_entry(phys_off, l3_phys, l3_idx) {
+                log_page_table_entry("P3", l3_idx, e3);
+                if (e3 & 1) != 0 {
+                    if (e3 & (1 << 7)) != 0 {
+                        error!("P3 entry indicates 1GiB huge page mapping");
+                    } else {
+                        let l2_phys = e3 & ADDR_MASK;
+                        if let Some(e2) = read_page_table_entry(phys_off, l2_phys, l2_idx) {
+                            log_page_table_entry("P2", l2_idx, e2);
+                            if (e2 & 1) != 0 {
+                                if (e2 & (1 << 7)) != 0 {
+                                    error!("P2 entry indicates 2MiB huge page mapping");
+                                } else {
+                                    let l1_phys = e2 & ADDR_MASK;
+                                    if let Some(e1) =
+                                        read_page_table_entry(phys_off, l1_phys, l1_idx)
+                                    {
+                                        log_page_table_entry("P1", l1_idx, e1);
+                                    } else {
+                                        error!("Failed to read P1 entry {}", l1_idx);
+                                    }
+                                }
+                            } else {
+                                error!("P2 entry {} is not present", l2_idx);
+                            }
+                        } else {
+                            error!("Failed to read P2 entry {}", l2_idx);
+                        }
+                    }
+                } else {
+                    error!("P3 entry {} is not present", l3_idx);
+                }
+            } else {
+                error!("Failed to read P3 entry {}", l3_idx);
+            }
+        } else {
+            error!("P4 entry {} is not present", l4_idx);
+        }
+    } else {
+        error!("Failed to read P4 entry {}", l4_idx);
+    }
+
+    let mut stack_words = [UNREADABLE_WORD; STACK_WORDS];
+    for (i, w) in stack_words.iter_mut().enumerate() {
+        let Some(addr) = rsp.checked_add((i as u64) * 8) else {
+            break;
+        };
+        if let Some(v) = read_virtual_u64_le(l4_phys, phys_off, addr) {
+            *w = v;
+        }
+    }
+    error!(
+        "Stack @ RSP {:#x}: {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x}",
+        rsp,
+        stack_words[0], stack_words[1], stack_words[2], stack_words[3],
+        stack_words[4], stack_words[5], stack_words[6], stack_words[7],
+    );
+
+    for (i, &candidate) in stack_words.iter().enumerate() {
+        if (0x4000_0000u64..0x5000_0000u64).contains(&candidate) {
+            let func_va = candidate.checked_add(0x40);
+            match func_va.and_then(|addr| read_virtual_u64_le(l4_phys, phys_off, addr)) {
+                Some(func_ptr) => {
+                    error!(
+                        "Possible FILE at stack[{}] {:#x}: funcptr[+0x40] = {:#x}",
+                        i, candidate, func_ptr
+                    );
+                }
+                None => {
+                    error!(
+                        "Possible FILE at stack[{}] {:#x}: funcptr[+0x40] unreadable",
+                        i, candidate
+                    );
+                }
+            }
+
+            let mut bytes = [UNREADABLE_BYTE; DUMP_BYTES];
+            for (j, b) in bytes.iter_mut().enumerate() {
+                if let Some(addr) = candidate.checked_add(j as u64) {
+                    if let Some(v) = read_virtual_u8(l4_phys, phys_off, addr) {
+                        *b = v;
+                    }
+                }
+            }
+            error!(
+                "Bytes @ {:#x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                candidate,
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11],
+                bytes[12], bytes[13], bytes[14], bytes[15],
+            );
+        }
+    }
+
+    error!("===== INVALID OPCODE DEBUG DUMP END =====");
+}
+
 /// 無効命令例外ハンドラ
 ///
 /// 無効命令例外は、CPUが認識できない命令が実行されたときに発生する。ユーザーモードで発生した場合はプロセスを終了させ、カーネルモードで発生した場合はシステム全体を停止する
@@ -219,7 +477,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
             "KERNEL MODE"
         }
     );
-    error!("{:#?}", stack_frame);
+    dump_invalid_opcode_diagnostics(&stack_frame);
 
     if is_user_mode {
         error!("Terminating faulting user process");
