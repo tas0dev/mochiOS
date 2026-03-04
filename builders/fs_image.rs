@@ -59,16 +59,18 @@ pub fn create_ext2_image(fs_dir: &Path, output_path: &Path) -> Result<(), String
 /// fsディレクトリの標準レイアウトを作成
 pub fn setup_fs_layout(fs_dir: &Path, resources_src: &Path) -> Result<(), String> {
     let dirs = [
-        "System",
-        "Applications",
-        "Librarys",
-        "Devices",
-        "Boot",
-        "Resources",
-        "Services",
-        "Logs",
-        "Home",
+        "System",           // システム（カーネルやカーネルに関連するファイルを配置）
+        "Applications",     // ユーザーアプリケーションを配置
+        "Binaries",         // コマンドやユーティリティを配置
+        "Librarys",         // ライブラリ（libc.aなど）を配置
+        "Devices",          // マウントしたデバイスなどを配置
+        "Boot",             // ブートローダー関連のファイルを配置
+        "Resources",        // アイコンやUIリソースを配置（ユーザーアプリのリソースはここに置く）
+        "Services",         // サービスを配置
+        "Logs",             // ログを配置
+        "Home",             // ユーザーディレクトリを配置
     ];
+    
     for dir in &dirs {
         let path = fs_dir.join(dir);
         fs::create_dir_all(&path)
