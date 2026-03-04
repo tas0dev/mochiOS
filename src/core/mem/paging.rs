@@ -341,7 +341,8 @@ fn user_page_flags_in_table(table_phys: u64, page_addr: u64) -> Option<PageTable
         return None;
     }
 
-    let l4 = unsafe { &*((table_phys + phys_off) as *const PageTable) };
+    let l4_vaddr = table_phys.checked_add(phys_off)?;
+    let l4 = unsafe { &*(l4_vaddr as *const PageTable) };
     let l4i = ((page_addr >> 39) & 0x1ff) as usize;
     if l4i >= 256 {
         return None;
@@ -355,7 +356,8 @@ fn user_page_flags_in_table(table_phys: u64, page_addr: u64) -> Option<PageTable
         return None;
     }
 
-    let l3 = unsafe { &*((l4e.addr().as_u64() + phys_off) as *const PageTable) };
+    let l3_vaddr = l4e.addr().as_u64().checked_add(phys_off)?;
+    let l3 = unsafe { &*(l3_vaddr as *const PageTable) };
     let l3i = ((page_addr >> 30) & 0x1ff) as usize;
     let l3e = &l3[l3i];
     let l3f = l3e.flags();
@@ -369,7 +371,8 @@ fn user_page_flags_in_table(table_phys: u64, page_addr: u64) -> Option<PageTable
         return Some(l3f);
     }
 
-    let l2 = unsafe { &*((l3e.addr().as_u64() + phys_off) as *const PageTable) };
+    let l2_vaddr = l3e.addr().as_u64().checked_add(phys_off)?;
+    let l2 = unsafe { &*(l2_vaddr as *const PageTable) };
     let l2i = ((page_addr >> 21) & 0x1ff) as usize;
     let l2e = &l2[l2i];
     let l2f = l2e.flags();
@@ -383,7 +386,8 @@ fn user_page_flags_in_table(table_phys: u64, page_addr: u64) -> Option<PageTable
         return Some(l2f);
     }
 
-    let l1 = unsafe { &*((l2e.addr().as_u64() + phys_off) as *const PageTable) };
+    let l1_vaddr = l2e.addr().as_u64().checked_add(phys_off)?;
+    let l1 = unsafe { &*(l1_vaddr as *const PageTable) };
     let l1i = ((page_addr >> 12) & 0x1ff) as usize;
     let l1e = &l1[l1i];
     let l1f = l1e.flags();

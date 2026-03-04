@@ -10,6 +10,7 @@ use crate::mem::{frame, paging};
 const PAGE_SIZE: u64 = 4096;
 const USER_STACK_TOP: u64 = 0x0000_8000_0000; // 2GB
 const USER_STACK_GUARD_PAGES: u64 = 1;
+const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 
 static NEXT_STACK_TOP: Mutex<u64> = Mutex::new(USER_STACK_TOP);
 
@@ -23,9 +24,17 @@ pub fn map_user_range(start: u64, size: u64, flags: PageTableFlags) -> Result<()
     if size == 0 {
         return Ok(());
     }
+    let size_minus_one = size
+        .checked_sub(1)
+        .ok_or(KernelError::Memory(MemoryError::InvalidAddress))?;
+    let end = start
+        .checked_add(size_minus_one)
+        .ok_or(KernelError::Memory(MemoryError::InvalidAddress))?;
+    if start == 0 || start > USER_SPACE_END || end > USER_SPACE_END {
+        return Err(KernelError::Memory(MemoryError::InvalidAddress));
+    }
 
     let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(start));
-    let end = start.checked_add(size - 1).ok_or(KernelError::Memory(MemoryError::InvalidAddress))?;
     let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end));
 
     for page in Page::range_inclusive(start_page, end_page) {

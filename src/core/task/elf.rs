@@ -116,6 +116,9 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
         if memsz == 0 {
             continue;
         }
+        if filesz > memsz {
+            return Err(KernelError::Memory(MemoryError::InvalidAddress));
+        }
 
         let file_end = match (phdr.p_offset as usize).checked_add(filesz) {
             Some(v) => v,
@@ -330,6 +333,27 @@ fn apply_relocations(data: &[u8], header: Elf64Header, load_bias: u64) -> Result
     let mut rela_addr = None;
     let mut rela_size = None;
     let mut rela_ent = None;
+    let mut load_ranges: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+
+    let phoff = header.e_phoff as usize;
+    let phentsize = header.e_phentsize as usize;
+    let phnum = header.e_phnum as usize;
+    for i in 0..phnum {
+        let off = match i.checked_mul(phentsize).and_then(|x| phoff.checked_add(x)) {
+            Some(o) => o,
+            None => return Err(KernelError::InvalidParam),
+        };
+        let phdr = read_phdr(data, off)?;
+        if phdr.p_type != PT_LOAD || phdr.p_memsz == 0 {
+            continue;
+        }
+        let start = phdr.p_vaddr.wrapping_add(load_bias);
+        let end = match start.checked_add(phdr.p_memsz) {
+            Some(v) => v,
+            None => return Err(KernelError::InvalidParam),
+        };
+        load_ranges.push((start, end));
+    }
 
     if let Some((dyn_off, dyn_size)) = dynamic_file_range(data, header)? {
         let count = dyn_size / core::mem::size_of::<Elf64Dyn>();
@@ -355,6 +379,9 @@ fn apply_relocations(data: &[u8], header: Elf64Header, load_bias: u64) -> Result
         None => return Ok(()),
     };
     let rela_ent = rela_ent.unwrap_or(core::mem::size_of::<Elf64Rela>());
+    if rela_ent < core::mem::size_of::<Elf64Rela>() || rela_size % rela_ent != 0 {
+        return Err(KernelError::InvalidParam);
+    }
 
     let rela_off = vaddr_to_offset(data, header, rela_addr)?;
     let count = rela_size / rela_ent;
@@ -363,7 +390,18 @@ fn apply_relocations(data: &[u8], header: Elf64Header, load_bias: u64) -> Result
         let rela = read_rela(data, off)?;
         let r_type = (rela.r_info & 0xffffffff) as u32;
         if r_type == R_X86_64_RELATIVE {
-            let reloc_addr = load_bias.wrapping_add(rela.r_offset) as *mut u64;
+            let reloc_vaddr = load_bias.wrapping_add(rela.r_offset);
+            let reloc_end = match reloc_vaddr.checked_add(core::mem::size_of::<u64>() as u64) {
+                Some(v) => v,
+                None => return Err(KernelError::InvalidParam),
+            };
+            if !load_ranges
+                .iter()
+                .any(|(start, end)| reloc_vaddr >= *start && reloc_end <= *end)
+            {
+                return Err(KernelError::InvalidParam);
+            }
+            let reloc_addr = reloc_vaddr as *mut u64;
             let value = load_bias.wrapping_add(rela.r_addend as u64);
             unsafe {
                 reloc_addr.write(value);
