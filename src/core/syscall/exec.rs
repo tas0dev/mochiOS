@@ -11,6 +11,26 @@ static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);
 const EM_X86_64: u16 = 0x3E;
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0x7c4a_7f73_d3e1_9b1d);
 
+struct UserPageTableGuard(Option<u64>);
+
+impl UserPageTableGuard {
+    fn new(table_phys: u64) -> Self {
+        Self(Some(table_phys))
+    }
+
+    fn disarm(&mut self) {
+        let _ = self.0.take();
+    }
+}
+
+impl Drop for UserPageTableGuard {
+    fn drop(&mut self) {
+        if let Some(table_phys) = self.0.take() {
+            let _ = crate::mem::paging::destroy_user_page_table(table_phys);
+        }
+    }
+}
+
 /// サービスマネージャーPIDを登録する（IDベース認可）
 pub fn register_service_manager_pid(pid: u64) {
     SERVICE_MANAGER_PID.store(pid, Ordering::SeqCst);
@@ -136,6 +156,7 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
                 return crate::syscall::types::EINVAL;
             }
         };
+        let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
         crate::debug!("Created user page table at {:#x}", new_pt_phys);
 
         // ELFアーキテクチャ検証 (MED-07)
@@ -596,6 +617,7 @@ fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
             }
             return crate::syscall::types::EINVAL;
         }
+        new_pt_guard.disarm();
         // allocate kernel stack for the new thread
         const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
         let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
@@ -687,6 +709,7 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
         Ok(p) => p,
         Err(_) => return EINVAL,
     };
+    let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
 
     // PT_LOAD セグメントをマップ
     const USER_SPACE_END_EXECVE: u64 = 0x0000_7FFF_FFFF_FFFF;
@@ -861,11 +884,19 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
         Some(p) => p,
         None => return EINVAL,
     };
+    let mut old_pt_phys = None;
     crate::task::with_process_mut(pid, |p| {
+        old_pt_phys = p.page_table();
         p.set_page_table(new_pt_phys);
         p.set_heap_start(heap_base);
         p.set_heap_end(heap_base + heap_map_size);
     });
+    if let Some(old) = old_pt_phys {
+        if old != new_pt_phys {
+            let _ = crate::mem::paging::destroy_user_page_table(old);
+        }
+    }
+    new_pt_guard.disarm();
 
     // 新しいページテーブルに切り替えてジャンプ
     unsafe {
