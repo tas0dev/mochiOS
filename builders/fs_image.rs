@@ -63,7 +63,7 @@ pub fn setup_fs_layout(fs_dir: &Path, resources_src: &Path) -> Result<(), String
         "Applications",     // ユーザーアプリケーションを配置
         "Binaries",         // コマンドやユーティリティを配置
         "Libraries",         // ライブラリ（libc.aなど）を配置
-        "Devices",          // マウントしたデバイスなどを配置
+        "Mounts",          // マウントしたデバイスなどを配置
         "Boot",             // ブートローダー関連のファイルを配置
         "Resources",        // アイコンやUIリソースを配置（ユーザーアプリのリソースはここに置く）
         "Services",         // サービスを配置
