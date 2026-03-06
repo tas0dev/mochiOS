@@ -5,7 +5,6 @@ extern crate alloc;
 
 mod vga_console;
 
-use core::fmt::Write as _;
 use core::ptr::addr_of_mut;
 use mochios::{BootInfo, MemoryRegion, MemoryType};
 use uefi::prelude::*;

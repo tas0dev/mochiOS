@@ -236,7 +236,17 @@ pub fn build_service(
 
     if let Some(binary_path) = find_built_binary(&target_dir, target_name.as_deref()) {
         let dest_name = format!("{}.service", service.name);
-        let dest = output_dir.join(&dest_name);
+        // ATA/ext2 サービスは Services/ サブディレクトリに配置
+        let effective_output_dir = if service.fs_type != "initfs" {
+            let services_subdir = output_dir.join("Services");
+            fs::create_dir_all(&services_subdir).map_err(|e| {
+                format!("Failed to create Services dir: {}", e)
+            })?;
+            services_subdir
+        } else {
+            output_dir.to_path_buf()
+        };
+        let dest = effective_output_dir.join(&dest_name);
 
         fs::copy(&binary_path, &dest)
             .map_err(|e| format!("Failed to copy service binary to {}: {}", dest.display(), e))?;

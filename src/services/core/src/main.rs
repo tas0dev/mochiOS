@@ -73,8 +73,8 @@ fn main() {
     wait_for_ready(2);
 
     // shell.service を起動（std::fs::read で ELF を読んで exec_from_buffer で実行）
-    println!("[CORE] Loading shell.service...");
-    match std::fs::read("shell.service") {
+    println!("[CORE] Loading shell.service from Services/...");
+    match std::fs::read("Services/shell.service") {
         Ok(elf_data) => {
             println!("[CORE] shell.service loaded ({} bytes), launching...", elf_data.len());
             match process::exec_from_buffer(&elf_data) {

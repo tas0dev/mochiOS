@@ -32,6 +32,6 @@ order = 10
 [core.service.shell]
 description = "Draw video output and shell interface"
 dir = "shell"
-fs = "ext2"
+fs = "ata"
 autostart = true
 order = 15
