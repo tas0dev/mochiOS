@@ -37,6 +37,12 @@ pub mod libc;
 /// Linux/POSIX 互換スタブ (std リンク用)
 pub mod posix_stubs;
 
+/// フレームバッファアクセス
+pub mod vga;
+
+/// キーボード入力
+pub mod keyboard;
+
 #[cfg(not(feature = "std-support"))]
 use core::panic::PanicInfo;
 #[cfg(not(feature = "std-support"))]

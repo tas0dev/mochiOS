@@ -84,6 +84,10 @@ pub enum SyscallNumber {
     KeyboardRead = 526,
     /// スレッドIDからプロセスの権限レベルを取得 (0=Core, 1=Service, 2=User)
     GetThreadPrivilege = 527,
+    /// フレームバッファ情報取得 (width, height, stride を FbInfo に書き込む)
+    GetFramebufferInfo = 528,
+    /// フレームバッファを呼び出し元プロセスにマップし仮想アドレスを返す
+    MapFramebuffer = 529,
 }
 
 /// 入力が空
