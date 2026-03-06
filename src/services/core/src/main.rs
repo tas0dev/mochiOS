@@ -1,5 +1,3 @@
-use core::fmt;
-use swiftlib::io;
 use swiftlib::process;
 use swiftlib::time;
 
@@ -17,26 +15,6 @@ const SERVICES: &[ServiceDef] = &[
 
 #[cfg(feature = "run_tests")]
 const TEST_PATH: &str = "tests";
-
-struct Stdout;
-
-impl fmt::Write for Stdout {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        io::write_stdout(s.as_bytes());
-        Ok(())
-    }
-}
-
-macro_rules! print {
-    ($($arg:tt)*) => ({
-        let _ = core::fmt::Write::write_fmt(&mut Stdout, format_args!($($arg)*));
-    });
-}
-
-macro_rules! println {
-    () => (print!("\n"));
-    ($($arg:tt)*) => (print!("{}\n", format_args!($($arg)*)));
-}
 
 fn start_service(service: &ServiceDef) {
     println!("[CORE] Starting service: {}", service.name);
