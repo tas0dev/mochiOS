@@ -71,5 +71,3 @@ exec qemu-system-x86_64 \
     -no-reboot \
     -d int,guest_errors \
     -D qemu.log \
-    -nographic \
-    -monitor none \
