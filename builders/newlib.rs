@@ -4,8 +4,52 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Well-known paths where cross-compiler toolchains are commonly installed.
+const EXTRA_TOOL_PATHS: &[&str] = &[
+    "/home/linuxbrew/.linuxbrew/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+];
+
 fn tool_exists(name: &str) -> bool {
-    Command::new(name).arg("--version").output().is_ok()
+    // First try via PATH as-is
+    if Command::new(name).arg("--version").output().is_ok() {
+        return true;
+    }
+    // Then probe well-known locations (needed when launched from IDEs that
+    // inherit a stripped-down environment without linuxbrew in PATH)
+    EXTRA_TOOL_PATHS.iter().any(|dir| {
+        let full = std::path::Path::new(dir).join(name);
+        Command::new(&full).arg("--version").output().is_ok()
+    })
+}
+
+/// Return the full path to a tool, checking well-known locations before name-only fallback.
+fn find_tool(name: &str) -> String {
+    if Command::new(name).arg("--version").output().is_ok() {
+        return name.to_string();
+    }
+    for dir in EXTRA_TOOL_PATHS {
+        let full = std::path::Path::new(dir).join(name);
+        if Command::new(&full).arg("--version").output().is_ok() {
+            return full.to_string_lossy().into_owned();
+        }
+    }
+    name.to_string()
+}
+
+fn apply_cross_target_tools(cmd: &mut Command) {
+    cmd.env("CC_FOR_TARGET", find_tool("x86_64-elf-gcc"))
+        .env("CXX_FOR_TARGET", find_tool("x86_64-elf-g++"))
+        .env("AR_FOR_TARGET", find_tool("x86_64-elf-ar"))
+        .env("AS_FOR_TARGET", find_tool("x86_64-elf-as"))
+        .env("LD_FOR_TARGET", find_tool("x86_64-elf-ld"))
+        .env("NM_FOR_TARGET", find_tool("x86_64-elf-nm"))
+        .env("RANLIB_FOR_TARGET", find_tool("x86_64-elf-ranlib"))
+        .env("STRIP_FOR_TARGET", find_tool("x86_64-elf-strip"))
+        .env("OBJCOPY_FOR_TARGET", find_tool("x86_64-elf-objcopy"))
+        .env("OBJDUMP_FOR_TARGET", find_tool("x86_64-elf-objdump"))
+        .env("READELF_FOR_TARGET", find_tool("x86_64-elf-readelf"));
 }
 
 fn apply_host_target_tool_fallback(cmd: &mut Command) {
@@ -80,6 +124,8 @@ pub fn build_newlib(src_dir: &Path) {
             .arg("--disable-multilib");
         if use_host_target_tool_fallback {
             apply_host_target_tool_fallback(&mut configure_cmd);
+        } else {
+            apply_cross_target_tools(&mut configure_cmd);
         }
 
         let status = configure_cmd
@@ -101,6 +147,8 @@ pub fn build_newlib(src_dir: &Path) {
     make_cmd.current_dir(&build_dir).arg(make_j);
     if use_host_target_tool_fallback {
         apply_host_target_tool_fallback(&mut make_cmd);
+    } else {
+        apply_cross_target_tools(&mut make_cmd);
     }
 
     let status = make_cmd.status().expect("Failed to execute newlib make");
@@ -116,6 +164,8 @@ pub fn build_newlib(src_dir: &Path) {
     make_install_cmd.current_dir(&build_dir).arg("install");
     if use_host_target_tool_fallback {
         apply_host_target_tool_fallback(&mut make_install_cmd);
+    } else {
+        apply_cross_target_tools(&mut make_install_cmd);
     }
 
     let status = make_install_cmd

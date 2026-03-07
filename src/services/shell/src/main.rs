@@ -1,5 +1,9 @@
-use crate::char;
-use crate::keyboard;
+mod char;
+mod keyboard;
+
+use char::{Font, Terminal};
+use keyboard::Ps2Keyboard;
+use swiftlib::{time, vga};
 
 fn main() {
     let info = match vga::get_info() {

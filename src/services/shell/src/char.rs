@@ -1,8 +1,5 @@
-use swiftlib::time;
 use swiftlib::vga;
 
-mod keyboard;
-use keyboard::Ps2Keyboard;
 
 const FONT_WIDTH: usize = 6;
 const FONT_HEIGHT: usize = 12;
@@ -11,13 +8,13 @@ const ASCII_END: usize = 127;
 const GLYPH_COUNT: usize = ASCII_END - ASCII_START;
 
 /// ASCII 文字ごとの 12 行ビットマップ (インデックス = codepoint - 32)
-struct Font {
+pub struct Font {
     glyphs: [[u8; FONT_HEIGHT]; GLYPH_COUNT],
 }
 
 impl Font {
     /// `System/fonts/ter-u12b.bdf` を読み込んで解析する
-    fn load() -> Option<Self> {
+    pub fn load() -> Option<Self> {
         let data = std::fs::read("System/fonts/ter-u12b.bdf").ok()?;
         let mut font = Font { glyphs: [[0u8; FONT_HEIGHT]; GLYPH_COUNT] };
         parse_bdf(&data, &mut font.glyphs);
@@ -72,7 +69,7 @@ fn parse_bdf(data: &[u8], glyphs: &mut [[u8; FONT_HEIGHT]; GLYPH_COUNT]) {
 }
 
 /// フレームバッファへの書き込みを管理するターミナル
-struct Terminal {
+pub struct Terminal {
     fb_ptr: *mut u32,
     width: u32,
     height: u32,
@@ -82,14 +79,14 @@ struct Terminal {
     max_cols: u32,
     max_rows: u32,
     font: Font,
-    fg: u32,
+    pub fg: u32,
     bg: u32,
-    input_buf: [u8; 256],
-    input_len: usize,
+    pub input_buf: [u8; 256],
+    pub input_len: usize,
 }
 
 impl Terminal {
-    fn new(fb_ptr: *mut u32, info: vga::FbInfo, font: Font) -> Self {
+    pub fn new(fb_ptr: *mut u32, info: vga::FbInfo, font: Font) -> Self {
         let max_cols = info.width / FONT_WIDTH as u32;
         let max_rows = info.height / FONT_HEIGHT as u32;
         Terminal {
@@ -132,7 +129,7 @@ impl Terminal {
         }
     }
 
-    fn clear_screen(&mut self) {
+    pub fn clear_screen(&mut self) {
         let total = self.height * self.stride;
         for i in 0..total {
             unsafe { self.fb_ptr.add(i as usize).write_volatile(self.bg); }
@@ -165,7 +162,7 @@ impl Terminal {
         }
     }
 
-    fn write_byte(&mut self, byte: u8) {
+    pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
             b'\r' => { self.col = 0; }
@@ -185,7 +182,7 @@ impl Terminal {
         }
     }
 
-    fn write_str(&mut self, s: &str) {
+    pub fn write_str(&mut self, s: &str) {
         for b in s.bytes() {
             self.write_byte(b);
         }
@@ -208,13 +205,13 @@ impl Terminal {
         }
     }
 
-    fn prompt(&mut self) {
+    pub fn prompt(&mut self) {
         self.fg = 0x00FF_88FF; // 紫
         self.write_str("mochi> ");
         self.fg = 0x00FF_FFFF; // シアン
     }
 
-    fn handle_line(&mut self) {
+    pub fn handle_line(&mut self) {
         // バッファから文字列をコピーして借用を解放
         let mut tmp = [0u8; 256];
         let len = self.input_len;

@@ -1,5 +1,5 @@
 [package]
-name = "mochios-kernel"
+name = "mochios-core"
 version = "0.1.0"
 edition = "2021"
 build = "core_build.rs"

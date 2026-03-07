@@ -6,3 +6,5 @@ edition = "2021"
 
 [lib]
 name = "posix"
+test = false
+bench = false
