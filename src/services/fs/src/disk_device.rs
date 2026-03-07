@@ -18,6 +18,7 @@ struct DiskRequest {
     data: [u8; 512], // OP_WRITE のときに使用
 }
 
+#[allow(unused)]
 impl DiskRequest {
     const OP_READ: u64 = 1;
     const OP_WRITE: u64 = 2;

@@ -13,6 +13,7 @@ use crate::common::vfs::{
 /// ブロックデバイストレイト
 ///
 /// 実際のストレージデバイスへのアクセスを抽象化
+#[allow(unused)]
 pub trait BlockDevice: Send + Sync {
     /// ブロックサイズ（通常512バイト）
     fn block_size(&self) -> usize;
@@ -117,6 +118,7 @@ struct Ext2GroupDesc {
 }
 
 /// EXT2ファイルシステム
+#[allow(dead_code)]
 pub struct Ext2Fs {
     device: Box<dyn BlockDevice>,
     superblock: Ext2Superblock,
@@ -129,7 +131,7 @@ pub struct Ext2Fs {
 
 impl Ext2Fs {
     /// 新しいEXT2ファイルシステムを作成
-    pub fn new(mut device: Box<dyn BlockDevice>) -> VfsResult<Self> {
+    pub fn new(device: Box<dyn BlockDevice>) -> VfsResult<Self> {
         // スーパーブロックを読み取る
         let mut sb_buf = vec![0u8; 1024];
         device.read_block(EXT2_SUPERBLOCK_OFFSET / device.block_size() as u64, &mut sb_buf)
