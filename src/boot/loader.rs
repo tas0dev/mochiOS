@@ -16,9 +16,9 @@ use uefi::table::boot::{AllocateType, MemoryType as UefiMemType, OpenProtocolAtt
 
 /// VGA フレームバッファへ書き出す print マクロ
 macro_rules! vga_print {
-    ($($arg:tt)*) => {
-        unsafe { let _ = core::fmt::write(&mut vga_console::CONSOLE, format_args!($($arg)*)); }
-    };
+    ($($arg:tt)*) => {{
+        let _ = core::fmt::write(&mut *vga_console::CONSOLE.lock(), format_args!($($arg)*));
+    }};
 }
 
 macro_rules! vga_println {
@@ -422,7 +422,7 @@ unsafe fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Sta
         let fb_sz   = fb.size();
         let (w, h)  = mode_info.resolution();
         let st      = mode_info.stride();
-        unsafe { vga_console::CONSOLE.init(fb_ptr, w, h, st); }
+        vga_console::CONSOLE.lock().init(fb_ptr, w, h, st);
         (fb_ptr as u64, fb_sz, w, h, st)
     };
 

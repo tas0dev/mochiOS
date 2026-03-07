@@ -948,7 +948,7 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
 /// - `buf_ptr`: ユーザー空間の ELF データへのポインタ
 /// - `buf_len`: バッファのバイト数
 pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
-    use crate::syscall::types::{EINVAL, EPERM};
+    use crate::syscall::types::{EFAULT, EINVAL, EPERM};
 
     // core/service のみ許可
     if !caller_can_launch_service() {
@@ -959,12 +959,19 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         return EINVAL;
     }
 
-    // ユーザー空間からデータをコピー
-    let data = unsafe {
-        let ptr = buf_ptr as *const u8;
-        core::slice::from_raw_parts(ptr, buf_len as usize)
-    };
-    let owned: Vec<u8> = data.to_vec();
+    // ポインタの範囲がユーザー空間内かつ現在のプロセスのページテーブルにマップ済みか検証
+    if !crate::syscall::validate_user_ptr(buf_ptr, buf_len) {
+        return EFAULT;
+    }
+
+    // KPTI 環境ではカーネルは kernel CR3 で動作しており、ユーザー空間の
+    // 仮想アドレスに直接アクセスできない。
+    // with_user_memory_access でユーザー CR3 に一時切替してバルクコピーする。
+    let mut owned = alloc::vec![0u8; buf_len as usize];
+    let dst_ptr = owned.as_mut_ptr();
+    crate::syscall::with_user_memory_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(buf_ptr as *const u8, dst_ptr, buf_len as usize);
+    });
 
     exec_with_data(&owned, "user_exec")
 }

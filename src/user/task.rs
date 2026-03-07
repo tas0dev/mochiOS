@@ -1,6 +1,6 @@
 //! タスク系システムコール（ユーザー側）
 
-use super::sys::{syscall0, syscall1, syscall2, SyscallNumber};
+use super::sys::{syscall0, syscall1, SyscallNumber};
 
 /// スケジューラに実行権を譲る
 pub fn yield_now() {

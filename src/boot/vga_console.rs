@@ -337,4 +337,4 @@ impl fmt::Write for VgaConsole {
 }
 
 /// グローバルコンソール（シングルスレッドのブートローダー用）
-pub static mut CONSOLE: VgaConsole = VgaConsole::new();
+pub static CONSOLE: spin::Mutex<VgaConsole> = spin::Mutex::new(VgaConsole::new());
