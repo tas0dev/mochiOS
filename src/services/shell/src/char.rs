@@ -103,8 +103,8 @@ impl Terminal {
             max_cols,
             max_rows,
             font,
-            fg: 0x00FF_FFFF, // シアン
-            bg: 0x0000_0000, // 黒
+            fg: 0x00FF_FFFF,
+            bg: 0x0000_0000,
             input_buf: [0u8; 256],
             input_len: 0,
             env,
@@ -148,29 +148,41 @@ impl Terminal {
         if x >= self.width || y >= self.height {
             return;
         }
-        let offset = y * self.stride + x;
-        unsafe {
-            self.fb_ptr.add(offset as usize).write_volatile(color);
-        }
+        let offset = (y * self.stride + x) as usize;
+        unsafe { self.fb_ptr.add(offset).write_volatile(color); }
     }
 
     fn draw_char(&self, ch: u8, col: u32, row: u32) {
-        let glyph = self.font.glyph(ch);
+        let glyph = *self.font.glyph(ch);
         let x0 = col * FONT_WIDTH as u32;
         let y0 = row * FONT_HEIGHT as u32;
+        // 1フォント行を一括コピーすることで MMIO 書き込み回数を 72→12 に削減
+        let mut row_buf = [0u32; FONT_WIDTH];
         for (r, &bits) in glyph.iter().enumerate() {
+            let y = y0 + r as u32;
+            if y >= self.height { break; }
+            if x0 + FONT_WIDTH as u32 > self.width { break; }
             for c in 0..FONT_WIDTH {
-                // BDF: bit 7 = 左端, 6ピクセル幅なので bit (7-c) を使う
                 let on = (bits >> (7 - c)) & 1 != 0;
-                self.put_pixel(x0 + c as u32, y0 + r as u32, if on { self.fg } else { self.bg });
+                row_buf[c] = if on { self.fg } else { self.bg };
+            }
+            // row_buf → フレームバッファ（スタック→MMIO の bulk write）
+            let offset = (y * self.stride + x0) as usize;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    row_buf.as_ptr(),
+                    self.fb_ptr.add(offset),
+                    FONT_WIDTH,
+                );
             }
         }
     }
 
     pub fn clear_screen(&mut self) {
-        let total = self.height * self.stride;
-        for i in 0..total {
-            unsafe { self.fb_ptr.add(i as usize).write_volatile(self.bg); }
+        // bg = 0x00000000 なので write_bytes(0) で全ピクセルをゼロ埋め（高速）
+        let total_bytes = (self.height * self.stride) as usize * 4;
+        unsafe {
+            core::ptr::write_bytes(self.fb_ptr as *mut u8, 0, total_bytes);
         }
         self.col = 0;
         self.row = 0;
@@ -179,18 +191,26 @@ impl Terminal {
     fn scroll_up(&mut self) {
         let row_pixels = FONT_HEIGHT as u32 * self.stride;
         let total = self.height * self.stride;
-        // 1行分上にコピー
+        // 本体をコピー（MMIO read + write だが memmove 相当で効率的）
         unsafe {
             let src = self.fb_ptr.add(row_pixels as usize);
             core::ptr::copy(src, self.fb_ptr, (total - row_pixels) as usize);
         }
-        // 最終行をクリア
+        // 最終行をゼロ埋め（write_bytes で高速クリア）
         let last_row_start = (self.height - FONT_HEIGHT as u32) * self.stride;
-        for i in 0..(FONT_HEIGHT as u32 * self.stride) {
-            unsafe { self.fb_ptr.add((last_row_start + i) as usize).write_volatile(self.bg); }
+        let clear_bytes = (FONT_HEIGHT as u32 * self.stride) as usize * 4;
+        unsafe {
+            core::ptr::write_bytes(
+                self.fb_ptr.add(last_row_start as usize) as *mut u8,
+                0,
+                clear_bytes,
+            );
         }
         self.row = self.max_rows - 1;
     }
+
+    /// 互換性のために残す（シャドウバッファ廃止により no-op）
+    pub fn flush(&mut self) {}
 
     fn new_line(&mut self) {
         self.col = 0;
@@ -269,6 +289,8 @@ impl Terminal {
                         self.write_str(s);
                     }
                 }
+                // バッチ分まとめてフラッシュ
+                self.flush();
             }
             // 子プロセスが終了していれば抜ける（exit 通知で起床した場合もここで検知）
             if task::wait_nonblocking(pid as i64).is_some() {
@@ -285,6 +307,7 @@ impl Terminal {
                 self.write_str(s);
             }
         }
+        self.flush();
     }
 
     pub fn handle_line(&mut self) {

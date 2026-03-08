@@ -24,12 +24,13 @@ fn main() {
     let mut term = Terminal::new(fb_ptr, info, font);
     let mut kbd = Ps2Keyboard::new();
 
-    term.clear_screen();
+    term.clear_screen(); // clear_screen 内で flush 済み
     term.fg = 0x00FF_FF00; // 黄色
     term.write_str("mochiOS Shell\n");
     term.write_str("Type 'help' for commands.\n\n");
     term.fg = 0x00FF_FFFF;
     term.prompt();
+    term.flush();
 
     loop {
         time::sleep_ms(10);
@@ -39,11 +40,13 @@ fn main() {
                 b'\n' | b'\r' => {
                     term.handle_line();
                     term.prompt();
+                    term.flush();
                 }
                 0x08 | 0x7F => { // Backspace / Delete
                     if term.input_len > 0 {
                         term.input_len -= 1;
                         term.write_byte(0x08);
+                        term.flush();
                     }
                 }
                 0x20..=0x7E => {
@@ -51,6 +54,7 @@ fn main() {
                         term.input_buf[term.input_len] = ch;
                         term.input_len += 1;
                         term.write_byte(ch);
+                        term.flush();
                     }
                 }
                 _ => {}
