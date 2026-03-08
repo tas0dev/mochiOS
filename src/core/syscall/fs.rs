@@ -16,6 +16,8 @@ struct FileHandle {
     owner_pid: u64,
     data: Box<[u8]>,
     pos: usize,
+    /// Some(path) であればディレクトリ fd
+    dir_path: Option<String>,
 }
 
 // ファイルディスクリプタテーブル: 0 == 未使用, それ以外は Box<FileHandle> の生ポインタ (u64)
@@ -46,10 +48,14 @@ pub fn open(path_ptr: u64, _flags: u64) -> u64 {
         Err(e) => return e,
     };
 
-    // initfs からファイルを読み込む
-    let data_vec = match crate::init::fs::read(&path) {
-        Some(d) => d,
-        None => return ENOENT,
+    // ディレクトリの場合は空データで dir_path を記録し、ファイルの場合は内容を読み込む
+    let (data_vec, dir_path) = if crate::init::fs::is_directory(&path) {
+        (Vec::new(), Some(path.clone()))
+    } else {
+        match crate::init::fs::read(&path) {
+            Some(d) => (d, None),
+            None => return ENOENT,
+        }
     };
 
     // ハンドルを確保して所有権を Box にして登録する
@@ -57,6 +63,7 @@ pub fn open(path_ptr: u64, _flags: u64) -> u64 {
         owner_pid,
         data: data_vec.into_boxed_slice(),
         pos: 0,
+        dir_path,
     });
     let ptr = Box::into_raw(handle) as u64;
 
@@ -223,20 +230,47 @@ pub fn rmdir(_path_ptr: u64) -> u64 {
     ENOSYS
 }
 
-/// Readdirシステムコール（簡易実装）
-/// - 指定された buf_ptr に root ディレクトリのファイル名を改行区切りで書き込む
-pub fn readdir(_fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
+/// Readdirシステムコール
+/// - fd のディレクトリパスから子エントリ名を改行区切りで buf_ptr に書き込む
+pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     if buf_ptr == 0 || buf_len == 0 {
         return EINVAL;
     }
-    // ユーザー空間アドレスの有効性を検証する
     if !crate::syscall::validate_user_ptr(buf_ptr, buf_len) {
         return EFAULT;
     }
-    let mut names = Vec::new();
-    for e in crate::init::fs::entries() {
-        names.push(e.name.to_string());
+    if fd < FD_BASE as u64 {
+        return EBADF;
     }
+    let idx = fd as usize;
+    if idx >= MAX_FDS {
+        return EBADF;
+    }
+    let caller_pid = match current_process_id_raw() {
+        Some(pid) => pid,
+        None => return EBADF,
+    };
+
+    let dir_path = {
+        let table = FD_TABLE.lock();
+        let ptr = table[idx];
+        if ptr == 0 {
+            return EBADF;
+        }
+        let fh = unsafe { &*(ptr as *const FileHandle) };
+        if fh.owner_pid != caller_pid {
+            return EBADF;
+        }
+        match &fh.dir_path {
+            Some(p) => p.clone(),
+            None => return EINVAL, // ディレクトリではない
+        }
+    };
+
+    let names = match crate::init::fs::readdir_path(&dir_path) {
+        Some(n) => n,
+        None => return EINVAL,
+    };
     let joined = names.join("\n");
     let bytes = joined.as_bytes();
     let to_copy = core::cmp::min(bytes.len(), buf_len as usize);
