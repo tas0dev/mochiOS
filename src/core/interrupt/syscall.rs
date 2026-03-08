@@ -1,5 +1,5 @@
-use core::arch::asm;
 use crate::mem::gdt;
+use core::arch::asm;
 
 // MSR addresses
 const IA32_STAR: u32 = 0xC000_0081;
@@ -7,11 +7,11 @@ const IA32_LSTAR: u32 = 0xC000_0082;
 const IA32_FMASK: u32 = 0xC000_0084;
 
 /// MSRに値を書き込む
-/// 
+///
 /// ## Arguments
 /// - `msr`: MSRのアドレス
 /// - `value`: 書き込む値
-/// 
+///
 /// ## Safety
 /// - `msr`は有効なMSRアドレスでなければならない
 unsafe fn wrmsr(msr: u32, value: u64) {

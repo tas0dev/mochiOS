@@ -10,6 +10,8 @@ pub enum SyscallNumber {
     Open = 2,
     /// ファイルを閉じる
     Close = 3,
+    /// ファイル情報取得 (path)
+    Stat = 4,
     /// ファイル情報取得
     Fstat = 5,
     /// ファイルシーク
@@ -49,7 +51,7 @@ pub enum SyscallNumber {
     /// getcwd
     Getcwd = 79,
 
-    // SwiftCore独自syscall (Linux未使用番号帯: 512+)
+    // mochiOS独自syscall (Linux未使用番号帯: 512+)
     /// スケジューラへ譲る
     Yield = 512,
     /// タイマーティック数を取得
@@ -78,6 +80,16 @@ pub enum SyscallNumber {
     Readdir = 524,
     /// カレントディレクトリ変更
     Chdir = 525,
+    /// キーボードから1文字読み取る（mochiOS 固有）
+    KeyboardRead = 526,
+    /// スレッドIDからプロセスの権限レベルを取得 (0=Core, 1=Service, 2=User)
+    GetThreadPrivilege = 527,
+    /// フレームバッファ情報を取得 (info_ptr: *mut FbInfo)
+    GetFramebufferInfo = 528,
+    /// フレームバッファをユーザー空間にマップ、マップ済み仮想アドレスを返す
+    MapFramebuffer = 529,
+    /// メモリ上の ELF バッファから新プロセスを起動
+    ExecFromBuffer = 530,
 }
 
 /// 成功
@@ -100,8 +112,9 @@ pub const ENXIO: u64 = (-6i64) as u64;
 pub const EINVAL: u64 = (-22i64) as u64;
 /// 未実装
 pub const ENOSYS: u64 = (-38i64) as u64;
+/// データがない / ノンブロッキングで読み出しできない
+pub const ENODATA: u64 = (-61i64) as u64;
 /// 受信/送信できない（キュー空/満杯）
 pub const EAGAIN: u64 = (-11i64) as u64;
 /// メモリ不足
 pub const ENOMEM: u64 = (-12i64) as u64;
-

@@ -1,108 +1,60 @@
-#![no_std]
-#![no_main]
+mod char;
+mod keyboard;
 
-use core::arch::asm;
-use core::panic::PanicInfo;
+use char::{Font, Terminal};
+use keyboard::Ps2Keyboard;
+use swiftlib::{time, vga};
 
-const SYS_CONSOLE_WRITE: u64 = 5;
-const SYS_INITFS_READ: u64 = 6;
-const SYS_EXIT: u64 = 7;
-const SYS_IPC_RECV: u64 = 4;
-const EAGAIN: u64 = u64::MAX - 2;
+fn main() {
+    let info = match vga::get_info() {
+        Some(i) => i,
+        None => return,
+    };
+    
+    let fb_ptr = match vga::map_framebuffer() {
+        Some(p) => p,
+        None => return,
+    };
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
-    write_str("SwiftCore shell\n");
-    write_str("Type: (keyboard via IPC)\n");
+    let font = match Font::load() {
+        Some(f) => f,
+        None => return,
+    };
+    
+    let mut term = Terminal::new(fb_ptr, info, font);
+    let mut kbd = Ps2Keyboard::new();
 
-    let mut buf = [0u8; 128];
-    let read = syscall4(
-        SYS_INITFS_READ,
-        "/etc/motd".as_ptr() as u64,
-        "/etc/motd".len() as u64,
-        buf.as_mut_ptr() as u64,
-        buf.len() as u64,
-    );
-
-    if read > 0 && read <= buf.len() as u64 {
-        if let Ok(text) = core::str::from_utf8(&buf[..read as usize]) {
-            write_str(text);
-            write_str("\n");
-        }
-    }
+    term.clear_screen();
+    term.fg = 0x00FF_FF00; // 黄色
+    term.write_str("mochiOS Shell\n");
+    term.write_str("Type 'help' for commands.\n\n");
+    term.fg = 0x00FF_FFFF;
+    term.prompt();
 
     loop {
-        let mut sender = 0u64;
-        let ch = syscall1(SYS_IPC_RECV, &mut sender as *mut u64 as u64);
-        if ch == EAGAIN {
-            unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
-            continue;
+        time::sleep_ms(10);
+
+        while let Some(ch) = kbd.read() {
+            match ch {
+                b'\n' | b'\r' => {
+                    term.handle_line();
+                    term.prompt();
+                }
+                0x08 | 0x7F => { // Backspace / Delete
+                    if term.input_len > 0 {
+                        term.input_len -= 1;
+                        term.write_byte(0x08);
+                    }
+                }
+                0x20..=0x7E => {
+                    if term.input_len < term.input_buf.len() - 1 {
+                        term.input_buf[term.input_len] = ch;
+                        term.input_len += 1;
+                        term.write_byte(ch);
+                    }
+                }
+                _ => {}
+            }
         }
-
-        let mut byte = ch as u8;
-        if byte == b'\r' {
-            byte = b'\n';
-        }
-        let buf = [byte];
-        let _ = syscall2(SYS_CONSOLE_WRITE, buf.as_ptr() as u64, 1);
     }
-}
-
-fn write_str(s: &str) {
-    let _ = syscall2(SYS_CONSOLE_WRITE, s.as_ptr() as u64, s.len() as u64);
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    write_str("shell panic\n");
-    let _ = syscall1(SYS_EXIT, 1);
-    loop {
-        unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)); }
-    }
-}
-
-#[inline(always)]
-fn syscall1(num: u64, arg0: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "int 0x80",
-            inlateout("rax") num => ret,
-            in("rdi") arg0,
-            options(nostack, preserves_flags)
-        );
-    }
-    ret
-}
-
-#[inline(always)]
-fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "int 0x80",
-            inlateout("rax") num => ret,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            options(nostack, preserves_flags)
-        );
-    }
-    ret
-}
-
-#[inline(always)]
-fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "int 0x80",
-            inlateout("rax") num => ret,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            in("rdx") arg2,
-            in("r10") arg3,
-            options(nostack, preserves_flags)
-        );
-    }
-    ret
 }

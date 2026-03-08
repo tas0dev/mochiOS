@@ -25,7 +25,7 @@ pub fn sleep(milliseconds: u64) {
 /// プロセスをフォークする（未実装）
 pub fn fork() -> i64 {
     let ret = syscall0(SyscallNumber::Fork as u64);
-    if ret == u64::MAX {
+    if (ret as i64) < 0 {
         -1
     } else {
         ret as i64
@@ -35,7 +35,7 @@ pub fn fork() -> i64 {
 /// 子プロセスの終了を待つ（未実装）
 pub fn wait(pid: i64) -> (i64, i32) {
     let ret = syscall1(SyscallNumber::Wait as u64, pid as u64);
-    if ret == u64::MAX {
+    if (ret as i64) < 0 {
         (-1, 0)
     } else {
         // TODO: ステータスを適切に返す
@@ -51,3 +51,29 @@ pub fn exit(code: i32) -> ! {
     }
 }
 
+/// スレッドIDからプロセスの権限レベルを取得
+///
+/// # 戻り値
+/// 0=Core, 1=Service, 2=User, または u64::MAX (エラー)
+pub fn get_thread_privilege(tid: u64) -> u64 {
+    syscall1(SyscallNumber::GetThreadPrivilege as u64, tid)
+}
+
+/// 名前でプロセスを検索し、そのスレッドIDを返す（見つからなければ None）
+pub fn find_process_by_name(name: &str) -> Option<u64> {
+    use super::sys::syscall2;
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return None;
+    }
+    let ret = syscall2(
+        SyscallNumber::FindProcessByName as u64,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+    );
+    if ret == 0 {
+        None
+    } else {
+        Some(ret)
+    }
+}

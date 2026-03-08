@@ -12,13 +12,13 @@ pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 32 * 1024 * 1024; // 32 MiB
 
 /// ヒープを初期化
-/// 
+///
 /// ## Arguments
 /// - `mapper`: 仮想アドレスと物理アドレスのマッピングを管理するオブジェクト
 /// - `frame_allocator`: 物理フレームの割り当てを管理するオブジェクト
 /// - `heap_allocator_ptr`: ヒープアロケータのロックされたヒープへのポインタ
 ///
-/// ## Returns 
+/// ## Returns
 /// - `Ok(())` ヒープの初期化に成功した場合
 /// - `Err(MapToError<Size4KiB>)` マッピングのエラーが発生した場合
 pub fn init_heap(
@@ -39,7 +39,8 @@ pub fn init_heap(
         let frame = frame_allocator
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        // カーネルヒープは実行不可（W^X: NO_EXECUTE でコード実行を防ぐ）
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
         unsafe {
             mapper.map_to(page, frame, flags, frame_allocator)?.flush();
         }
@@ -56,6 +57,22 @@ pub fn init_heap(
 
 #[alloc_error_handler]
 fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
-    panic!("allocation error: {:?}", layout)
+    crate::warn!("allocation error: {:?}", layout);
+    // スケジューラが動作中でカレントスレッドがあれば、そのプロセスを終了して回復を試みる
+    if crate::task::scheduler::is_scheduler_enabled() && crate::task::current_thread_id().is_some()
+    {
+        crate::warn!("OOM: terminating current process to recover");
+        crate::task::scheduler::exit_current_process(-1);
+    }
+    // 回復不能: 割り込みを無効化してシステムを停止
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        x86_64::instructions::interrupts::disable();
+    }
+    loop {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("hlt");
+        }
+    }
 }
-

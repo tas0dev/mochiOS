@@ -18,8 +18,8 @@ pub struct ServiceEntry {
 
 /// index.tomlを解析してサービス情報を取得
 pub fn parse_service_index(index_path: &Path) -> Result<Vec<ServiceEntry>, String> {
-    let content = fs::read_to_string(index_path)
-        .map_err(|e| format!("Failed to read index.toml: {}", e))?;
+    let content =
+        fs::read_to_string(index_path).map_err(|e| format!("Failed to read index.toml: {}", e))?;
 
     // 簡易的なTOML解析（tomlクレートを使わずに）
     let mut services = Vec::new();
@@ -56,17 +56,14 @@ pub fn parse_service_index(index_path: &Path) -> Result<Vec<ServiceEntry>, Strin
                 let end = line.len() - 1;
                 current_service = line[start..end].to_string();
             }
-            
+
             current_dir.clear();
             current_fs.clear();
             current_desc.clear();
             current_autostart = false;
             current_order = 999;
-        } else if line.starts_with("dir = ") {
-            current_dir = line["dir = ".len()..]
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
+        } else if let Some(rest) = line.strip_prefix("dir = ") {
+            current_dir = rest.trim_matches('"').trim_matches('\'').to_string();
         } else if line.starts_with("fs = ") || line.starts_with("fs_type = ") {
             let prefix = if line.starts_with("fs = ") {
                 "fs = "
@@ -77,21 +74,12 @@ pub fn parse_service_index(index_path: &Path) -> Result<Vec<ServiceEntry>, Strin
                 .trim_matches('"')
                 .trim_matches('\'')
                 .to_string();
-        } else if line.starts_with("description = ") {
-            current_desc = line["description = ".len()..]
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
-        } else if line.starts_with("autostart = ") {
-            current_autostart = line["autostart = ".len()..]
-                .trim()
-                .parse()
-                .unwrap_or(false);
-        } else if line.starts_with("order = ") {
-            current_order = line["order = ".len()..]
-                .trim()
-                .parse()
-                .unwrap_or(999);
+        } else if let Some(rest) = line.strip_prefix("description = ") {
+            current_desc = rest.trim_matches('"').trim_matches('\'').to_string();
+        } else if let Some(rest) = line.strip_prefix("autostart = ") {
+            current_autostart = rest.trim().parse().unwrap_or(false);
+        } else if let Some(rest) = line.strip_prefix("order = ") {
+            current_order = rest.trim().parse().unwrap_or(999);
         }
     }
 
@@ -130,13 +118,13 @@ pub fn build_service(
 
     let cargo_toml = service_dir.join("Cargo.toml");
     if !cargo_toml.exists() {
-        return Err(format!(
-            "Cargo.toml not found for service {}",
-            service.name
-        ));
+        return Err(format!("Cargo.toml not found for service {}", service.name));
     }
 
-    println!("Building service: {} ({})", service.name, service.description);
+    println!(
+        "Building service: {} ({})",
+        service.name, service.description
+    );
 
     // ソースファイルを監視
     println!("cargo:rerun-if-changed={}", cargo_toml.display());
@@ -147,27 +135,54 @@ pub fn build_service(
 
     // .cargo/config.toml にtargetが設定されているか確認
     let cargo_config = service_dir.join(".cargo/config.toml");
-    let has_config_target = std::fs::read_to_string(&cargo_config)
+    let cargo_config_text = fs::read_to_string(&cargo_config).ok();
+    let has_config_target = cargo_config_text
+        .as_deref()
         .map(|s| s.contains("[build]") && s.contains("target"))
         .unwrap_or(false);
+    let config_uses_json_target = cargo_config_text
+        .as_deref()
+        .map(|s| s.contains(".json"))
+        .unwrap_or(false);
+
+    let target_spec = if has_config_target {
+        None
+    } else {
+        find_target_spec(&service_dir)
+    };
+    let uses_json_target = config_uses_json_target
+        || target_spec
+            .as_deref()
+            .map(|t| t.ends_with(".json"))
+            .unwrap_or(false);
 
     // cargoでサービスをビルド
     let mut cmd = Command::new("cargo");
     cmd.args(["build"]);
+    if uses_json_target {
+        cmd.args(["-Z", "json-target-spec"]);
+        println!("  Enabling -Z json-target-spec");
+    }
 
     // 外側の cargo ビルドの環境変数をクリア (干渉を防ぐ)
     // ジョブサーバーとビルドシステムの変数をクリアして独立したビルドにする
     for key in &[
-        "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR",
-        "CARGO_BUILD_TARGET", "CARGO_MAKEFLAGS", "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
-        "CARGO_BUILD_RUSTC", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET",
+        "CARGO_MAKEFLAGS",
+        "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
+        "CARGO_BUILD_RUSTC",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
     ] {
         cmd.env_remove(key);
     }
 
     if !has_config_target {
         // .cargo/config.toml にtargetがない場合のみ --target を渡す
-        let target_spec = find_target_spec(&service_dir);
         if let Some(target) = &target_spec {
             cmd.arg("--target").arg(target);
             println!("  Using target from JSON: {}", target);
@@ -204,30 +219,37 @@ pub fn build_service(
         } else {
             &stdout
         };
-        return Err(format!("Failed to build service {}: status={} STDERR={} STDOUT={}", 
-            service.name, output.status, err_tail, out_tail));
+        return Err(format!(
+            "Failed to build service {}: status={} STDERR={} STDOUT={}",
+            service.name, output.status, err_tail, out_tail
+        ));
     }
 
     // ビルド成果物を探してコピー
     let target_dir = service_dir.join("target");
     // .cargo/config.toml のターゲットかデフォルト名を使用
     let target_name: Option<String> = if has_config_target {
-        Some("x86_64-swiftcore".to_string())
+        Some("x86_64-mochios".to_string())
     } else {
         None
     };
 
     if let Some(binary_path) = find_built_binary(&target_dir, target_name.as_deref()) {
         let dest_name = format!("{}.service", service.name);
-        let dest = output_dir.join(&dest_name);
+        // ATA/ext2 サービスは Services/ サブディレクトリに配置
+        let effective_output_dir = if service.fs_type != "initfs" {
+            let services_subdir = output_dir.join("Services");
+            fs::create_dir_all(&services_subdir).map_err(|e| {
+                format!("Failed to create Services dir: {}", e)
+            })?;
+            services_subdir
+        } else {
+            output_dir.to_path_buf()
+        };
+        let dest = effective_output_dir.join(&dest_name);
 
-        fs::copy(&binary_path, &dest).map_err(|e| {
-            format!(
-                "Failed to copy service binary to {}: {}",
-                dest.display(),
-                e
-            )
-        })?;
+        fs::copy(&binary_path, &dest)
+            .map_err(|e| format!("Failed to copy service binary to {}: {}", dest.display(), e))?;
 
         println!(
             "Copied {} to {} (from {})",
@@ -236,7 +258,10 @@ pub fn build_service(
             binary_path.display()
         );
     } else {
-        return Err(format!("Built binary not found for service {}", service.name));
+        return Err(format!(
+            "Built binary not found for service {}",
+            service.name
+        ));
     }
 
     Ok(())
@@ -253,7 +278,7 @@ fn find_built_binary(target_dir: &Path, target_name: Option<&str>) -> Option<Pat
             }
         }
 
-        let dir = target_dir.join(format!("x86_64-swiftcore/{}", profile));
+        let dir = target_dir.join(format!("x86_64-mochios/{}", profile));
         if dir.is_dir() {
             if let Some(binary) = find_binary_in_dir(&dir) {
                 return Some(binary);

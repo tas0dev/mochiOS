@@ -2,8 +2,11 @@ use std::env;
 use std::path::Path;
 
 fn main() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let project_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap().parent().unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let project_root = Path::new(&manifest_dir)
+        .ancestors()
+        .nth(3)
+        .expect("failed to determine project root");
 
     // 生成されたnewlibとcrt0の場所
     let fs_dir = project_root.join("fs");
@@ -27,8 +30,17 @@ fn main() {
     println!("cargo:rustc-link-lib=static=g"); // libg.a
     println!("cargo:rustc-link-lib=static=m"); // libm.a
 
+    // std の unwind クレートが libgcc_s を要求するため libg.a を libgcc_s.a として提供
+    let libgcc_s = fs_dir.join("libgcc_s.a");
+    let libg = fs_dir.join("libg.a");
+    if !libgcc_s.exists() && libg.exists() {
+        let _ = std::fs::copy(&libg, &libgcc_s);
+    }
+    println!("cargo:rustc-link-lib=static=gcc_s");
+
     // リンカスクリプトの指定
     println!("cargo:rustc-link-arg=-Tlinker.ld");
+    println!("cargo:rustc-link-arg=--allow-multiple-definition");
 
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=../../fs/libc.a");

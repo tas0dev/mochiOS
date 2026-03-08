@@ -1,10 +1,10 @@
-use crate::driver::ps2_keyboard;
 use crate::syscall::ENODATA;
 
-/// キーボード1文字読み取り
+/// PS/2 キーボードから rawスキャンコードを1バイト読み取り
+/// バッファが空なら ENODATA を返す（変換はユーザー空間で行う）
 pub fn read_char() -> u64 {
-    match ps2_keyboard::read_char() {
-        Some(ch) => ch as u64,
+    match crate::util::ps2kbd::pop_scancode() {
+        Some(sc) => sc as u64,
         None => ENODATA,
     }
 }

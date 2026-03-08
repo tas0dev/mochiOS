@@ -2,8 +2,8 @@
 //!
 //! Global Descriptor Tableを管理
 
-use crate::mem::tss;
 use crate::info;
+use crate::mem::tss;
 use core::arch::asm;
 use spin::Once;
 use x86_64::instructions::tables::load_tss;
@@ -78,7 +78,7 @@ pub fn init() {
         // We modify the loaded GDT in-place: clear bit 54 (D/B) of the descriptor.
         {
             let mut gdtr: [u8; 10] = [0; 10];
-            core::arch::asm!("sgdt [{}]", in(reg) &mut gdtr, options(nostack));
+            asm!("sgdt [{}]", in(reg) &mut gdtr, options(nostack));
             let base = u64::from_le_bytes([
                 gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9],
             ]);
@@ -97,45 +97,53 @@ pub fn init() {
 /// ユーザーモード用コードセレクタ（RPL=3）を返す
 pub fn user_code_selector() -> u16 {
     GDT.get()
-        .expect("GDT not initialized")
-        .1
-        .user_code_selector
-        .0
+        .map(|g| g.1.user_code_selector.0)
+        .unwrap_or_else(|| {
+            crate::warn!("GDT not initialized");
+            loop {
+                x86_64::instructions::hlt();
+            }
+        })
 }
 
 /// ユーザーモード用データセレクタ（RPL=3）を返す
 pub fn user_data_selector() -> u16 {
     GDT.get()
-        .expect("GDT not initialized")
-        .1
-        .user_data_selector
-        .0
+        .map(|g| g.1.user_data_selector.0)
+        .unwrap_or_else(|| {
+            crate::warn!("GDT not initialized");
+            loop {
+                x86_64::instructions::hlt();
+            }
+        })
 }
 
 /// カーネル用コードセレクタを返す
 pub fn kernel_code_selector() -> u16 {
-    GDT.get()
-        .expect("GDT not initialized")
-        .1
-        .code_selector
-        .0
+    GDT.get().map(|g| g.1.code_selector.0).unwrap_or_else(|| {
+        crate::warn!("GDT not initialized");
+        loop {
+            x86_64::instructions::hlt();
+        }
+    })
 }
 
 /// カーネル用データセレクタを返す
 pub fn kernel_data_selector() -> u16 {
-    GDT.get()
-        .expect("GDT not initialized")
-        .1
-        .data_selector
-        .0
+    GDT.get().map(|g| g.1.data_selector.0).unwrap_or_else(|| {
+        crate::warn!("GDT not initialized");
+        loop {
+            x86_64::instructions::hlt();
+        }
+    })
 }
 
 #[allow(unused)]
 /// データセグメントレジスタを設定
-/// 
+///
 /// ## Arguments
 /// - `selector`: 設定するセグメントセレクタ
-/// 
+///
 /// ## Safety
 /// - 呼び出し前にGDTが正しく初期化されている必要がある
 unsafe fn set_data_segments(selector: SegmentSelector) {
@@ -152,7 +160,7 @@ unsafe fn set_data_segments(selector: SegmentSelector) {
 
 #[allow(unused)]
 /// コードセグメントを設定
-/// 
+///
 /// ## Arguments
 /// - `selector`: 設定するセグメントセレクタ
 unsafe fn set_cs(selector: SegmentSelector) {

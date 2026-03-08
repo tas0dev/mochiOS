@@ -51,7 +51,7 @@ pub enum SyscallNumber {
     /// getcwd
     Getcwd = 79,
 
-    // SwiftCore独自syscall (Linux未使用番号帯を使用: 512+)
+    // mochiOS独自syscall (Linux未使用番号帯を使用: 512+)
     /// スケジューラへ譲る
     Yield = 512,
     /// タイマーティック数を取得
@@ -80,10 +80,20 @@ pub enum SyscallNumber {
     Readdir = 524,
     /// カレントディレクトリ変更
     Chdir = 525,
+    /// キーボードから1文字読み取る（ユーザー側）
+    KeyboardRead = 526,
+/// スレッドIDからプロセスの権限レベルを取得 (0=Core, 1=Service, 2=User)
+    GetThreadPrivilege = 527,
+    /// フレームバッファ情報取得
+    GetFramebufferInfo = 528,
+    /// フレームバッファをマップ
+    MapFramebuffer = 529,
+    /// メモリ上の ELF バッファから新プロセスを起動
+    ExecFromBuffer = 530,
 }
 
 /// 入力が空
-pub const ENODATA: u64 = u64::MAX - 4;
+pub const ENODATA: u64 = (-61i64) as u64;
 
 #[inline(always)]
 pub(crate) fn syscall0(num: u64) -> u64 {

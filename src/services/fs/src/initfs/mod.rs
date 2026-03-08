@@ -3,8 +3,8 @@
 //! システム起動時に使用される簡易的なRAMベースファイルシステム
 //! 猫も杓子もInitFS！（？？？
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use std::string::String;
+use std::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::common::vfs::{
@@ -101,7 +101,7 @@ impl InitFs {
     pub fn create_sample_files(&mut self) -> VfsResult<()> {
         // readme.txtを作成
         let readme_inode = self.create(Self::ROOT_INODE, "readme.txt", 0o644)?;
-        let content = b"Welcome to SwiftCore OS!\nThis file is served by InitFS (VFS version).\n";
+        let content = b"Welcome to mochiOS!\nThis file is served by InitFS (VFS version).\n";
         self.write(readme_inode, 0, content)?;
 
         // hello.txtも作成

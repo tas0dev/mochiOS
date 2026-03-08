@@ -2,9 +2,9 @@
 //!
 //! Linux標準のext2ファイルシステムをサポート
 
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
+use std::boxed::Box;
+use std::string::String;
+use std::vec::Vec;
 
 use crate::common::vfs::{
     DirEntry, FileAttr, FileSystem, FileType, VfsError, VfsResult,
@@ -13,6 +13,7 @@ use crate::common::vfs::{
 /// ブロックデバイストレイト
 ///
 /// 実際のストレージデバイスへのアクセスを抽象化
+#[allow(unused)]
 pub trait BlockDevice: Send + Sync {
     /// ブロックサイズ（通常512バイト）
     fn block_size(&self) -> usize;
@@ -117,6 +118,7 @@ struct Ext2GroupDesc {
 }
 
 /// EXT2ファイルシステム
+#[allow(dead_code)]
 pub struct Ext2Fs {
     device: Box<dyn BlockDevice>,
     superblock: Ext2Superblock,
@@ -129,9 +131,9 @@ pub struct Ext2Fs {
 
 impl Ext2Fs {
     /// 新しいEXT2ファイルシステムを作成
-    pub fn new(mut device: Box<dyn BlockDevice>) -> VfsResult<Self> {
+    pub fn new(device: Box<dyn BlockDevice>) -> VfsResult<Self> {
         // スーパーブロックを読み取る
-        let mut sb_buf = alloc::vec![0u8; 1024];
+        let mut sb_buf = vec![0u8; 1024];
         device.read_block(EXT2_SUPERBLOCK_OFFSET / device.block_size() as u64, &mut sb_buf)
             .map_err(|_| VfsError::IoError)?;
 
@@ -158,12 +160,12 @@ impl Ext2Fs {
             / superblock.s_blocks_per_group) as usize;
         
         let gdt_block = if block_size == 1024 { 2 } else { 1 };
-        let gdt_size = num_groups * core::mem::size_of::<Ext2GroupDesc>();
+        let gdt_size = num_groups * size_of::<Ext2GroupDesc>();
         let gdt_blocks = (gdt_size + block_size - 1) / block_size;
         
-        let mut gdt_buf = alloc::vec![0u8; gdt_blocks * block_size];
+        let mut gdt_buf = vec![0u8; gdt_blocks * block_size];
         for i in 0..gdt_blocks {
-            let mut block_buf = alloc::vec![0u8; block_size];
+            let mut block_buf = vec![0u8; block_size];
             let blocks_per_fs_block = block_size / device.block_size();
             let start_block = (gdt_block + i) as u64 * blocks_per_fs_block as u64;
             
@@ -177,7 +179,7 @@ impl Ext2Fs {
 
         let mut group_desc_table = Vec::new();
         for i in 0..num_groups {
-            let offset = i * core::mem::size_of::<Ext2GroupDesc>();
+            let offset = i * size_of::<Ext2GroupDesc>();
             let desc: Ext2GroupDesc = unsafe {
                 core::ptr::read((gdt_buf.as_ptr() as usize + offset) as *const Ext2GroupDesc)
             };
@@ -240,7 +242,7 @@ impl Ext2Fs {
         let byte_offset = inode_offset % self.block_size;
 
         // inodeを含むブロックを読み取る
-        let mut block_buf = alloc::vec![0u8; self.block_size];
+        let mut block_buf = vec![0u8; self.block_size];
         self.read_fs_block(inode_table_block + block_offset as u32, &mut block_buf)?;
 
         // inodeを抽出
@@ -267,7 +269,7 @@ impl Ext2Fs {
                 return Ok(0);
             }
 
-            let mut block_buf = alloc::vec![0u8; self.block_size];
+            let mut block_buf = vec![0u8; self.block_size];
             self.read_fs_block(indirect_block, &mut block_buf)?;
 
             let offset = ((block_idx - 12) * 4) as usize;
@@ -292,7 +294,7 @@ impl Ext2Fs {
             let block_offset = idx % ptrs_per_block;
 
             // 最初の間接ブロックを読み取る
-            let mut block_buf = alloc::vec![0u8; self.block_size];
+            let mut block_buf = vec![0u8; self.block_size];
             self.read_fs_block(double_indirect, &mut block_buf)?;
 
             let offset = (indirect_idx * 4) as usize;
@@ -368,7 +370,7 @@ impl FileSystem for Ext2Fs {
 
         // ディレクトリの内容を読み取る
         let size = parent.i_size as usize;
-        let mut data = alloc::vec![0u8; size];
+        let mut data = vec![0u8; size];
         
         let mut read_offset = 0;
         let mut block_idx = 0;
@@ -379,7 +381,7 @@ impl FileSystem for Ext2Fs {
                 break;
             }
             
-            let mut block_buf = alloc::vec![0u8; self.block_size];
+            let mut block_buf = vec![0u8; self.block_size];
             self.read_fs_block(block_num, &mut block_buf)?;
             
             let to_copy = core::cmp::min(self.block_size, size - read_offset);
@@ -392,7 +394,7 @@ impl FileSystem for Ext2Fs {
         // ディレクトリエントリを走査
         let mut offset = 0;
         while offset < size {
-            if offset + core::mem::size_of::<Ext2DirEntry>() > size {
+            if offset + size_of::<Ext2DirEntry>() > size {
                 break;
             }
 
@@ -405,7 +407,7 @@ impl FileSystem for Ext2Fs {
             }
 
             if entry.inode != 0 && entry.name_len > 0 {
-                let name_offset = offset + core::mem::size_of::<Ext2DirEntry>();
+                let name_offset = offset + size_of::<Ext2DirEntry>();
                 if name_offset + entry.name_len as usize <= size {
                     let entry_name = &data[name_offset..name_offset + entry.name_len as usize];
                     
@@ -454,7 +456,7 @@ impl FileSystem for Ext2Fs {
                 buf[bytes_read..bytes_read + to_zero].fill(0);
                 bytes_read += to_zero;
             } else {
-                let mut block_buf = alloc::vec![0u8; self.block_size];
+                let mut block_buf = vec![0u8; self.block_size];
                 self.read_fs_block(block_num, &mut block_buf)?;
                 
                 let start = if current_block == start_block { block_offset } else { 0 };
@@ -485,7 +487,7 @@ impl FileSystem for Ext2Fs {
         }
 
         let size = ext2_inode.i_size as usize;
-        let mut data = alloc::vec![0u8; size];
+        let mut data = vec![0u8; size];
         
         // ディレクトリの内容を読み取る
         let mut read_offset = 0;
@@ -497,7 +499,7 @@ impl FileSystem for Ext2Fs {
                 break;
             }
             
-            let mut block_buf = alloc::vec![0u8; self.block_size];
+            let mut block_buf = vec![0u8; self.block_size];
             self.read_fs_block(block_num, &mut block_buf)?;
             
             let to_copy = core::cmp::min(self.block_size, size - read_offset);
@@ -512,7 +514,7 @@ impl FileSystem for Ext2Fs {
         let mut offset = 0;
         
         while offset < size {
-            if offset + core::mem::size_of::<Ext2DirEntry>() > size {
+            if offset + size_of::<Ext2DirEntry>() > size {
                 break;
             }
 
@@ -525,7 +527,7 @@ impl FileSystem for Ext2Fs {
             }
 
             if entry.inode != 0 && entry.name_len > 0 {
-                let name_offset = offset + core::mem::size_of::<Ext2DirEntry>();
+                let name_offset = offset + size_of::<Ext2DirEntry>();
                 if name_offset + entry.name_len as usize <= size {
                     let entry_name = &data[name_offset..name_offset + entry.name_len as usize];
                     

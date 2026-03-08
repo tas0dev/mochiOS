@@ -1,5 +1,5 @@
 [package]
-name = "SwiftCore"
+name = "mochiOS"
 version = "0.1.0"
 edition = "2021"
 authors = ["tas0dev"]
@@ -7,7 +7,7 @@ default-run = "boot"
 build = "build.rs"
 
 [lib]
-name = "swiftcore"
+name = "mochios"
 path = "src/core/lib.rs"
 test = false
 bench = false
@@ -15,15 +15,19 @@ bench = false
 [[bin]]
 name = "boot"
 path = "src/boot/loader.rs"
+required-features = ["uefi-dep"]
 test = false
 bench = false
 
+[features]
+default = ["uefi-dep"]
+uefi-dep = ["dep:uefi"]
+
 [dependencies]
-uefi = { version = "0.30", features = ["alloc", "logger"] }
+uefi = { version = "0.30", features = ["alloc", "logger", "global_allocator"], optional = true }
 spin = "0.9"
 x86_64 = "0.15"
 linked_list_allocator = "0.10.5"
-libm = "0.2.16"
 
 [build-dependencies]
 num_cpus = "1.17.0"
@@ -33,6 +37,3 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
-
-[patch.crates-io]
-libc = { path = "src/libc-rs" }

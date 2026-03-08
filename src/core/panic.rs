@@ -55,9 +55,29 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[macro_export]
 macro_rules! kernel_panic {
     ($msg:expr) => {
-        panic!($msg)
+        {
+            $crate::warn!("[KERNEL PANIC] {}", $msg);
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                x86_64::instructions::interrupts::disable();
+            }
+            loop {
+                #[cfg(target_arch = "x86_64")]
+                unsafe { core::arch::asm!("hlt"); }
+            }
+        }
     };
     ($fmt:expr, $($arg:tt)*) => {
-        panic!($fmt, $($arg)*)
+        {
+            $crate::warn!($fmt, $($arg)*);
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                x86_64::instructions::interrupts::disable();
+            }
+            loop {
+                #[cfg(target_arch = "x86_64")]
+                unsafe { core::arch::asm!("hlt"); }
+            }
+        }
     };
 }

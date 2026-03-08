@@ -1,7 +1,7 @@
 //! ユーザーモード実行サポート
 
-use core::arch::asm;
 use crate::mem::gdt;
+use core::arch::asm;
 
 /// ユーザーモードでコードを実行する
 ///
@@ -11,6 +11,9 @@ use crate::mem::gdt;
 ///
 /// # 注意
 /// この関数は戻らない
+///
+/// # Safety
+/// `entry` と `user_stack` はユーザー空間の有効な実行/スタックアドレスである必要がある。
 pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3; // RPL=3
     let user_ss = gdt::user_data_selector() as u64 | 3; // RPL=3
@@ -35,15 +38,31 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
     let ss_dpl = (ss_entry >> 45) & 0b11;
 
     crate::debug!("GDT Check:");
-    crate::debug!("  CS selector={:#x}, index={}, entry={:#018x}, DPL={}",
-                  cs_selector, cs_index, cs_entry, cs_dpl);
-    crate::debug!("  SS selector={:#x}, index={}, entry={:#018x}, DPL={}",
-                  ss_selector, ss_index, ss_entry, ss_dpl);
-    crate::debug!("  Final CS={:#x} (with RPL=3), SS={:#x} (with RPL=3)",
-                  user_cs, user_ss);
+    crate::debug!(
+        "  CS selector={:#x}, index={}, entry={:#018x}, DPL={}",
+        cs_selector,
+        cs_index,
+        cs_entry,
+        cs_dpl
+    );
+    crate::debug!(
+        "  SS selector={:#x}, index={}, entry={:#018x}, DPL={}",
+        ss_selector,
+        ss_index,
+        ss_entry,
+        ss_dpl
+    );
+    crate::debug!(
+        "  Final CS={:#x} (with RPL=3), SS={:#x} (with RPL=3)",
+        user_cs,
+        user_ss
+    );
 
-    crate::debug!("Jumping to usermode: entry={:#x}, stack={:#x}",
-                  entry, user_stack);
+    crate::debug!(
+        "Jumping to usermode: entry={:#x}, stack={:#x}",
+        entry,
+        user_stack
+    );
 
     // iretqスタックフレームを構築:
     // SS, RSP, RFLAGS, CS, RIP
@@ -84,8 +103,7 @@ fn read_gdtr() -> (u64, u16) {
     }
     let limit = u16::from_le_bytes([gdtr[0], gdtr[1]]);
     let base = u64::from_le_bytes([
-        gdtr[2], gdtr[3], gdtr[4], gdtr[5],
-        gdtr[6], gdtr[7], gdtr[8], gdtr[9],
+        gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9],
     ]);
     (base, limit)
 }
@@ -93,7 +111,15 @@ fn read_gdtr() -> (u64, u16) {
 /// fork の子プロセスとしてユーザーモードへジャンプする
 ///
 /// iretq フレームを構築し、RAX=0 (fork の子側戻り値) でユーザーに復帰する
-pub unsafe fn jump_to_usermode_fork_child(entry: u64, stack: u64, user_rflags: u64, fs_base: u64) -> ! {
+///
+/// # Safety
+/// `entry`/`stack`/`user_rflags`/`fs_base` は子プロセスの有効な復帰コンテキストである必要がある。
+pub unsafe fn jump_to_usermode_fork_child(
+    entry: u64,
+    stack: u64,
+    user_rflags: u64,
+    fs_base: u64,
+) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3;
     let user_ss = gdt::user_data_selector() as u64 | 3;
     let fs_lo = fs_base as u32;
@@ -126,4 +152,3 @@ pub unsafe fn jump_to_usermode_fork_child(entry: u64, stack: u64, user_rflags: u
         options(noreturn)
     )
 }
-

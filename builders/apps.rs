@@ -25,7 +25,7 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, extension: &str) {
         }
 
         let app_name = path.file_name().unwrap().to_string_lossy();
-        
+
         // testsディレクトリはSTART_TEST_APP=trueの場合のみビルド
         if app_name == "tests" && !run_tests {
             println!("Skipping tests app (START_TEST_APP not enabled)");
@@ -46,15 +46,53 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, extension: &str) {
             emit_rerun_if_changed(&src_dir);
         }
 
-        // カスタムターゲットファイルを探す
+        // カスタムターゲットファイルを探す（アプリディレクトリ内の .json を優先）
         let target_spec = find_target_spec(&path);
+        let uses_json_target = target_spec
+            .as_deref()
+            .map(|t| t.ends_with(".json"))
+            .unwrap_or(false);
+
+        // .cargo/config.toml にtargetが設定されているか確認
+        let cargo_config = path.join(".cargo/config.toml");
+        let cargo_config_text = fs::read_to_string(&cargo_config).ok();
+        let has_config_target = cargo_config_text
+            .as_deref()
+            .map(|s| s.contains("[build]") && s.contains("target"))
+            .unwrap_or(false);
+        let config_uses_json_target = cargo_config_text
+            .as_deref()
+            .map(|s| s.contains(".json"))
+            .unwrap_or(false);
+        let uses_json_target = uses_json_target || config_uses_json_target;
 
         // cargoでアプリをビルド
         let mut cmd = Command::new("cargo");
         cmd.args(["build", "--release"]);
+        if uses_json_target {
+            cmd.args(["-Z", "json-target-spec"]);
+        }
 
-        // カスタムターゲットが見つかった場合は指定
-        if let Some(target) = &target_spec {
+        // 外側のビルド環境変数をクリアして干渉を防ぐ
+        for key in &[
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_TARGET",
+            "CARGO_MAKEFLAGS",
+            "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
+            "CARGO_BUILD_RUSTC",
+            "RUSTC",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+        ] {
+            cmd.env_remove(key);
+        }
+
+        // .cargo/config.toml にtargetがある場合は --target を渡さない
+        if has_config_target {
+            println!("  Using target from .cargo/config.toml");
+        } else if let Some(target) = &target_spec {
             cmd.arg("--target").arg(target);
             println!("  Using target: {}", target);
         } else {
@@ -71,7 +109,9 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, extension: &str) {
                 if output.status.success() {
                     // ビルド成果物を探す
                     let target_dir = path.join("target");
-                    let target_name = if let Some(p) = &target_spec {
+                    let target_name = if has_config_target {
+                        Some("x86_64-mochios".to_string())
+                    } else if let Some(p) = &target_spec {
                         Path::new(p)
                             .file_stem()
                             .map(|s| s.to_string_lossy().to_string())
@@ -79,8 +119,7 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, extension: &str) {
                         Some("x86_64-unknown-none".to_string())
                     };
 
-                    if let Some(elf_path) = find_built_binary(&target_dir, target_name.as_deref())
-                    {
+                    if let Some(elf_path) = find_built_binary(&target_dir, target_name.as_deref()) {
                         let dest_name = format!("{}.{}", app_name, extension);
                         let dest = output_dir.join(&dest_name);
                         if let Err(e) = fs::copy(&elf_path, &dest) {
@@ -120,6 +159,116 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, extension: &str) {
     }
 }
 
+/// ユーティリティコマンド (`src/utils/`) をビルドして `output_dir` に `{name}.elf` としてコピー
+pub fn build_utils(utils_dir: &Path, output_dir: &Path) {
+    println!("cargo:rerun-if-changed={}", utils_dir.display());
+    let cargo_toml = utils_dir.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return;
+    }
+
+    println!("cargo:rerun-if-changed={}", cargo_toml.display());
+    let src_dir = utils_dir.join("src");
+    if src_dir.is_dir() {
+        emit_rerun_if_changed(&src_dir);
+    }
+
+    if let Err(e) = fs::create_dir_all(output_dir) {
+        println!("cargo:warning=Failed to create Binaries dir: {}", e);
+        return;
+    }
+
+    let mut cmd = Command::new("cargo");
+    cmd.args(["build", "--release", "-Z", "json-target-spec"]);
+
+    for key in &[
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET",
+        "CARGO_MAKEFLAGS",
+        "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
+        "CARGO_BUILD_RUSTC",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ] {
+        cmd.env_remove(key);
+    }
+
+    println!("Building utils from {}", utils_dir.display());
+    let output = cmd.current_dir(utils_dir).output();
+
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                println!("cargo:warning=Failed to build utils");
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                for line in stderr.lines().take(20) {
+                    println!("cargo:warning=  {}", line);
+                }
+                return;
+            }
+            // 全てのELFバイナリを探してコピー
+            let release_dir = utils_dir.join("target/x86_64-mochios/release");
+            let binaries = find_all_binaries(&release_dir);
+            if binaries.is_empty() {
+                println!("cargo:warning=No binaries found in {}", release_dir.display());
+            }
+            for elf_path in binaries {
+                let name = elf_path.file_name().unwrap().to_string_lossy();
+                let dest = output_dir.join(format!("{}.elf", name));
+                if let Err(e) = fs::copy(&elf_path, &dest) {
+                    println!("cargo:warning=Failed to copy {}.elf: {}", name, e);
+                } else {
+                    println!("Copied {}.elf to {}", name, output_dir.display());
+                }
+            }
+        }
+        Err(e) => {
+            println!("cargo:warning=Failed to execute cargo for utils: {}", e);
+        }
+    }
+}
+
+/// ディレクトリ内の全ELFバイナリを返す（拡張子なし・libでない・.dでない）
+fn find_all_binaries(dir: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return result,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        if !filename.starts_with("lib")
+            && !filename.ends_with(".d")
+            && !filename.ends_with(".rlib")
+            && !filename.ends_with(".so")
+            && !filename.contains('.')
+            && is_elf(&path)
+        {
+            result.push(path);
+        }
+    }
+    result
+}
+
+/// ファイルがELFマジックバイトで始まるか確認
+fn is_elf(path: &Path) -> bool {
+    if let Ok(mut f) = fs::File::open(path) {
+        use std::io::Read;
+        let mut magic = [0u8; 4];
+        if f.read_exact(&mut magic).is_ok() {
+            return magic == [0x7f, b'E', b'L', b'F'];
+        }
+    }
+    false
+}
+
 fn find_built_binary(target_dir: &Path, target_name: Option<&str>) -> Option<PathBuf> {
     // カスタムターゲットが指定されている場合はそのディレクトリを優先
     if let Some(target) = target_name {
@@ -131,8 +280,8 @@ fn find_built_binary(target_dir: &Path, target_name: Option<&str>) -> Option<Pat
         }
     }
 
-    // x86_64-swiftcore/release/ を優先的に探す
-    let custom_target = target_dir.join("x86_64-swiftcore/release");
+    // x86_64-mochios/release/ を優先的に探す
+    let custom_target = target_dir.join("x86_64-mochios/release");
     if custom_target.is_dir() {
         if let Some(binary) = find_binary_in_dir(&custom_target) {
             return Some(binary);

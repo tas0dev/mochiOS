@@ -3,7 +3,7 @@ use crate::interrupt::spinlock::SpinLock;
 use super::context::switch_to_thread;
 use super::ids::{ThreadId, ThreadState};
 use super::thread::{
-    current_thread_id, remove_thread, set_current_thread, with_thread_mut, CURRENT_THREAD,
+    current_thread_id, remove_thread, set_current_thread, with_thread, with_thread_mut,
     THREAD_QUEUE,
 };
 
@@ -75,6 +75,12 @@ impl Scheduler {
     }
 }
 
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// グローバルスケジューラ
 static SCHEDULER: SpinLock<Scheduler> = SpinLock::new(Scheduler::new());
 
@@ -109,6 +115,11 @@ pub fn is_scheduler_enabled() -> bool {
 /// # Returns
 /// スケジューリングが必要な場合はtrue
 pub fn scheduler_tick() -> bool {
+    if let Some(tid) = current_thread_id() {
+        if with_thread(tid, |t| t.in_syscall()).unwrap_or(false) {
+            return false;
+        }
+    }
     SCHEDULER.lock().tick()
 }
 
@@ -122,7 +133,7 @@ pub fn schedule() -> Option<ThreadId> {
     let mut queue = THREAD_QUEUE.lock();
 
     // 現在のスレッドを取得
-    let current = *CURRENT_THREAD.lock();
+    let current = current_thread_id();
 
     // 現在のスレッドがあれば、状態をReadyに戻す（Running -> Ready）
     if let Some(current_id) = current {
@@ -158,26 +169,27 @@ pub fn yield_now() {
 
     crate::debug!("yield_now() called");
 
-    // スケジューリングを実行
-    if let Some(next_id) = schedule() {
-        let current = current_thread_id();
+    // スケジューリングと切り替えは割り込み禁止区間で実行し、
+    // 状態更新と実際の切替の間に割り込みが入る競合窓を防ぐ。
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if let Some(next_id) = schedule() {
+            let current = current_thread_id();
 
-        crate::debug!("yield_now: current={:?}, next={:?}", current, next_id);
+            crate::debug!("yield_now: current={:?}, next={:?}", current, next_id);
 
-        // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
-        if Some(next_id) != current {
-            set_current_thread(Some(next_id));
+            // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
+            if Some(next_id) != current {
+                crate::debug!("Calling switch_to_thread...");
 
-            crate::debug!("Calling switch_to_thread...");
+                // コンテキストスイッチを実行
+                unsafe {
+                    switch_to_thread(current, next_id);
+                }
 
-            // コンテキストスイッチを実行
-            unsafe {
-                switch_to_thread(current, next_id);
+                crate::debug!("Returned from switch_to_thread");
             }
-
-            crate::debug!("Returned from switch_to_thread");
         }
-    }
+    });
 }
 
 /// スレッドをブロック状態にする
@@ -229,6 +241,7 @@ pub fn terminate_thread(id: ThreadId) {
         yield_now();
     }
 
+    crate::syscall::process::clear_futex_waiter(id);
     // スレッドをキューから削除
     remove_thread(id);
 }
@@ -239,33 +252,54 @@ pub fn terminate_thread(id: ThreadId) {
 pub fn exit_current_task(exit_code: u64) -> ! {
     if let Some(current_id) = current_thread_id() {
         crate::debug!("Exiting thread {:?} with code {}", current_id, exit_code);
+        let current_pid = with_thread(current_id, |thread| thread.process_id());
 
         with_thread_mut(current_id, |thread| {
             thread.set_state(ThreadState::Terminated);
         });
 
+        if let Some(pid) = current_pid {
+            let mut has_other_live_threads = false;
+            crate::task::for_each_thread(|thread| {
+                if thread.process_id() == pid
+                    && thread.id() != current_id
+                    && thread.state() != ThreadState::Terminated
+                {
+                    has_other_live_threads = true;
+                }
+            });
+            if !has_other_live_threads {
+                crate::task::mark_process_exited(pid, exit_code);
+            }
+        }
+
         // 現在のスレッドをクリア（先にクリアしないとschedule()が正しく動作しない）
         set_current_thread(None);
 
-        // 次のスレッドにスケジューリング（戻ってこない）
-        if let Some(next_id) = schedule() {
-            set_current_thread(Some(next_id));
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            // 次のスレッドにスケジューリング（戻ってこない）
+            if let Some(next_id) = schedule() {
+                crate::debug!("Switching from exited thread to {:?}", next_id);
 
-            crate::debug!("Switching from exited thread to {:?}", next_id);
+                // スレッドをキューから削除（コンテキストスイッチ前に削除）
+                crate::syscall::process::clear_futex_waiter(current_id);
+                remove_thread(current_id);
 
-            // スレッドをキューから削除（コンテキストスイッチ前に削除）
-            remove_thread(current_id);
+                // コンテキストスイッチを実行（終了したスレッドのコンテキストは保存しない）
+                // old_context_ptr = None を渡すことで、現在のコンテキストを保存せずに次のスレッドにジャンプ
+                unsafe {
+                    switch_to_thread(None, next_id);
+                }
 
-            // コンテキストスイッチを実行（終了したスレッドのコンテキストは保存しない）
-            // old_context_ptr = None を渡すことで、現在のコンテキストを保存せずに次のスレッドにジャンプ
-            unsafe {
-                switch_to_thread(None, next_id);
+                crate::sprintln!("switch_to_thread returned unexpectedly; halting.");
+                loop {
+                    x86_64::instructions::hlt();
+                }
             }
+        });
 
-            unreachable!("switch_to_thread should never return");
-        }
-        
         // スレッドをキューから削除
+        crate::syscall::process::clear_futex_waiter(current_id);
         remove_thread(current_id);
     }
 
@@ -284,20 +318,20 @@ pub fn schedule_and_switch() {
         return;
     }
 
-    let current = current_thread_id();
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let current = current_thread_id();
 
-    // 次のスレッドを選択
-    if let Some(next_id) = schedule() {
-        // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
-        if Some(next_id) != current {
-            set_current_thread(Some(next_id));
-
-            // コンテキストスイッチを実行
-            unsafe {
-                switch_to_thread(current, next_id);
+        // 次のスレッドを選択
+        if let Some(next_id) = schedule() {
+            // 次のスレッドが現在のスレッドと異なる場合のみ切り替え
+            if Some(next_id) != current {
+                // コンテキストスイッチを実行
+                unsafe {
+                    switch_to_thread(current, next_id);
+                }
             }
         }
-    }
+    });
 }
 
 /// 最初のスレッドを起動
@@ -306,24 +340,32 @@ pub fn schedule_and_switch() {
 pub fn start_scheduling() -> ! {
     // 最初のスレッドを選択
     if let Some(first_id) = super::thread::peek_next_thread() {
-        set_current_thread(Some(first_id));
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            with_thread_mut(first_id, |thread| {
+                crate::info!(
+                    "Starting first thread: {} (id={:?})",
+                    thread.name(),
+                    thread.id()
+                );
+                thread.set_state(ThreadState::Running);
+            });
 
-        with_thread_mut(first_id, |thread| {
-            crate::info!(
-                "Starting first thread: {} (id={:?})",
-                thread.name(),
-                thread.id()
-            );
-            thread.set_state(ThreadState::Running);
+            // 最初のスレッドへ switch_to_thread でジャンプ（戻ってこない）
+            // user/kernel どちらも switch_context 経由で正しく動作する
+            unsafe {
+                switch_to_thread(None, first_id);
+            }
         });
 
-        // 最初のスレッドへ switch_to_thread でジャンプ（戻ってこない）
-        // user/kernel どちらも switch_context 経由で正しく動作する
-        unsafe { switch_to_thread(None, first_id); }
-
-        unreachable!("switch_to_thread should never return");
+        crate::sprintln!("switch_to_thread returned unexpectedly; halting.");
+        loop {
+            x86_64::instructions::hlt();
+        }
     } else {
-        panic!("No threads to schedule!");
+        crate::sprintln!("No threads to schedule; halting system.");
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
 }
 

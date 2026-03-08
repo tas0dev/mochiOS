@@ -1,12 +1,14 @@
 [package]
 name = "shell"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-
-[profile.dev]
-panic = "abort"
+swiftlib = { path = "../../user", features = ["std-support"] }
 
 [profile.release]
+panic = "abort"
+lto = true
+
+[profile.dev]
 panic = "abort"

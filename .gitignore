@@ -1,10 +1,16 @@
 # Binaries
 target/
+/fs/
+/ramfs/
+initfs/
 *.bin
 *.elf
 *.service
 *.o
 *.a
+*.so
+*.so.*
+*.rlib
 
 # editor config files
 .idea/
@@ -19,3 +25,7 @@ target/
 rustc-ice-*.txt
 *.log
 *.lock
+
+# Pull Request diff and patch files
+*.diff
+*.patch

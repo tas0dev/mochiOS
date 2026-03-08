@@ -99,12 +99,19 @@ pub fn read(fd: u64, buf: &mut [u8]) -> u64 {
 /// ファイルディスクリプタ、またはエラーコード
 #[inline]
 pub fn open(path: &str, flags: u64) -> i64 {
+    let mut buf = [0u8; 512];
+    let bytes = path.as_bytes();
+    if bytes.len() >= buf.len() {
+        return -1;
+    }
+    buf[..bytes.len()].copy_from_slice(bytes);
+    // buf[bytes.len()] is already 0 (null terminator)
     let ret = syscall2(
         SyscallNumber::Open as u64,
-        path.as_ptr() as u64,
+        buf.as_ptr() as u64,
         flags,
     );
-    if ret == u64::MAX {
+    if (ret as i64) < 0 {
         -1
     } else {
         ret as i64
@@ -121,7 +128,7 @@ pub fn open(path: &str, flags: u64) -> i64 {
 #[inline]
 pub fn close(fd: u64) -> i64 {
     let ret = syscall1(SyscallNumber::Close as u64, fd);
-    if ret == u64::MAX {
+    if (ret as i64) < 0 {
         -1
     } else {
         ret as i64

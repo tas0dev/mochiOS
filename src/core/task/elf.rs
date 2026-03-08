@@ -1,12 +1,13 @@
 //! ELFローダ
 
-use crate::error::{KernelError, MemoryError, ProcessError, Result};
-use crate::mem::{self, user, frame};
-use x86_64::structures::paging::Page;
-use x86_64::VirtAddr;
-use x86_64::structures::paging::PageTableFlags;
-use crate::task::{add_process, add_thread, Process, PrivilegeLevel, Thread};
+use crate::result::{Kernel, Memory, Process, Result};
 use crate::init;
+use crate::mem::{frame, user};
+use crate::task::{add_process, add_thread, PrivilegeLevel, Process as TaskProcess, Thread};
+use core::sync::atomic::{AtomicU64, Ordering};
+use x86_64::structures::paging::Page;
+use x86_64::structures::paging::PageTableFlags;
+use x86_64::VirtAddr;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const PT_LOAD: u32 = 1;
@@ -15,6 +16,7 @@ const PF_X: u32 = 0x1;
 const PF_W: u32 = 0x2;
 
 const ET_DYN: u16 = 3;
+const EM_X86_64: u16 = 0x3E;
 
 const DT_NULL: i64 = 0;
 const DT_RELA: i64 = 7;
@@ -24,6 +26,8 @@ const DT_RELAENT: i64 = 9;
 const R_X86_64_RELATIVE: u32 = 8;
 
 const PIE_LOAD_BIAS: u64 = 0x2000_0000;
+const PIE_ASLR_WINDOW_PAGES: u64 = 0x4000; // 64MiB
+static PIE_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -60,22 +64,56 @@ struct Elf64Phdr {
 #[derive(Debug, Clone, Copy)]
 pub struct LoadedElf {
     pub entry: u64,
+    pub load_bias: u64,
     pub stack_top: u64,
     pub stack_bottom: u64,
+}
+
+#[inline]
+fn aslr_mix64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+fn next_pie_load_bias() -> u64 {
+    if PIE_ASLR_COUNTER.load(Ordering::Relaxed) == 0 {
+        let mut init = crate::cpu::boot_entropy_u64() ^ 0xa726_f38d_c941_5e2b;
+        if init == 0 {
+            init = 1;
+        }
+        let _ = PIE_ASLR_COUNTER.compare_exchange(0, init, Ordering::SeqCst, Ordering::Relaxed);
+    }
+    let ctr = PIE_ASLR_COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
+    let ticks = crate::interrupt::timer::get_ticks();
+    let hw = crate::cpu::hw_random_u64().unwrap_or(0);
+    let boot = crate::cpu::boot_entropy_u64();
+    let offset_pages = aslr_mix64(ctr ^ ticks.rotate_left(13) ^ hw.rotate_left(11) ^ boot)
+        % PIE_ASLR_WINDOW_PAGES;
+    PIE_LOAD_BIAS + offset_pages * 4096
 }
 
 pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
     let header = parse_header(data)?;
     validate_header(header)?;
 
-    let load_bias = if header.e_type == ET_DYN { PIE_LOAD_BIAS } else { 0 };
+    let load_bias = if header.e_type == ET_DYN {
+        next_pie_load_bias()
+    } else {
+        0
+    };
 
     let phoff = header.e_phoff as usize;
     let phentsize = header.e_phentsize as usize;
     let phnum = header.e_phnum as usize;
 
     for i in 0..phnum {
-        let off = phoff + i * phentsize;
+        let off = match i.checked_mul(phentsize).and_then(|x| phoff.checked_add(x)) {
+            Some(o) => o,
+            None => return Err(Kernel::InvalidParam),
+        };
         let phdr = read_phdr(data, off)?;
         if phdr.p_type != PT_LOAD {
             continue;
@@ -86,10 +124,16 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
         if memsz == 0 {
             continue;
         }
+        if filesz > memsz {
+            return Err(Kernel::Memory(Memory::InvalidAddress));
+        }
 
-        let file_end = phdr.p_offset as usize + filesz;
+        let file_end = match (phdr.p_offset as usize).checked_add(filesz) {
+            Some(v) => v,
+            None => return Err(Kernel::Memory(Memory::InvalidAddress)),
+        };
         if file_end > data.len() {
-            return Err(KernelError::Memory(MemoryError::InvalidAddress));
+            return Err(Kernel::Memory(Memory::InvalidAddress));
         }
 
         let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
@@ -122,21 +166,22 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
 
     Ok(LoadedElf {
         entry: header.e_entry.wrapping_add(load_bias),
+        load_bias,
         stack_top: stack.top,
         stack_bottom: stack.bottom,
     })
 }
 
 pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
-    let data = init::fs::read(path).ok_or(KernelError::InvalidParam)?;
-    let loaded = load_elf(data)?;
+    let data = init::fs::read(path).ok_or(Kernel::InvalidParam)?;
+    let loaded = load_elf(&*data)?;
 
     // Services run in Ring3 (Service), not Core
-    let process = Process::new(name, PrivilegeLevel::Service, None, 1);
+    let process = TaskProcess::new(name, PrivilegeLevel::Service, None, 1);
     let pid = process.id();
 
     if add_process(process).is_none() {
-        return Err(KernelError::Process(ProcessError::MaxProcessesReached));
+        return Err(Kernel::Process(Process::MaxProcessesReached));
     }
 
     // Allocate a kernel stack (pages) for the service thread and map frames
@@ -148,7 +193,7 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     let first_frame = frame::allocate_frame()?;
     let first_phys = first_frame.start_address().as_u64();
     let phys_offset = crate::mem::paging::physical_memory_offset();
-    let kernel_stack_addr = first_phys + phys_offset;
+    let kernel_stack_addr = first_phys + phys_offset.unwrap_or(0);
 
     // Map the first frame
     let page = Page::containing_address(VirtAddr::new(kernel_stack_addr));
@@ -194,8 +239,8 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     const AT_ENTRY: u64 = 9;
 
     // Fetch ELF header again to compute phdr addr and counts
-    let header = parse_header(data)?;
-    let load_bias = if header.e_type == ET_DYN { PIE_LOAD_BIAS } else { 0 };
+    let header = parse_header(&data)?;
+    let load_bias = loaded.load_bias;
     let at_phdr = load_bias.wrapping_add(header.e_phoff);
     let at_phent = header.e_phentsize as u64;
     let at_phnum = header.e_phnum as u64;
@@ -243,11 +288,11 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     // final alignment: ensure %16 == 0
     sp &= !0xF;
 
-    thread.context_mut().rsp = sp as u64;
+    thread.context_mut().rsp = sp;
     thread.context_mut().rbp = 0;
 
     if add_thread(thread).is_none() {
-        return Err(KernelError::Process(ProcessError::MaxProcessesReached));
+        return Err(Kernel::Process(Process::MaxProcessesReached));
     }
 
     Ok(())
@@ -255,7 +300,7 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
 
 fn parse_header(data: &[u8]) -> Result<Elf64Header> {
     if data.len() < core::mem::size_of::<Elf64Header>() {
-        return Err(KernelError::InvalidParam);
+        return Err(Kernel::InvalidParam);
     }
     let ptr = data.as_ptr() as *const Elf64Header;
     Ok(unsafe { *ptr })
@@ -263,13 +308,16 @@ fn parse_header(data: &[u8]) -> Result<Elf64Header> {
 
 fn validate_header(header: Elf64Header) -> Result<()> {
     if header.e_ident[0..4] != ELF_MAGIC {
-        return Err(KernelError::InvalidParam);
+        return Err(Kernel::InvalidParam);
     }
     if header.e_ident[4] != 2 || header.e_ident[5] != 1 {
-        return Err(KernelError::InvalidParam);
+        return Err(Kernel::InvalidParam);
+    }
+    if header.e_machine != EM_X86_64 {
+        return Err(Kernel::InvalidParam);
     }
     if header.e_phentsize as usize != core::mem::size_of::<Elf64Phdr>() {
-        return Err(KernelError::InvalidParam);
+        return Err(Kernel::InvalidParam);
     }
     Ok(())
 }
@@ -293,6 +341,27 @@ fn apply_relocations(data: &[u8], header: Elf64Header, load_bias: u64) -> Result
     let mut rela_addr = None;
     let mut rela_size = None;
     let mut rela_ent = None;
+    let mut load_ranges: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+
+    let phoff = header.e_phoff as usize;
+    let phentsize = header.e_phentsize as usize;
+    let phnum = header.e_phnum as usize;
+    for i in 0..phnum {
+        let off = match i.checked_mul(phentsize).and_then(|x| phoff.checked_add(x)) {
+            Some(o) => o,
+            None => return Err(Kernel::InvalidParam),
+        };
+        let phdr = read_phdr(data, off)?;
+        if phdr.p_type != PT_LOAD || phdr.p_memsz == 0 {
+            continue;
+        }
+        let start = phdr.p_vaddr.wrapping_add(load_bias);
+        let end = match start.checked_add(phdr.p_memsz) {
+            Some(v) => v,
+            None => return Err(Kernel::InvalidParam),
+        };
+        load_ranges.push((start, end));
+    }
 
     if let Some((dyn_off, dyn_size)) = dynamic_file_range(data, header)? {
         let count = dyn_size / core::mem::size_of::<Elf64Dyn>();
@@ -318,6 +387,9 @@ fn apply_relocations(data: &[u8], header: Elf64Header, load_bias: u64) -> Result
         None => return Ok(()),
     };
     let rela_ent = rela_ent.unwrap_or(core::mem::size_of::<Elf64Rela>());
+    if rela_ent < core::mem::size_of::<Elf64Rela>() || rela_size % rela_ent != 0 {
+        return Err(Kernel::InvalidParam);
+    }
 
     let rela_off = vaddr_to_offset(data, header, rela_addr)?;
     let count = rela_size / rela_ent;
@@ -326,7 +398,18 @@ fn apply_relocations(data: &[u8], header: Elf64Header, load_bias: u64) -> Result
         let rela = read_rela(data, off)?;
         let r_type = (rela.r_info & 0xffffffff) as u32;
         if r_type == R_X86_64_RELATIVE {
-            let reloc_addr = load_bias.wrapping_add(rela.r_offset) as *mut u64;
+            let reloc_vaddr = load_bias.wrapping_add(rela.r_offset);
+            let reloc_end = match reloc_vaddr.checked_add(core::mem::size_of::<u64>() as u64) {
+                Some(v) => v,
+                None => return Err(Kernel::InvalidParam),
+            };
+            if !load_ranges
+                .iter()
+                .any(|(start, end)| reloc_vaddr >= *start && reloc_end <= *end)
+            {
+                return Err(Kernel::InvalidParam);
+            }
+            let reloc_addr = reloc_vaddr as *mut u64;
             let value = load_bias.wrapping_add(rela.r_addend as u64);
             unsafe {
                 reloc_addr.write(value);
@@ -343,7 +426,10 @@ fn dynamic_file_range(data: &[u8], header: Elf64Header) -> Result<Option<(usize,
     let phnum = header.e_phnum as usize;
 
     for i in 0..phnum {
-        let off = phoff + i * phentsize;
+        let off = match i.checked_mul(phentsize).and_then(|x| phoff.checked_add(x)) {
+            Some(o) => o,
+            None => return Err(Kernel::InvalidParam),
+        };
         let phdr = read_phdr(data, off)?;
         if phdr.p_type == PT_DYNAMIC {
             return Ok(Some((phdr.p_offset as usize, phdr.p_filesz as usize)));
@@ -359,29 +445,35 @@ fn vaddr_to_offset(data: &[u8], header: Elf64Header, vaddr: u64) -> Result<usize
     let phnum = header.e_phnum as usize;
 
     for i in 0..phnum {
-        let off = phoff + i * phentsize;
+        let off = match i.checked_mul(phentsize).and_then(|x| phoff.checked_add(x)) {
+            Some(o) => o,
+            None => return Err(Kernel::InvalidParam),
+        };
         let phdr = read_phdr(data, off)?;
         if phdr.p_type != PT_LOAD {
             continue;
         }
         let start = phdr.p_vaddr;
-        let end = phdr.p_vaddr + phdr.p_memsz;
+        let end = match phdr.p_vaddr.checked_add(phdr.p_memsz) {
+            Some(v) => v,
+            None => return Err(Kernel::InvalidParam),
+        };
         if vaddr >= start && vaddr < end {
             let delta = vaddr - start;
             let file_off = phdr.p_offset + delta;
             if file_off as usize >= data.len() {
-                return Err(KernelError::InvalidParam);
+                return Err(Kernel::InvalidParam);
             }
             return Ok(file_off as usize);
         }
     }
 
-    Err(KernelError::InvalidParam)
+    Err(Kernel::InvalidParam)
 }
 
 fn read_dyn(data: &[u8], offset: usize) -> Result<Elf64Dyn> {
     if offset + core::mem::size_of::<Elf64Dyn>() > data.len() {
-        return Err(KernelError::InvalidParam);
+        return Err(Kernel::InvalidParam);
     }
     let ptr = unsafe { data.as_ptr().add(offset) as *const Elf64Dyn };
     Ok(unsafe { *ptr })
@@ -389,7 +481,7 @@ fn read_dyn(data: &[u8], offset: usize) -> Result<Elf64Dyn> {
 
 fn read_rela(data: &[u8], offset: usize) -> Result<Elf64Rela> {
     if offset + core::mem::size_of::<Elf64Rela>() > data.len() {
-        return Err(KernelError::InvalidParam);
+        return Err(Kernel::InvalidParam);
     }
     let ptr = unsafe { data.as_ptr().add(offset) as *const Elf64Rela };
     Ok(unsafe { *ptr })
@@ -397,7 +489,7 @@ fn read_rela(data: &[u8], offset: usize) -> Result<Elf64Rela> {
 
 fn read_phdr(data: &[u8], offset: usize) -> Result<Elf64Phdr> {
     if offset + core::mem::size_of::<Elf64Phdr>() > data.len() {
-        return Err(KernelError::InvalidParam);
+        return Err(Kernel::InvalidParam);
     }
     let ptr = unsafe { data.as_ptr().add(offset) as *const Elf64Phdr };
     Ok(unsafe { *ptr })

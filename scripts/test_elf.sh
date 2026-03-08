@@ -2,7 +2,7 @@
 
 set -e
 
-echo "===== SwiftCore ELF Execution Test ====="
+echo "===== mochiOS ELF Execution Test ====="
 echo ""
 
 # 1. ユーザーアプリをビルド

@@ -1,7 +1,7 @@
 extern crate alloc;
+use crate::result::{Kernel, Process};
 use alloc::vec::Vec;
 use core::convert::TryInto;
-use crate::result::{Kernel, Process};
 
 /// ELF64ヘッダとプログラムヘッダの定義
 #[repr(C)]
@@ -65,17 +65,17 @@ pub const PT_NULL: u32 = 0;
 pub const PT_LOAD: u32 = 1;
 
 /// ELFヘッダをパースする
-/// 
+///
 /// ## Arguments
 /// - `data`: ELFファイルのバイト列
-/// 
+///
 /// ## Returns
 /// ELFヘッダの構造体。パースに失敗した場合はNone
 pub fn parse_elf_header(data: &[u8]) -> Option<Elf64Ehdr> {
     if data.len() < 64 {
         return None;
     }
-    
+
     // ELFヘッダの最初の16バイトは識別子で、残りは固定サイズのフィールド
     let mut e_ident = [0u8; 16];
     e_ident.copy_from_slice(&data[0..16]);
@@ -88,6 +88,13 @@ pub fn parse_elf_header(data: &[u8]) -> Option<Elf64Ehdr> {
     // 怒涛のパースと代入（）
     let e_type = u16::from_le_bytes(data[16..18].try_into().ok()?);
     let e_machine = u16::from_le_bytes(data[18..20].try_into().ok()?);
+
+    // ELFアーキテクチャ検証: x86-64 (EM_X86_64 = 0x3E) のみ受け付ける (MED-07)
+    const EM_X86_64: u16 = 0x3E;
+    if e_machine != EM_X86_64 {
+        return None;
+    }
+
     let e_version = u32::from_le_bytes(data[20..24].try_into().ok()?);
     let e_entry = u64::from_le_bytes(data[24..32].try_into().ok()?);
     let e_phoff = u64::from_le_bytes(data[32..40].try_into().ok()?);
@@ -119,18 +126,18 @@ pub fn parse_elf_header(data: &[u8]) -> Option<Elf64Ehdr> {
 }
 
 /// プログラムヘッダをパースする
-/// 
+///
 /// ## Arguments
 /// - `data`: ELFファイルのバイト列
 /// - `offset`: プログラムヘッダの開始オフセット
-/// 
+///
 /// ## Returns
 /// プログラムヘッダの構造体。パースに失敗した場合はNone
 pub fn parse_phdr(data: &[u8], offset: usize) -> Option<Elf64Phdr> {
     if data.len() < offset + 56 {
         return None;
     }
-    
+
     let p_type = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?);
     let p_flags = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().ok()?);
     let p_offset = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().ok()?);
@@ -153,13 +160,15 @@ pub fn parse_phdr(data: &[u8], offset: usize) -> Option<Elf64Phdr> {
 }
 
 /// ロード可能セグメントのリストを取得する
-/// 
+///
 /// ## Arguments
 /// - `data`: ELFファイルのバイト列
 ///
 /// ## Returns
 /// セグメントのベクタ。各セグメントは (仮想アドレス, メモリサイズ, ファイルサイズ, オフセット, フラグ) のタプル。
-pub fn list_loadable_segments(data: &[u8]) -> Option<Vec<(u64, u64, u64, u64, u32)>> {
+pub type LoadableSegment = (u64, u64, u64, u64, u32);
+
+pub fn list_loadable_segments(data: &[u8]) -> Option<Vec<LoadableSegment>> {
     let eh = parse_elf_header(data)?;
     let mut res = Vec::new();
     let phoff = eh.e_phoff as usize;
@@ -178,10 +187,10 @@ pub fn list_loadable_segments(data: &[u8]) -> Option<Vec<(u64, u64, u64, u64, u3
 }
 
 /// エントリポイントの仮想アドレスを取得する
-/// 
+///
 /// ## Arguments
 /// - `data`: ELFファイルのバイト列
-/// 
+///
 /// ## Returns
 /// エントリポイントの仮想アドレス。パースに失敗した場合はNone
 pub fn entry_point(data: &[u8]) -> Option<u64> {

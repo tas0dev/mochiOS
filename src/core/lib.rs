@@ -4,6 +4,7 @@
 #![allow(unused)]
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
 
 extern crate alloc;
 
@@ -39,9 +40,11 @@ pub mod util;
 
 /// CPU機能の初期化
 pub mod cpu;
+/// per-CPU状態管理
+pub mod percpu;
 
-pub use result::{Kernel, Result};
 pub use kernel::kernel_entry;
+pub use result::{Kernel, Result};
 
 /// デバイス情報
 #[repr(C)]
@@ -64,10 +67,16 @@ pub struct BootInfo {
     pub memory_map_len: usize,
     /// メモリマップの各エントリサイズ
     pub memory_map_entry_size: usize,
-    /// アロケータ切り替え用フラグのアドレス (Virtual Address)
-    pub allocator_addr: u64,
-    /// カーネルアロケータの制御構造体へのアドレス (Virtual Address)
+    /// カーネルアロケータの制御構造体へのアドレス（kernel binaryが起動時に設定）
     pub kernel_heap_addr: u64,
+    /// initfs イメージの物理アドレス（ブートローダーが設定）
+    pub initfs_addr: u64,
+    /// initfs イメージのサイズ（バイト）
+    pub initfs_size: usize,
+    /// rootfs (ext2) イメージの物理アドレス（ブートローダーが設定）
+    pub rootfs_addr: u64,
+    /// rootfs イメージのサイズ（バイト）
+    pub rootfs_size: usize,
 }
 
 /// メモリ領域の種類

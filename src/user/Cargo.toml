@@ -8,6 +8,7 @@ edition = "2021"
 [features]
 default = ["library"]
 library = []
+std-support = []  # When used from std-based binaries; disables the custom panic_handler
 
 [lib]
 name = "swiftlib"

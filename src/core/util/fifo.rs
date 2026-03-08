@@ -80,3 +80,9 @@ impl<T: Copy, const N: usize> Fifo<T, N> {
         self.buffer.lock().count
     }
 }
+
+impl<T: Copy, const N: usize> Default for Fifo<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}

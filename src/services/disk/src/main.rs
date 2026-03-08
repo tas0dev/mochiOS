@@ -1,13 +1,6 @@
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-use core::fmt::{self};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use swiftlib::io;
 use swiftlib::ipc;
 use swiftlib::task;
 
@@ -20,14 +13,15 @@ const MAX_DISKS: usize = 4;
 static mut DISKS: [Option<AtaDrive>; MAX_DISKS] = [None, None, None, None];
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// ディスク操作リクエスト
+/// ディスク操作リクエスト（書き込みデータを含む）
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct DiskRequest {
     op: u64,
     disk_id: u64,
     lba: u64,
     count: u64,
+    data: [u8; 512], // OP_WRITE のときに使用
 }
 
 impl DiskRequest {
@@ -36,6 +30,15 @@ impl DiskRequest {
     const OP_INFO: u64 = 3;
     const OP_LIST: u64 = 4;
 }
+
+/// サービス準備完了通知
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ReadyNotify {
+    op: u64, // OP_NOTIFY_READY
+}
+
+const OP_NOTIFY_READY: u64 = 0xFF;
 
 /// ディスク操作レスポンス
 #[repr(C)]
@@ -47,27 +50,7 @@ struct DiskResponse {
 }
 
 #[repr(align(8))]
-struct AlignedBuffer([u8; 1024]);
-
-// 簡易的な標準出力ライター
-struct Stdout;
-impl fmt::Write for Stdout {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        io::write_stdout(s.as_bytes());
-        Ok(())
-    }
-}
-
-macro_rules! print {
-    ($($arg:tt)*) => ({
-        let _ = core::fmt::Write::write_fmt(&mut Stdout, format_args!($($arg)*));
-    });
-}
-
-macro_rules! println {
-    () => (print!("\n"));
-    ($($arg:tt)*) => (print!("{}\n", format_args!($($arg)*)));
-}
+struct AlignedBuffer([u8; 544]); // DiskRequest は 544 バイト
 
 /// ディスクドライバを初期化
 fn init_disks() {
@@ -127,14 +110,45 @@ fn init_disks() {
     println!("[DISK] ATA initialization complete");
 }
 
-#[no_mangle]
-pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+/// core.service に準備完了を通知する
+fn notify_ready_to_core() {
+    // core.service の PID を取得
+    let core_pid = match task::find_process_by_name("core.service") {
+        Some(pid) => {
+            println!("[DISK] Found core.service (PID={})", pid);
+            pid
+        }
+        None => {
+            println!("[DISK] WARNING: core.service not found, skipping READY notify");
+            return;
+        }
+    };
+
+    let notify = ReadyNotify { op: OP_NOTIFY_READY };
+    let notify_slice = unsafe {
+        core::slice::from_raw_parts(
+            &notify as *const _ as *const u8,
+            size_of::<ReadyNotify>(),
+        )
+    };
+    if ipc::ipc_send(core_pid, notify_slice) == 0 {
+        println!("[DISK] Sent READY to core.service (PID={})", core_pid);
+    } else {
+        println!("[DISK] Failed to send READY to core.service");
+    }
+}
+
+#[allow(static_mut_refs)]
+fn main() {
     println!("[DISK] Disk I/O Service Started.");
 
     // ディスクを初期化
     init_disks();
 
-    let mut recv_buf = AlignedBuffer([0u8; 1024]);
+    // 初期化完了を core.service へ通知
+    notify_ready_to_core();
+
+    let mut recv_buf = AlignedBuffer([0u8; 544]);
 
     loop {
         let (sender, len) = ipc::ipc_recv(&mut recv_buf.0);
@@ -145,8 +159,24 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             continue;
         }
 
-        if sender != 0 && (len as usize) >= size_of::<DiskRequest>() {
-            let req: DiskRequest = unsafe { core::ptr::read(recv_buf.0.as_ptr() as *const _) };
+        if sender != 0 && (len as usize) >= (size_of::<DiskRequest>() - 512) {
+            // 送信元スレッドの権限を確認 (#22: 非特権プロセスからのディスクアクセスを拒否)
+            // 0=Core, 1=Service のみ許可。2=User は拒否
+            let sender_privilege = task::get_thread_privilege(sender);
+            if sender_privilege > 1 {
+                println!("[DISK] Rejecting request from unprivileged thread {}", sender);
+                let resp = DiskResponse { status: -1, len: 0, data: [0; 512] };
+                let resp_slice = unsafe {
+                    core::slice::from_raw_parts(
+                        &resp as *const _ as *const u8,
+                        size_of::<DiskResponse>(),
+                    )
+                };
+                let _ = ipc::ipc_send(sender, resp_slice);
+                continue;
+            }
+
+            let req: DiskRequest = unsafe { core::ptr::read_unaligned(recv_buf.0.as_ptr() as *const _) };
             println!(
                 "[DISK] REQ op={} disk={} lba={} from PID={}",
                 req.op, req.disk_id, req.lba, sender
@@ -186,9 +216,15 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                     if disk_id < MAX_DISKS {
                         unsafe {
                             if let Some(ref mut drive) = DISKS[disk_id] {
-                                // データは次のメッセージで受信する想定
-                                // 簡略化のため未実装
-                                resp.status = -38; // ENOSYS
+                                match drive.write_sector(req.lba, &req.data) {
+                                    Ok(_) => {
+                                        resp.status = 0;
+                                        resp.len = 0;
+                                    }
+                                    Err(_) => {
+                                        resp.status = -5; // EIO
+                                    }
+                                }
                             } else {
                                 resp.status = -6; // ENXIO
                             }
@@ -231,7 +267,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                 }
                 _ => {
                     println!("[DISK] Unknown OP: {}", req.op);
-                    resp.status = -38; // ENOSYS
+                    continue;
                 }
             }
 

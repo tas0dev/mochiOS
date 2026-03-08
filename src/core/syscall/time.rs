@@ -1,6 +1,62 @@
 //! 時間関連システムコール
 
-use super::types::{SUCCESS, EINVAL};
+use super::types::{EAGAIN, EFAULT, EINVAL, SUCCESS};
+use crate::interrupt::spinlock::SpinLock;
+use crate::task::ThreadId;
+
+#[derive(Clone, Copy)]
+struct SleepEntry {
+    tid: ThreadId,
+    wake_tick: u64,
+}
+
+const MAX_SLEEPERS: usize = crate::task::ThreadQueue::MAX_THREADS;
+static SLEEP_QUEUE: SpinLock<[Option<SleepEntry>; MAX_SLEEPERS]> =
+    SpinLock::new([None; MAX_SLEEPERS]);
+
+fn register_sleep_entry(tid: ThreadId, wake_tick: u64) -> bool {
+    let mut queue = SLEEP_QUEUE.lock();
+
+    for slot in queue.iter_mut() {
+        if slot.is_some_and(|entry| entry.tid == tid) {
+            *slot = Some(SleepEntry { tid, wake_tick });
+            return true;
+        }
+    }
+
+    for slot in queue.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(SleepEntry { tid, wake_tick });
+            return true;
+        }
+    }
+
+    false
+}
+
+pub fn wake_due_sleepers(now_tick: u64) {
+    let mut wake_list = [None; MAX_SLEEPERS];
+    let mut wake_count = 0usize;
+
+    {
+        let mut queue = SLEEP_QUEUE.lock();
+        for slot in queue.iter_mut() {
+            if let Some(entry) = *slot {
+                if now_tick >= entry.wake_tick {
+                    if wake_count < wake_list.len() {
+                        wake_list[wake_count] = Some(entry.tid);
+                        wake_count += 1;
+                    }
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    for tid in wake_list.iter().take(wake_count).flatten() {
+        crate::task::wake_thread(*tid);
+    }
+}
 
 /// GetTicksシステムコール
 ///
@@ -29,19 +85,23 @@ pub fn clock_gettime(clk_id: u64, ts_ptr: u64) -> u64 {
     if ts_ptr == 0 {
         return EINVAL;
     }
+    // ユーザー空間アドレスの有効性を検証する (timespec = 16バイト)
+    if !crate::syscall::validate_user_ptr(ts_ptr, 16) {
+        return EFAULT;
+    }
 
-    // タイマーティックを使って時刻を計算 (1ティック = 1ms と仮定)
+    // タイマーティックを使って時刻を計算 (1ティック = 10ms)
     let ticks = get_ticks();
-    let sec = ticks / 1000;
-    let nsec = (ticks % 1000) * 1_000_000;
+    let sec = ticks / 100;
+    let nsec = (ticks % 100) * 10_000_000;
 
     match clk_id {
         CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
             // timespec { tv_sec: i64, tv_nsec: i64 }
-            unsafe {
-                core::ptr::write(ts_ptr as *mut i64, sec as i64);
-                core::ptr::write((ts_ptr + 8) as *mut i64, nsec as i64);
-            }
+            crate::syscall::with_user_memory_access(|| unsafe {
+                core::ptr::write_unaligned(ts_ptr as *mut i64, sec as i64);
+                core::ptr::write_unaligned((ts_ptr + 8) as *mut i64, nsec as i64);
+            });
             SUCCESS
         }
         _ => EINVAL,
@@ -58,17 +118,28 @@ pub fn clock_gettime(clk_id: u64, ts_ptr: u64) -> u64 {
 /// # 戻り値
 /// 成功時は0
 pub fn sleep_until(ticks: u64) -> u64 {
-    let current_ticks = get_ticks();
-    if ticks > current_ticks {
-        let wait_ticks = ticks - current_ticks;
-        if let Some(tid) = crate::task::current_thread_id() {
-            crate::task::sleep_thread(tid);
-            for _ in 0..wait_ticks.min(1000) {
-                crate::task::yield_now();
-            }
-            crate::task::wake_thread(tid);
-        }
+    if get_ticks() >= ticks {
+        return SUCCESS;
     }
-    0
-}
 
+    let current_tid = match crate::task::current_thread_id() {
+        Some(tid) => tid,
+        None => return EINVAL,
+    };
+
+    let queued = x86_64::instructions::interrupts::without_interrupts(|| {
+        if !register_sleep_entry(current_tid, ticks) {
+            return false;
+        }
+        crate::task::sleep_thread(current_tid);
+        true
+    });
+    if !queued {
+        return EAGAIN;
+    }
+
+    while get_ticks() < ticks {
+        crate::task::yield_now();
+    }
+    SUCCESS
+}

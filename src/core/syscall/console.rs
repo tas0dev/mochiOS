@@ -1,4 +1,8 @@
-use crate::{syscall::EINVAL, util};
+use alloc::vec::Vec;
+use crate::{
+    syscall::{EFAULT, EINVAL},
+    util,
+};
 
 /// コンソール書き込み (buf_ptr, len)
 pub fn write(buf_ptr: u64, len: u64) -> u64 {
@@ -10,12 +14,15 @@ pub fn write(buf_ptr: u64, len: u64) -> u64 {
         return 0;
     }
 
-    let bytes = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
-    let text = match core::str::from_utf8(bytes) {
+    let mut copied = Vec::with_capacity(len);
+    copied.resize(len, 0);
+    if let Err(err) = crate::syscall::copy_from_user(buf_ptr, &mut copied) {
+        return err;
+    }
+    let text = match core::str::from_utf8(&copied) {
         Ok(s) => s,
         Err(_) => return EINVAL,
     };
-
     util::console::print(format_args!("{}", text));
     util::vga::print(format_args!("{}", text));
     len as u64

@@ -2,11 +2,12 @@
 //!
 //! 複数のファイルシステム実装を統一的に扱うための共通インターフェース
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use std::string::String;
+use std::vec::Vec;
 
 /// ファイルタイプ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(unused)]
 pub enum FileType {
     /// 通常のファイル
     RegularFile,
@@ -26,6 +27,7 @@ pub enum FileType {
 
 /// ファイル属性
 #[derive(Debug, Clone)]
+#[allow(unused)]
 pub struct FileAttr {
     /// ファイルタイプ
     pub file_type: FileType,
@@ -51,6 +53,7 @@ pub struct FileAttr {
 
 /// VFSエラー
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(unused)]
 pub enum VfsError {
     NotFound,           // ファイルが存在しない
     PermissionDenied,   // 権限がない
@@ -70,6 +73,7 @@ pub type VfsResult<T> = Result<T, VfsError>;
 
 /// ディレクトリエントリ
 #[derive(Debug, Clone)]
+#[allow(unused)]
 pub struct DirEntry {
     /// エントリ名
     pub name: String,
@@ -82,6 +86,7 @@ pub struct DirEntry {
 /// ファイルシステムトレイト
 ///
 /// 各ファイルシステム実装が実装すべきインターフェース
+#[allow(dead_code)]
 pub trait FileSystem: Send + Sync {
     /// ファイルシステム名を取得
     fn name(&self) -> &str;
@@ -127,6 +132,7 @@ pub trait FileSystem: Send + Sync {
 ///
 /// オープンされたファイルの状態を保持
 #[derive(Debug, Clone, Copy)]
+#[allow(unused)]
 pub struct FileHandle {
     pub inode: u64,
     pub offset: u64,

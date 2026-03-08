@@ -1,10 +1,9 @@
-#![no_std]
-#![no_main]
-
-extern crate alloc;
 use core::ffi::c_char;
-use swiftlib::cfunc::*;
 use swiftlib::fs;
+
+extern "C" {
+    fn printf(fmt: *const c_char, ...) -> i32;
+}
 
 // テスト結果の統計
 struct TestStats {
@@ -147,11 +146,16 @@ fn test_readdir() -> bool {
 }
 
 // ========== メイン関数 ==========
-#[no_mangle]
-pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
+fn main() {
+    let argc = std::env::args().count() as i32;
+    let args: Vec<std::ffi::CString> = std::env::args()
+        .map(|a| std::ffi::CString::new(a).unwrap_or_default())
+        .collect();
+    let argv_ptrs: Vec<*const u8> = args.iter().map(|a| a.as_ptr() as *const u8).collect();
+    let argv: *const *const u8 = argv_ptrs.as_ptr();
     unsafe {
         printf(b"\n========================================\n\0".as_ptr() as *const c_char);
-        printf(b"SwiftCore Test Suite\n\0".as_ptr() as *const c_char);
+        printf(b"mochiOS Test Suite\n\0".as_ptr() as *const c_char);
         printf(b"========================================\n\n\0".as_ptr() as *const c_char);
 
         printf(b"Test invocation:\n\0".as_ptr() as *const c_char);
@@ -183,9 +187,5 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     stats.summary();
 
     // 失敗があれば終了コード1を返す
-    if stats.failed > 0 {
-        1
-    } else {
-        0
-    }
+    std::process::exit(if stats.failed > 0 { 1 } else { 0 });
 }

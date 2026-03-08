@@ -14,14 +14,14 @@ export RUST_TARGET_PATH="$PROJECT_ROOT/src/lib"
 export RUSTFLAGS="-C link-arg=-L$SCRIPT_DIR -C link-arg=-T$SCRIPT_DIR/linker.ld"
 
 cargo build --release \
-    --target="$RUST_TARGET_PATH/x86_64-swiftcore.json" \
+    --target="$RUST_TARGET_PATH/x86_64-mochios.json" \
     -Z build-std=core,alloc \
     --package "$APP_NAME"
 
 INITFS_DIR="$PROJECT_ROOT/initfs"
 mkdir -p "$INITFS_DIR"
 
-SOURCE_BIN="target/x86_64-swiftcore/release/$APP_NAME"
+SOURCE_BIN="target/x86_64-mochios/release/$APP_NAME"
 
 if [ -f "$SOURCE_BIN" ]; then
     cp "$SOURCE_BIN" "$INITFS_DIR/$APP_NAME.elf"

@@ -14,6 +14,9 @@ pub struct Pic {
 
 impl Pic {
     /// End of Interrupt信号を送信
+    ///
+    /// # Safety
+    /// 呼び出し側は、PICポートアクセスが現在の実行環境で有効であることを保証する必要がある。
     pub unsafe fn end_of_interrupt(&self) {
         use x86_64::instructions::port::Port;
         Port::new(self.command).write(0x20u8);

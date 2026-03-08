@@ -41,18 +41,18 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
 
     fs::init();
 
+    // MED-32修正: PIT初期化をCPU割り込み有効化より前に実行する
+    // 以前は enable() が init_pit() より先だったため、PIT未初期化状態でタイマー割り込みが
+    // 発生する可能性があった。正しい初期化順序: PIT→スケジューラ→タイマー→割り込み有効化
+    interrupt::init_pit();
+    task::init_scheduler();
+    interrupt::enable_timer_interrupt();
+
     unsafe {
         x86_64::instructions::interrupts::enable();
     }
 
     // Initialize syscall MSRs (STAR/LSTAR/FMASK)
-    interrupt::init_syscall();
-
-    interrupt::init_pit();
-    // Enable scheduler and timer interrupts for preemptive multitasking during development/testing.
-    // (In production this may be controlled by userland service manager.)
-    crate::task::init_scheduler();
-    interrupt::enable_timer_interrupt();
 
     // SYSCALL/SYSRET 命令サポートを初期化
     crate::syscall::syscall_entry::init_syscall();

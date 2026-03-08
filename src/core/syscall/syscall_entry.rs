@@ -10,29 +10,6 @@
 //!   R11 = ユーザーの RFLAGS (SYSCALL が自動保存)
 //!   RSP = まだユーザースタック
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
-/// 現在のスレッドのカーネルスタックトップ (SYSCALL 時に切り替える)
-/// コンテキストスイッチ時に更新される
-pub static SYSCALL_KERNEL_RSP: AtomicU64 = AtomicU64::new(0);
-
-/// SYSCALL 入口でユーザー RSP を一時退避する領域 (シングルCPU用)
-pub static SYSCALL_TEMP_USER_RSP: AtomicU64 = AtomicU64::new(0);
-
-/// SYSCALL 入口でユーザー FS ベースを一時退避する領域
-static SYSCALL_TEMP_USER_FSBASE: AtomicU64 = AtomicU64::new(0);
-
-/// SYSCALL 入口でユーザー RIP を保存する領域 (シングルCPU用)
-pub static SYSCALL_SAVED_USER_RIP: AtomicU64 = AtomicU64::new(0);
-
-/// SYSCALL 入口でユーザー RFLAGS を保存する領域 (シングルCPU用)
-pub static SYSCALL_SAVED_USER_RFLAGS: AtomicU64 = AtomicU64::new(0);
-
-/// SYSCALL 用カーネルスタック (初回スイッチまたはスレッド切り替え前に使用)
-#[repr(align(16))]
-struct SyscallStack([u8; 4096 * 8]);
-static mut SYSCALL_KERNEL_STACK: SyscallStack = SyscallStack([0; 4096 * 8]);
-
 /// SYSCALL/SYSRET に必要な MSR を初期化する
 ///
 /// カーネル GDT 構成 (x86_64-unknown-uefi / MS ABI):
@@ -78,20 +55,84 @@ pub fn init_syscall() {
         write_msr(IA32_FMASK, fmask_val);
     }
 
-    // 初期カーネルスタックを設定
-    let kstack_top = unsafe {
-        let base = core::ptr::addr_of!(SYSCALL_KERNEL_STACK) as u64;
-        base + 4096 * 8
-    };
-    
-    SYSCALL_KERNEL_RSP.store(kstack_top, Ordering::Relaxed);
+    // 初期カーネルスタックは現在のRSPを使用し、後続のコンテキストスイッチで更新する
+    let kstack_top: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) kstack_top, options(nomem, nostack, preserves_flags));
+    }
+    crate::percpu::init_boot_cpu(kstack_top);
 
     crate::info!("SYSCALL/SYSRET initialized: LSTAR={:#x}", lstar_val);
 }
 
 /// SYSCALL カーネルスタックを更新する (コンテキストスイッチ時に呼ぶ)
 pub fn update_kernel_rsp(rsp: u64) {
-    SYSCALL_KERNEL_RSP.store(rsp, Ordering::Relaxed);
+    // SeqCst を使用してメモリ順序を保証する (MED-05)
+    crate::percpu::set_syscall_kernel_rsp(rsp);
+}
+
+/// KPTI: 現在CR3がユーザーならカーネルCR3へ切り替え、元のCR3を返す
+pub fn switch_to_kernel_page_table() -> u64 {
+    let kernel_cr3 = crate::percpu::kernel_cr3();
+    if kernel_cr3 == 0 {
+        return 0;
+    }
+    let (current_cr3, _) = x86_64::registers::control::Cr3::read();
+    let current = current_cr3.start_address().as_u64();
+    if current == kernel_cr3 {
+        return 0;
+    }
+    crate::mem::paging::switch_page_table(kernel_cr3);
+    current
+}
+
+/// KPTI: 以前のCR3へ戻す（0はno-op）
+pub fn restore_page_table(previous_cr3: u64) {
+    if previous_cr3 != 0 {
+        crate::mem::paging::switch_page_table(previous_cr3);
+    }
+}
+
+/// KPTI: 現在スレッドがユーザー権限なら、そのプロセスのユーザーCR3へ切り替える
+pub fn switch_to_current_thread_user_page_table() {
+    let tid = match crate::task::current_thread_id() {
+        Some(t) => t,
+        None => return,
+    };
+    let pid = match crate::task::with_thread(tid, |t| t.process_id()) {
+        Some(p) => p,
+        None => return,
+    };
+    let is_core = crate::task::with_process(pid, |p| p.privilege())
+        .is_some_and(|lvl| lvl == crate::task::PrivilegeLevel::Core);
+    if is_core {
+        return;
+    }
+    if let Some(user_pt) = crate::task::with_process(pid, |p| p.page_table()).flatten() {
+        crate::mem::paging::switch_page_table(user_pt);
+    }
+}
+
+/// KPTI: SYSCALL/INT入口でカーネルCR3へ切り替える
+pub fn kpti_enter_for_current_thread() {
+    let previous = switch_to_kernel_page_table();
+    if let Some(tid) = crate::task::current_thread_id() {
+        crate::task::with_thread_mut(tid, |t| t.set_syscall_user_cr3(previous));
+    }
+}
+
+/// KPTI: SYSCALL/INT出口でユーザーCR3へ戻す
+pub fn kpti_leave_for_current_thread() {
+    let restore = crate::task::current_thread_id()
+        .and_then(|tid| {
+            crate::task::with_thread_mut(tid, |t| {
+                let cr3 = t.syscall_user_cr3();
+                t.set_syscall_user_cr3(0);
+                cr3
+            })
+        })
+        .unwrap_or(0);
+    restore_page_table(restore);
 }
 
 /// SYSCALL エントリポイント (naked function)
@@ -103,12 +144,16 @@ pub fn update_kernel_rsp(rsp: u64) {
 ///   RAX = syscall 番号
 ///   RDI/RSI/RDX/R10/R8/R9 = 引数
 ///   割り込み: 禁止 (FMASK で IF クリア済み)
+///
+/// # Safety
+/// CPU が SYSCALL エントリ規約どおりのレジスタ状態でこの関数へ入ることを前提とする。
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // ユーザー RSP を一時退避 (グローバル変数: シングルCPU前提)
-        "mov [{temp_rsp}], rsp",
+        // ユーザー RSP を退避（r9 は syscall の6番目引数で未使用）
+        "mov r9, rsp",
+        "swapgs",
 
         // ユーザー FS ベースを IA32_FS_BASE MSR から読み込んで一時退避
         // (RDFSBASE は FSGSBASE 未対応CPUで #UD になるため MSR を使用)
@@ -116,20 +161,17 @@ pub unsafe extern "C" fn syscall_entry() {
         "rdmsr",
         "shl rdx, 32",
         "or rdx, rax",
-        "mov [{temp_fsbase}], rdx",
 
         // カーネルスタックに切り替え
-        "mov rsp, [{kernel_rsp}]",
-
-        // ユーザー RIP (rcx) と RFLAGS (r11) をグローバルに保存 (fork用)
-        "mov [{user_rip}], rcx",
-        "mov [{user_rflags}], r11",
+        "mov rsp, qword ptr gs:[{sys_rsp_off}]",
+        // ユーザーFSベースを保存
+        "push rdx",
 
         // カーネルスタック上にコンテキストを保存
         // SYSRETQ に必要: RCX (user RIP), R11 (user RFLAGS), user RSP
         "push rcx",                         // user RIP
         "push r11",                         // user RFLAGS
-        "push [{temp_rsp}]",                // user RSP (直接 push できないので一旦 rax 経由)
+        "push r9",                          // user RSP
 
         // Callee-saved レジスタ保存
         "push rbp",
@@ -143,6 +185,34 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov cx, 0x10",
         "mov ds, cx",
         "mov es, cx",
+
+        // fork/clone のときだけ現在スレッドへユーザーコンテキストを記録
+        "cmp rax, 56",
+        "je 3f",
+        "cmp rax, 57",
+        "jne 4f",
+        "3:",
+        // caller-saved を退避してから helper を呼ぶ
+        "push rax",
+        "push rdi",
+        "push rsi",
+        "push rdx",
+        "push r10",
+        "push r8",
+        // stack layout after 15 pushes:
+        // [rsp+112]=user RIP, [rsp+104]=user RFLAGS, [rsp+96]=user RSP
+        "mov rdi, rax",
+        "mov rsi, [rsp + 112]",
+        "mov rdx, [rsp + 96]",
+        "mov rcx, [rsp + 104]",
+        "call {save_ctx_fn}",
+        "pop r8",
+        "pop r10",
+        "pop rdx",
+        "pop rsi",
+        "pop rdi",
+        "pop rax",
+        "4:",
 
         // 割り込みを再有効化 (カーネルスタックに切り替え済みなので安全)
         "sti",
@@ -170,18 +240,33 @@ pub unsafe extern "C" fn syscall_entry() {
         "pop rbx",
         "pop rbp",
 
+        // ユーザーコンテキスト復元 (SYSRETQ に必要: rcx=RIP, r11=RFLAGS, rsp=RSP)
+        "pop rdx",   // user RSP を一時 rdx に
+        "mov r9, rdx",
+        "pop r11",   // user RFLAGS
+        "pop rcx",   // user RIP
+        "pop rax",   // saved user FS base
+
         // ユーザー FS ベースを IA32_FS_BASE MSR に復元 (TLS)
-        // rax/rdx/ecx はここで自由に使える (user RSP/RIP はまだスタックに積んである)
-        "mov rax, [{temp_fsbase}]",
+        "mov r8, rax",
         "mov rdx, rax",
         "shr rdx, 32",
         "mov ecx, 0xC0000100",  // IA32_FS_BASE MSR
+        "mov rax, r8",
         "wrmsr",
 
-        // ユーザーコンテキスト復元 (SYSRETQ に必要: rcx=RIP, r11=RFLAGS, rsp=RSP)
-        "pop rdx",   // user RSP を一時 rdx に
-        "pop r11",   // user RFLAGS
-        "pop rcx",   // user RIP
+        // CVE-2012-0217 緩和策: SYSRETQ 前にユーザー RIP/RSP の正規アドレスチェック
+        // Intel CPU では SYSRETQ 実行時にRCX/RSPが非正規アドレス（bit 63:47 が不一致）だと
+        // Ring 0 で #GP が発生し、攻撃者が制御フローを握る恐れがある (CVE-2012-0217)
+        // ユーザー空間の正規アドレス: bit 63:47 = 0b000...0 (0x0000_7FFF_FFFF_FFFF 以下)
+        "mov rax, r9",
+        "sar rax, 47",          // 算術右シフト47bit: 正規なら全ビット0
+        "test rax, rax",
+        "jnz 2f",               // 非正規アドレス → プロセスを終了
+        "mov rax, rcx",
+        "sar rax, 47",
+        "test rax, rax",
+        "jnz 2f",
 
         // ユーザーデータセグメントを設定 (ax は自由なので使用)
         "mov ax, 0x1b",
@@ -189,16 +274,26 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov es, ax",
 
         // ユーザー RSP に切り替えて SYSRETQ
-        "mov rsp, rdx",
+        "mov rsp, r9",
+        "swapgs",
         "sysretq",
 
-        temp_rsp   = sym SYSCALL_TEMP_USER_RSP,
-        temp_fsbase = sym SYSCALL_TEMP_USER_FSBASE,
-        kernel_rsp = sym SYSCALL_KERNEL_RSP,
-        user_rip   = sym SYSCALL_SAVED_USER_RIP,
-        user_rflags = sym SYSCALL_SAVED_USER_RFLAGS,
+        // 非正規RIP/RSP検出: カーネルスタックに戻してプロセスを終了
+        "2:",
+        "mov rsp, qword ptr gs:[{sys_rsp_off}]",
+        "call {kill_fn}",
+
+        sys_rsp_off = const crate::percpu::GS_SYSCALL_KERNEL_RSP_OFFSET,
+        save_ctx_fn = sym super::save_user_context_for_fork,
         dispatch   = sym super::syscall_dispatch_sysv,
+        kill_fn    = sym kill_non_canonical_rsp,
     );
+}
+
+/// CVE-2012-0217 緩和策: 非正規RIP/RSPを持つプロセスを終了させる
+unsafe extern "C" fn kill_non_canonical_rsp() -> ! {
+    crate::warn!("CVE-2012-0217: non-canonical user RIP/RSP detected, killing process");
+    crate::task::exit_current_task(u64::MAX)
 }
 
 unsafe fn read_msr(msr: u32) -> u64 {

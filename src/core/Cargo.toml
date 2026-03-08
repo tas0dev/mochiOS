@@ -1,0 +1,21 @@
+[package]
+name = "mochios-core"
+version = "0.1.0"
+edition = "2021"
+build = "core_build.rs"
+
+[[bin]]
+name = "kernel"
+path = "entry.rs"
+test = false
+bench = false
+
+[dependencies]
+mochios = { package = "mochiOS", path = "../..", default-features = false }
+linked_list_allocator = "0.10.5"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

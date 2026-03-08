@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-swiftlib = { path = "../../user" }
+swiftlib = { path = "../../user", features = ["std-support"] }
 
 [features]
 default = ["run_tests"]

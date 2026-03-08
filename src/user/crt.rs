@@ -32,6 +32,7 @@ global_asm!(
 );
 
 extern "C" {
+    #[allow(unused)]
     fn main(argc: i32, argv: *const *const u8) -> i32;
     fn _exit(code: i32) -> !;
 }

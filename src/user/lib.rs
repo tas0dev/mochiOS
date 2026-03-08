@@ -4,35 +4,51 @@ extern crate alloc;
 
 use alloc::alloc::{GlobalAlloc, Layout};
 
-/// C関数ラッパーとポートI/O
-pub mod cfunc;
 /// システムコールの共通インターフェース
 pub mod sys;
+
 /// CランタイムとNewlibサポート
 pub mod newlib;
+
 /// ipc関連のシステムコール
 pub mod ipc;
+
 /// タスク関連のシステムコール
 pub mod task;
+
 /// 時間関連のシステムコール
 pub mod time;
+
 /// 入出力関連のシステムコール
 pub mod io;
+
 /// プロセス管理関連のシステムコール
 pub mod process;
+
 /// ファイルシステム関連のシステムコール
 pub mod fs;
+
 /// ポートI/O関連のシステムコール
 pub mod port;
+
 /// libcのC関数
 pub mod libc;
+
 /// Linux/POSIX 互換スタブ (std リンク用)
 pub mod posix_stubs;
 
+/// フレームバッファアクセス
+pub mod vga;
+
+/// キーボード入力
+pub mod keyboard;
+
+#[cfg(not(feature = "std-support"))]
 use core::panic::PanicInfo;
-use crate::libc::*;
+#[cfg(not(feature = "std-support"))]
 use crate::sys::SyscallNumber;
 
+#[cfg(not(feature = "std-support"))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     unsafe {

@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::sys::{syscall0, syscall1, SyscallNumber};
+use super::sys::{syscall1, SyscallNumber};
 
 /// 実行可能ファイルを起動する
 /// パスから新しいプロセスを起動し、そのPIDを返す
@@ -18,8 +18,23 @@ pub fn exec(path: &str) -> Result<u64, ()> {
         SyscallNumber::Exec as u64,
         path_buf.as_ptr() as u64,
     );
-    
-    if result == u64::MAX {
+
+    if (result as i64) < 0 {
+        Err(())
+    } else {
+        Ok(result)
+    }
+}
+
+/// メモリ上の ELF データから新プロセスを起動する
+pub fn exec_from_buffer(elf_data: &[u8]) -> Result<u64, ()> {
+    use super::sys::syscall2;
+    let result = syscall2(
+        SyscallNumber::ExecFromBuffer as u64,
+        elf_data.as_ptr() as u64,
+        elf_data.len() as u64,
+    );
+    if (result as i64) < 0 {
         Err(())
     } else {
         Ok(result)

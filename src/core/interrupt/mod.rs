@@ -6,9 +6,8 @@ pub mod idt;
 pub mod pic;
 pub mod spinlock;
 pub mod timer;
-pub mod syscall;
+mod syscall;
 
 pub use idt::init as init_idt;
 pub use pic::{init as init_pic, send_eoi};
 pub use timer::{disable_pit, enable_timer_interrupt, init_pit};
-pub use syscall::init_syscall;

@@ -1,4 +1,5 @@
 use crate::interrupt::spinlock::SpinLock;
+use x86_64::VirtAddr;
 
 use super::context::Context;
 use super::ids::{ProcessId, ThreadId, ThreadState};
@@ -42,26 +43,89 @@ pub struct Thread {
     fork_user_rflags: u64,
     /// TLS用 FS ベースレジスタ (arch_prctl ARCH_SET_FS で設定)
     fs_base: u64,
+    /// 現在システムコールコンテキスト中かどうか
+    in_syscall: bool,
+    /// KPTI 復帰用のユーザーCR3
+    syscall_user_cr3: u64,
+    /// 直近の SYSCALL 入口で保存したユーザー RIP
+    syscall_user_rip: u64,
+    /// 直近の SYSCALL 入口で保存したユーザー RSP
+    syscall_user_rsp: u64,
+    /// 直近の SYSCALL 入口で保存したユーザー RFLAGS
+    syscall_user_rflags: u64,
+    /// futex wait timeout で起床したことを示すフラグ
+    futex_timed_out: bool,
 }
 
 // Simple kernel stack pool for creating kernel stacks for threads
 const KSTACK_POOL_SIZE: usize = 4096 * 64; // 256 KiB
-static mut KSTACK_POOL: [u8; KSTACK_POOL_SIZE] = [0; KSTACK_POOL_SIZE];
-static NEXT_KSTACK_OFFSET: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+const KSTACK_PAGE_BYTES: usize = 4096;
+const KSTACK_GUARD_BYTES: usize = KSTACK_PAGE_BYTES;
 
-/// Allocate a kernel stack from the internal pool. Returns base address (bottom) of stack.
+#[repr(align(4096))]
+struct KernelStackPool([u8; KSTACK_POOL_SIZE]);
+
+static KSTACK_POOL: SpinLock<KernelStackPool> =
+    SpinLock::new(KernelStackPool([0; KSTACK_POOL_SIZE]));
+static NEXT_KSTACK_OFFSET: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+fn unmap_guard_page(guard_addr: u64) -> bool {
+    use x86_64::structures::paging::mapper::Translate;
+    use x86_64::structures::paging::mapper::TranslateError;
+    use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(guard_addr));
+    let mut page_table_lock = crate::mem::paging::PAGE_TABLE.lock();
+    let page_table = match page_table_lock.as_mut() {
+        Some(pt) => pt,
+        None => return false,
+    };
+
+    match page_table.translate_page(page) {
+        Ok(_) => {}
+        Err(TranslateError::PageNotMapped) => return true,
+        Err(_) => return false,
+    }
+
+    unsafe {
+        page_table
+            .unmap(page)
+            .map(|(_frame, flush)| {
+                flush.flush();
+                true
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// カーネルスタックを内部プールから割り当てます。
+/// Returns base address (bottom) of stack.
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
-    if size == 0 || size > KSTACK_POOL_SIZE {
+    if size == 0 || size > KSTACK_POOL_SIZE.saturating_sub(KSTACK_GUARD_BYTES) {
         return None;
     }
-    // align size to 16
-    let size = (size + 0xF) & !0xF;
-    let off = NEXT_KSTACK_OFFSET.fetch_add(size, core::sync::atomic::Ordering::SeqCst);
-    if off + size > KSTACK_POOL_SIZE {
+    // 1ページの未マップガードを挟むため、ページ境界で割り当てる
+    let size = size
+        .checked_add(KSTACK_PAGE_BYTES - 1)?
+        .checked_div(KSTACK_PAGE_BYTES)?
+        .checked_mul(KSTACK_PAGE_BYTES)?;
+    let alloc_size = size.checked_add(KSTACK_GUARD_BYTES)?;
+    let off = NEXT_KSTACK_OFFSET.fetch_add(alloc_size, core::sync::atomic::Ordering::SeqCst);
+    if off + alloc_size > KSTACK_POOL_SIZE {
         return None;
     }
-    let ptr = unsafe { &raw const KSTACK_POOL as *const _ as usize + off } as u64;
-    Some(ptr)
+
+    let pool_base = {
+        let pool = KSTACK_POOL.lock();
+        pool.0.as_ptr() as u64
+    };
+    let guard_addr = pool_base.checked_add(off as u64)?;
+    if !unmap_guard_page(guard_addr) {
+        return None;
+    }
+
+    guard_addr.checked_add(KSTACK_GUARD_BYTES as u64)
 }
 
 impl Thread {
@@ -105,7 +169,7 @@ impl Thread {
         context.rbp = stack_top;
 
         // エントリーポイントをripに設定
-        context.rip = entry_point as u64;
+        context.rip = entry_point as usize as u64;
 
         // RFLAGSの初期値（割り込み有効）
         context.rflags = 0x202; // IF (Interrupt Flag) = 1
@@ -132,6 +196,12 @@ impl Thread {
             user_stack: 0,
             fork_user_rflags: 0,
             fs_base: 0,
+            in_syscall: false,
+            syscall_user_cr3: 0,
+            syscall_user_rip: 0,
+            syscall_user_rsp: 0,
+            syscall_user_rflags: 0,
+            futex_timed_out: false,
         }
     }
 
@@ -165,12 +235,31 @@ impl Thread {
         extern "C" fn usermode_entry_trampoline() -> ! {
             // この関数は各スレッドが最初に実行される
             // スレッド固有のuser_entryとuser_stackを取得してジャンプする
-            let tid = current_thread_id().expect("No current thread");
-            let (entry, stack) = with_thread(tid, |thread| {
-                (thread.user_entry(), thread.user_stack())
-            }).expect("Thread not found");
+            let tid = match current_thread_id() {
+                Some(t) => t,
+                None => {
+                    crate::warn!("usermode_entry_trampoline: No current thread");
+                    loop {
+                        x86_64::instructions::hlt();
+                    }
+                }
+            };
+            let (entry, stack) =
+                match with_thread(tid, |thread| (thread.user_entry(), thread.user_stack())) {
+                    Some(v) => v,
+                    None => {
+                        crate::warn!("usermode_entry_trampoline: Thread not found");
+                        loop {
+                            x86_64::instructions::hlt();
+                        }
+                    }
+                };
 
-            crate::debug!("Jumping to usermode: entry={:#x}, stack={:#x}", entry, stack);
+            crate::debug!(
+                "Jumping to usermode: entry={:#x}, stack={:#x}",
+                entry,
+                stack
+            );
             unsafe {
                 crate::task::jump_to_usermode(entry, stack);
             }
@@ -207,6 +296,12 @@ impl Thread {
             user_stack,
             fork_user_rflags: 0,
             fs_base: 0,
+            in_syscall: false,
+            syscall_user_cr3: 0,
+            syscall_user_rip: 0,
+            syscall_user_rsp: 0,
+            syscall_user_rflags: 0,
+            futex_timed_out: false,
         }
     }
 
@@ -253,10 +348,31 @@ impl Thread {
         context.rbp = stack_top;
 
         extern "C" fn fork_child_trampoline() -> ! {
-            let tid = current_thread_id().expect("No current thread");
-            let (entry, stack, rflags, fs) = with_thread(tid, |thread| {
-                (thread.user_entry(), thread.user_stack(), thread.fork_user_rflags(), thread.fs_base())
-            }).expect("Thread not found");
+            let tid = match current_thread_id() {
+                Some(t) => t,
+                None => {
+                    crate::warn!("fork_child_trampoline: No current thread");
+                    loop {
+                        x86_64::instructions::hlt();
+                    }
+                }
+            };
+            let (entry, stack, rflags, fs) = match with_thread(tid, |thread| {
+                (
+                    thread.user_entry(),
+                    thread.user_stack(),
+                    thread.fork_user_rflags(),
+                    thread.fs_base(),
+                )
+            }) {
+                Some(v) => v,
+                None => {
+                    crate::warn!("fork_child_trampoline: Thread not found");
+                    loop {
+                        x86_64::instructions::hlt();
+                    }
+                }
+            };
             unsafe {
                 crate::task::usermode::jump_to_usermode_fork_child(entry, stack, rflags, fs);
             }
@@ -268,7 +384,10 @@ impl Thread {
         Self {
             id: ThreadId::new(),
             process_id,
-            name: [b'f',b'o',b'r',b'k',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            name: [
+                b'f', b'o', b'r', b'k', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
             name_len: 4,
             state: ThreadState::Ready,
             context,
@@ -278,12 +397,59 @@ impl Thread {
             user_stack: user_rsp,
             fork_user_rflags: user_rflags,
             fs_base,
+            in_syscall: false,
+            syscall_user_cr3: 0,
+            syscall_user_rip: user_rip,
+            syscall_user_rsp: user_rsp,
+            syscall_user_rflags: user_rflags,
+            futex_timed_out: false,
         }
     }
 
     /// TLS FSベースを設定
     pub fn set_fs_base(&mut self, base: u64) {
         self.fs_base = base;
+    }
+
+    /// システムコールコンテキスト中かどうか
+    pub fn in_syscall(&self) -> bool {
+        self.in_syscall
+    }
+
+    pub fn set_in_syscall(&mut self, in_syscall: bool) {
+        self.in_syscall = in_syscall;
+    }
+
+    pub fn syscall_user_cr3(&self) -> u64 {
+        self.syscall_user_cr3
+    }
+
+    pub fn set_syscall_user_cr3(&mut self, cr3: u64) {
+        self.syscall_user_cr3 = cr3;
+    }
+
+    pub fn syscall_user_context(&self) -> (u64, u64, u64) {
+        (
+            self.syscall_user_rip,
+            self.syscall_user_rsp,
+            self.syscall_user_rflags,
+        )
+    }
+
+    pub fn set_syscall_user_context(&mut self, rip: u64, rsp: u64, rflags: u64) {
+        self.syscall_user_rip = rip;
+        self.syscall_user_rsp = rsp;
+        self.syscall_user_rflags = rflags;
+    }
+
+    pub fn set_futex_timed_out(&mut self, timed_out: bool) {
+        self.futex_timed_out = timed_out;
+    }
+
+    pub fn take_futex_timed_out(&mut self) -> bool {
+        let timed_out = self.futex_timed_out;
+        self.futex_timed_out = false;
+        timed_out
     }
 
     /// スレッドIDを取得
@@ -324,6 +490,30 @@ impl Thread {
     pub fn kernel_stack_top(&self) -> u64 {
         (self.kernel_stack + self.kernel_stack_size as u64) & !0xF
     }
+
+    pub fn kernel_stack_bottom(&self) -> u64 {
+        self.kernel_stack
+    }
+
+    pub fn is_kernel_stack_guard_intact(&self) -> bool {
+        let (pool_start, pool_end) = {
+            let pool = KSTACK_POOL.lock();
+            let start = pool.0.as_ptr() as u64;
+            (start, start + KSTACK_POOL_SIZE as u64)
+        };
+        let stack_end = match self.kernel_stack.checked_add(self.kernel_stack_size as u64) {
+            Some(v) => v,
+            None => return false,
+        };
+        let pooled_stack = self.kernel_stack >= pool_start + KSTACK_GUARD_BYTES as u64
+            && stack_end <= pool_end
+            && self.kernel_stack >= KSTACK_GUARD_BYTES as u64;
+        if !pooled_stack {
+            return true;
+        }
+        let guard_start = self.kernel_stack - KSTACK_GUARD_BYTES as u64;
+        crate::mem::paging::translate_addr(VirtAddr::new(guard_start)).is_none()
+    }
 }
 
 impl core::fmt::Debug for Thread {
@@ -345,6 +535,8 @@ impl core::fmt::Debug for Thread {
 pub struct ThreadQueue {
     /// スレッドの配列（最大容量）
     threads: [Option<Thread>; Self::MAX_THREADS],
+    /// スロット世代番号（スロット再利用時に増加）
+    slot_generations: [u64; Self::MAX_THREADS],
     /// 現在のスレッド数
     count: usize,
 }
@@ -358,6 +550,7 @@ impl ThreadQueue {
         const INIT: Option<Thread> = None;
         Self {
             threads: [INIT; Self::MAX_THREADS],
+            slot_generations: [0; Self::MAX_THREADS],
             count: 0,
         }
     }
@@ -374,9 +567,13 @@ impl ThreadQueue {
         let id = thread.id();
 
         // 空きスロットを探す
-        for slot in &mut self.threads {
+        for (idx, slot) in self.threads.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(thread);
+                self.slot_generations[idx] = self.slot_generations[idx].wrapping_add(1);
+                if self.slot_generations[idx] == 0 {
+                    self.slot_generations[idx] = 1;
+                }
                 self.count += 1;
                 return Some(id);
             }
@@ -397,6 +594,22 @@ impl ThreadQueue {
         self.threads
             .iter_mut()
             .find_map(|slot| slot.as_mut().filter(|t| t.id() == id))
+    }
+
+    /// スレッドIDが存在するスロットインデックスを返す
+    pub fn slot_index(&self, id: ThreadId) -> Option<usize> {
+        self.threads
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|t| t.id() == id))
+    }
+
+    /// スレッドIDが存在するスロットと世代番号を返す
+    pub fn slot_index_and_generation(&self, id: ThreadId) -> Option<(usize, u64)> {
+        self.threads.iter().enumerate().find_map(|(idx, slot)| {
+            slot.as_ref()
+                .filter(|t| t.id() == id)
+                .map(|_| (idx, self.slot_generations[idx]))
+        })
     }
 
     /// スレッドを削除
@@ -510,11 +723,14 @@ impl ThreadQueue {
     }
 }
 
+impl Default for ThreadQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// グローバルスレッドキュー
 pub(super) static THREAD_QUEUE: SpinLock<ThreadQueue> = SpinLock::new(ThreadQueue::new());
-
-/// 現在実行中のスレッドID
-pub(super) static CURRENT_THREAD: SpinLock<Option<ThreadId>> = SpinLock::new(None);
 
 /// スレッドキューにスレッドを追加
 pub fn add_thread(thread: Thread) -> Option<ThreadId> {
@@ -570,12 +786,49 @@ pub fn thread_count() -> usize {
     THREAD_QUEUE.lock().count()
 }
 
+/// 指定した u64 IDのスレッドが存在するか確認 (IPC送信先検証用)
+pub fn thread_id_exists(id_val: u64) -> bool {
+    let queue = THREAD_QUEUE.lock();
+    let exists = queue.iter().any(|t| t.id().as_u64() == id_val);
+    exists
+}
+
+/// 指定したスレッドIDのスロットインデックスを返す
+pub fn thread_slot_index(id: ThreadId) -> Option<usize> {
+    THREAD_QUEUE.lock().slot_index(id)
+}
+
+/// 指定したu64スレッドIDのスロットインデックスを返す
+pub fn thread_slot_index_by_u64(id_val: u64) -> Option<usize> {
+    thread_slot_index(ThreadId::from_u64(id_val))
+}
+
+/// 指定したスレッドIDのスロットインデックスと世代番号を返す
+pub fn thread_slot_index_and_generation(id: ThreadId) -> Option<(usize, u64)> {
+    THREAD_QUEUE.lock().slot_index_and_generation(id)
+}
+
+/// 指定したu64スレッドIDのスロットインデックスと世代番号を返す
+pub fn thread_slot_index_and_generation_by_u64(id_val: u64) -> Option<(usize, u64)> {
+    thread_slot_index_and_generation(ThreadId::from_u64(id_val))
+}
+
 /// 現在実行中のスレッドIDを取得
 pub fn current_thread_id() -> Option<ThreadId> {
-    *CURRENT_THREAD.lock()
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let raw = crate::percpu::current_thread_raw_id();
+        if raw == 0 {
+            None
+        } else {
+            Some(ThreadId::from_u64(raw))
+        }
+    })
 }
 
 /// 現在実行中のスレッドIDを設定
 pub fn set_current_thread(id: Option<ThreadId>) {
-    *CURRENT_THREAD.lock() = id;
+    let raw = id.map(|v| v.as_u64()).unwrap_or(0);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::percpu::set_current_thread_raw_id(raw);
+    });
 }

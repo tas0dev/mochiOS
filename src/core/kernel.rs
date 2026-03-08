@@ -1,9 +1,9 @@
 use crate::result::handle_kernel_error;
 use crate::result::{Kernel, Process};
-use crate::{debug, info, sprintln, vprintln};
-use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
 use crate::syscall::exec::exec_kernel_with_name;
 use crate::util::log::LogLevel;
+use crate::{debug, info, sprintln, vprintln};
+use crate::{init::kinit, task, util, BootInfo, MemoryRegion, Result};
 
 const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 8;
 
@@ -19,7 +19,17 @@ fn kernel_main() -> ! {
 
     // core.serviceのみ起動（他のサービスはcore.serviceが管理）
     info!("Starting core.service");
-    exec_kernel_with_name("core.service", "core.service");
+    let manager_pid = exec_kernel_with_name("core.service", "core.service");
+    if manager_pid != 0
+        && task::with_process(task::ProcessId::from_u64(manager_pid), |_| ()).is_some()
+    {
+        crate::syscall::exec::register_service_manager_pid(manager_pid);
+    } else {
+        crate::warn!(
+            "Failed to register core.service as service manager (ret={:#x})",
+            manager_pid
+        );
+    }
 
     // カーネルはアイドル状態に入る
     info!("Kernel initialization complete. Entering idle loop...");
@@ -28,9 +38,8 @@ fn kernel_main() -> ! {
     }
 }
 
-/// カーネルエントリポイント
-#[no_mangle]
-pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
+/// カーネルエントリポイント（kernel binary から呼ばれる）
+pub fn kernel_entry(boot_info: &'static BootInfo) -> ! {
     let memory_map = match kinit(boot_info) {
         Ok(map) => map,
         Err(e) => {
@@ -47,7 +56,10 @@ pub extern "C" fn kernel_entry(boot_info: &'static BootInfo) -> ! {
 }
 
 /// カーネルメインプロセスの作成
-fn create_kernel_proc(boot_info: &'static BootInfo, memory_map: &'static [MemoryRegion]) -> Result<()> {
+fn create_kernel_proc(
+    boot_info: &'static BootInfo,
+    memory_map: &'static [MemoryRegion],
+) -> Result<()> {
     let kernel_process = task::Process::new("kernel", task::PrivilegeLevel::Core, None, 0);
     let kernel_pid = kernel_process.id();
 

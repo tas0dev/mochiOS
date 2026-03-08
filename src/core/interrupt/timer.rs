@@ -10,12 +10,19 @@ use x86_64::structures::idt::InterruptStackFrame;
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// タイマー割り込みハンドラ（IRQ0）
-/// 
+///
 /// ## Arguments
 /// - `_stack_frame`: 割り込み発生時のスタックフレーム
 pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // KPTI: ユーザーCR3で割り込みに入った場合、先にカーネルCR3へ切り替える
+    let entered_from_user = crate::syscall::syscall_entry::switch_to_kernel_page_table() != 0;
+
     // タイマーカウンタを増加
-    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    let ticks = TIMER_TICKS
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    crate::syscall::time::wake_due_sleepers(ticks);
+    crate::syscall::process::wake_due_futex_waiters(ticks);
 
     // スケジューラのティックを実行
     let should_schedule = crate::task::scheduler_tick();
@@ -29,10 +36,15 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptSta
     if should_schedule {
         crate::task::schedule_and_switch();
     }
+
+    // ユーザーから入ってきた場合は、復帰先スレッドに応じたユーザーCR3へ戻す
+    if entered_from_user {
+        crate::syscall::syscall_entry::switch_to_current_thread_user_page_table();
+    }
 }
 
 /// 現在のタイマーティック数を取得
-/// 
+///
 /// ## Returns
 /// - タイマーティック数（100回 = 1秒）
 pub fn get_ticks() -> u64 {

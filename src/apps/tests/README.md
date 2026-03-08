@@ -1,6 +1,6 @@
-# SwiftCore Test Suite
+# mochiOS Test Suite
 
-このディレクトリには、SwiftCoreの各種機能テストが含まれています。
+このディレクトリには、mochiOSの各種機能テストが含まれています。
 
 ## ビルド方法
 
