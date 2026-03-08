@@ -267,7 +267,7 @@ fn main() {
                 }
                 _ => {
                     println!("[DISK] Unknown OP: {}", req.op);
-                    resp.status = -38; // ENOSYS
+                    continue;
                 }
             }
 

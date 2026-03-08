@@ -75,9 +75,16 @@ impl DiskServiceDevice {
             return Err(VfsError::IoError);
         }
 
-        // レスポンスを受信
+        // レスポンスを受信（EAGAIN の場合はスピン、最大 1000 回）
         let mut resp_buf = [0u8; size_of::<DiskResponse>()];
-        let (sender, len) = ipc::ipc_recv(&mut resp_buf);
+        let (sender, len) = loop {
+            let (s, l) = ipc::ipc_recv(&mut resp_buf);
+            // EAGAIN sentinel: sender=0xFFFF_FFFF または len=0xFFFF_FFFD
+            if s == 0xFFFF_FFFF || l == 0xFFFF_FFFD {
+                continue;
+            }
+            break (s, l);
+        };
 
         if sender != self.disk_service_pid || (len as usize) < size_of::<DiskResponse>() {
             return Err(VfsError::IoError);
@@ -120,9 +127,15 @@ impl DiskServiceDevice {
             return Err(VfsError::IoError);
         }
 
-        // レスポンスを受信
+        // レスポンスを受信（EAGAIN の場合はスピン）
         let mut resp_buf = [0u8; size_of::<DiskResponse>()];
-        let (sender, len) = ipc::ipc_recv(&mut resp_buf);
+        let (sender, len) = loop {
+            let (s, l) = ipc::ipc_recv(&mut resp_buf);
+            if s == 0xFFFF_FFFF || l == 0xFFFF_FFFD {
+                continue;
+            }
+            break (s, l);
+        };
 
         if sender != self.disk_service_pid || (len as usize) < size_of::<DiskResponse>() {
             return Err(VfsError::IoError);

@@ -242,6 +242,7 @@ fn main() {
                 },
                 _ => {
                     println!("[FS] Unknown OP: {}", req.op);
+                    continue;
                 }
             }
 
