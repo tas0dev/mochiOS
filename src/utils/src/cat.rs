@@ -52,32 +52,33 @@ fn main() {
         io::close(fd as u64);
     }
 
+    println!();
     std::process::exit(exit_code);
 }
 
 fn print_meow() -> Meow {
     let cat_aa = r#"
     A____A
-    | ･ω･ |
-    |っ　ｃ|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    |　　　|
-    U￣ ￣U
+    | .w. |
+    |O   O|
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    |     |
+    U-----U
     "#;
 
     println!("{}", cat_aa);
