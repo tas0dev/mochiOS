@@ -694,10 +694,8 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
             entry
         );
 
-        return pid.as_u64();
+        pid.as_u64()
     }
-
-    crate::syscall::types::EINVAL
 }
 
 /// execve システムコール
@@ -826,8 +824,8 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     let stack_base_vaddr = stack_end_vaddr - (stack_size_pages as u64 * 4096);
 
     let args = [path];
-    let mut string_block: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-    let mut argv_offsets: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    let mut string_block: Vec<u8> = Vec::new();
+    let mut argv_offsets: Vec<usize> = Vec::new();
     for arg in args {
         argv_offsets.push(string_block.len());
         string_block.extend_from_slice(arg.as_bytes());
@@ -844,7 +842,7 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     let string_area_base = stack_end_vaddr - string_area_len as u64;
     let initial_rsp = stack_end_vaddr - total_size as u64;
 
-    let mut page_data: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut page_data: Vec<u8> = Vec::new();
     let page_offset = total_size % 4096;
     let unused_space = 4096 - page_offset;
     page_data.resize(unused_space, 0);
@@ -860,7 +858,7 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     page_data.extend_from_slice(&string_block);
     if page_data.len() != 4096 {
         crate::warn!("internal: page_data.len() != 4096: {}", page_data.len());
-        return crate::syscall::types::EINVAL;
+        return EINVAL;
     }
 
     if crate::mem::paging::map_and_copy_segment_to(

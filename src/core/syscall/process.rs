@@ -449,7 +449,7 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
         return ENOSYS;
     }
 
-    let current_tid = match crate::task::current_thread_id() {
+    let current_tid = match current_thread_id() {
         Some(tid) => tid,
         None => return ENOMEM,
     };
@@ -589,7 +589,7 @@ pub fn futex(uaddr: u64, op: u32, val: u64, timeout: u64) -> u64 {
             if uaddr == 0 {
                 return EFAULT;
             }
-            let current_tid = match crate::task::current_thread_id() {
+            let current_tid = match current_thread_id() {
                 Some(tid) => tid,
                 None => return ENOSYS,
             };
@@ -737,7 +737,7 @@ pub fn arch_prctl(code: u64, addr: u64) -> u64 {
                 crate::cpu::write_fs_base(addr);
             }
             // 現在のスレッドに FS base を記録 (コンテキストスイッチ時に復元するため)
-            if let Some(tid) = crate::task::current_thread_id() {
+            if let Some(tid) = current_thread_id() {
                 crate::task::with_thread_mut(tid, |t| t.set_fs_base(addr));
             }
             SUCCESS

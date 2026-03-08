@@ -134,7 +134,7 @@ pub struct PthreadAttr {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_init(attr: *mut PthreadAttr) -> i32 {
     if !attr.is_null() {
-        core::ptr::write_bytes(attr as *mut u8, 0, core::mem::size_of::<PthreadAttr>());
+        core::ptr::write_bytes(attr as *mut u8, 0, size_of::<PthreadAttr>());
     }
     0
 }

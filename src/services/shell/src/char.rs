@@ -1,4 +1,4 @@
-use swiftlib::vga;
+use swiftlib::{process, vga};
 
 
 const FONT_WIDTH: usize = 6;
@@ -83,6 +83,7 @@ pub struct Terminal {
     bg: u32,
     pub input_buf: [u8; 256],
     pub input_len: usize,
+    env: Vec<(String, String)>,
 }
 
 #[allow(unused)]
@@ -90,6 +91,8 @@ impl Terminal {
     pub fn new(fb_ptr: *mut u32, info: vga::FbInfo, font: Font) -> Self {
         let max_cols = info.width / FONT_WIDTH as u32;
         let max_rows = info.height / FONT_HEIGHT as u32;
+        let mut env = Vec::new();
+        env.push(("PATH".to_string(), "Binaries".to_string()));
         Terminal {
             fb_ptr,
             width: info.width,
@@ -104,7 +107,32 @@ impl Terminal {
             bg: 0x0000_0000, // 黒
             input_buf: [0u8; 256],
             input_len: 0,
+            env,
         }
+    }
+
+    fn get_env(&self, key: &str) -> Option<String> {
+        self.env.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    fn set_env(&mut self, key: &str, val: &str) {
+        if let Some(entry) = self.env.iter_mut().find(|(k, _)| k == key) {
+            entry.1 = val.to_string();
+        } else {
+            self.env.push((key.to_string(), val.to_string()));
+        }
+    }
+
+    /// PATH の各ディレクトリで `{cmd}.elf` を探す
+    fn find_in_path(&self, cmd: &str) -> Option<String> {
+        let path_val = self.get_env("PATH").unwrap_or_default();
+        for dir in path_val.split(':') {
+            let candidate = format!("{}/{}.elf", dir, cmd);
+            if std::fs::metadata(&candidate).is_ok() {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     fn put_pixel(&self, x: u32, y: u32, color: u32) {
@@ -219,7 +247,6 @@ impl Terminal {
         tmp[..len].copy_from_slice(&self.input_buf[..len]);
         let cmd_str: &str = core::str::from_utf8(&tmp[..len]).unwrap_or("").trim();
 
-        // コマンド内容をコピー（trim後のスライスはtmpを参照するため、ここで確定させる）
         let mut cmd_buf = [0u8; 256];
         let cmd_bytes = cmd_str.as_bytes();
         cmd_buf[..cmd_bytes.len()].copy_from_slice(cmd_bytes);
@@ -229,10 +256,19 @@ impl Terminal {
         self.input_len = 0;
 
         let cmd = core::str::from_utf8(&cmd_buf[..cmd_len]).unwrap_or("");
-        match cmd {
-            "" => {}
+        if cmd.is_empty() {
+            return;
+        }
+
+        // コマンド名と引数を分割
+        let mut parts = cmd.splitn(2, ' ');
+        let cmd_name = parts.next().unwrap_or("");
+        let _args = parts.next().unwrap_or("");
+
+        match cmd_name {
             "help" => {
-                self.write_str("Commands: help, clear, version\n");
+                self.write_str("Commands: help, clear, version, export\n");
+                self.write_str("Other commands are loaded from PATH (Binaries/*.elf)\n");
             }
             "clear" => {
                 self.clear_screen();
@@ -240,12 +276,38 @@ impl Terminal {
             "version" => {
                 self.write_str("mochiOS shell v0.1\n");
             }
-            _ => {
-                self.write_str("Unknown command: ");
-                for &b in &cmd_buf[..cmd_len] {
-                    self.write_byte(b);
+            "export" => {
+                // export VAR=VALUE
+                if let Some(eq) = _args.find('=') {
+                    let key = _args[..eq].trim();
+                    let val = _args[eq + 1..].trim();
+                    let key_owned = key.to_string();
+                    let val_owned = val.to_string();
+                    self.set_env(&key_owned, &val_owned);
+                } else {
+                    self.write_str("usage: export VAR=VALUE\n");
                 }
-                self.write_byte(b'\n');
+            }
+            _ => {
+                // PATH からコマンドを探して実行
+                let path = self.find_in_path(cmd_name).map(|s| s.to_string());
+                match path {
+                    Some(bin_path) => {
+                        match process::exec(&bin_path) {
+                            Ok(_pid) => {}
+                            Err(()) => {
+                                self.write_str("exec failed: ");
+                                self.write_str(&bin_path);
+                                self.write_byte(b'\n');
+                            }
+                        }
+                    }
+                    None => {
+                        self.write_str("command not found: ");
+                        self.write_str(cmd_name);
+                        self.write_byte(b'\n');
+                    }
+                }
             }
         }
     }

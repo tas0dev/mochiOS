@@ -78,8 +78,5 @@ pub fn get_thread_id_by_name(name_ptr: u64, name_len: u64) -> u64 {
         }
     });
 
-    match found {
-        Some(id) => id,
-        None => crate::syscall::ENOENT,
-    }
+    found.unwrap_or_else(|| crate::syscall::ENOENT)
 }

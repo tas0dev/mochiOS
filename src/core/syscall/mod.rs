@@ -13,6 +13,8 @@ pub mod time;
 pub mod vga;
 
 mod types;
+mod console;
+mod linux;
 
 use alloc::string::String;
 use alloc::vec::Vec;

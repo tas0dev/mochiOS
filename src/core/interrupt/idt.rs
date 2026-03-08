@@ -99,7 +99,7 @@ pub fn init() {
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: DIVIDE ERROR ({})",
         if is_user_mode {
@@ -158,7 +158,7 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: OVERFLOW ({})",
         if is_user_mode {
@@ -183,7 +183,7 @@ extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 extern "x86-interrupt" fn bound_range_exceeded_handler(stack_frame: InterruptStackFrame) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: BOUND RANGE EXCEEDED ({})",
         if is_user_mode {
@@ -467,7 +467,7 @@ fn dump_invalid_opcode_diagnostics(stack_frame: &InterruptStackFrame) {
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     // ユーザーモードかチェック（code_segmentのRPLビットを確認）
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
 
     error!(
         "EXCEPTION: INVALID OPCODE ({})",
@@ -494,7 +494,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: DEVICE NOT AVAILABLE ({})",
         if is_user_mode {
@@ -537,7 +537,7 @@ extern "x86-interrupt" fn double_fault_handler(
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 /// - `error_code`: TSS無効例外のエラーコード（通常は0だが、特定の条件下で値が設定されることがある）
 extern "x86-interrupt" fn invalid_tss_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: INVALID TSS ({})",
         if is_user_mode {
@@ -567,7 +567,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: SEGMENT NOT PRESENT ({})",
         if is_user_mode {
@@ -597,7 +597,7 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
 
     error!(
         "EXCEPTION: STACK SEGMENT FAULT ({})",
@@ -629,7 +629,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
 
     error!(
         "EXCEPTION: GENERAL PROTECTION FAULT ({})",
@@ -739,7 +739,7 @@ extern "x86-interrupt" fn page_fault_handler(
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 extern "x86-interrupt" fn x87_floating_point_handler(stack_frame: InterruptStackFrame) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: X87 FLOATING POINT ({})",
         if is_user_mode {
@@ -769,7 +769,7 @@ extern "x86-interrupt" fn alignment_check_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: ALIGNMENT CHECK ({})",
         if is_user_mode {
@@ -807,7 +807,7 @@ extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 extern "x86-interrupt" fn simd_floating_point_handler(stack_frame: InterruptStackFrame) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: SIMD FLOATING POINT ({})",
         if is_user_mode {
@@ -832,7 +832,7 @@ extern "x86-interrupt" fn simd_floating_point_handler(stack_frame: InterruptStac
 /// ## Arguments
 /// - `stack_frame`: 割り込み発生時のCPU状態を表す構造体
 extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFrame) {
-    let is_user_mode = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    let is_user_mode = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
     error!(
         "EXCEPTION: VIRTUALIZATION ({})",
         if is_user_mode {

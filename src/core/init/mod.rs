@@ -45,7 +45,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     // 以前は enable() が init_pit() より先だったため、PIT未初期化状態でタイマー割り込みが
     // 発生する可能性があった。正しい初期化順序: PIT→スケジューラ→タイマー→割り込み有効化
     interrupt::init_pit();
-    crate::task::init_scheduler();
+    task::init_scheduler();
     interrupt::enable_timer_interrupt();
 
     unsafe {

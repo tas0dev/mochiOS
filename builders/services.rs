@@ -135,7 +135,7 @@ pub fn build_service(
 
     // .cargo/config.toml にtargetが設定されているか確認
     let cargo_config = service_dir.join(".cargo/config.toml");
-    let cargo_config_text = std::fs::read_to_string(&cargo_config).ok();
+    let cargo_config_text = fs::read_to_string(&cargo_config).ok();
     let has_config_target = cargo_config_text
         .as_deref()
         .map(|s| s.contains("[build]") && s.contains("target"))

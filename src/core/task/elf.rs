@@ -288,7 +288,7 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     // final alignment: ensure %16 == 0
     sp &= !0xF;
 
-    thread.context_mut().rsp = sp as u64;
+    thread.context_mut().rsp = sp;
     thread.context_mut().rbp = 0;
 
     if add_thread(thread).is_none() {

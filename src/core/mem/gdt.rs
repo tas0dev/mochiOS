@@ -78,7 +78,7 @@ pub fn init() {
         // We modify the loaded GDT in-place: clear bit 54 (D/B) of the descriptor.
         {
             let mut gdtr: [u8; 10] = [0; 10];
-            core::arch::asm!("sgdt [{}]", in(reg) &mut gdtr, options(nostack));
+            asm!("sgdt [{}]", in(reg) &mut gdtr, options(nostack));
             let base = u64::from_le_bytes([
                 gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9],
             ]);

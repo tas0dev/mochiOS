@@ -30,12 +30,12 @@ const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text$A")]
-static __mochios_text_start_marker: u8 = 0;
+static __MOCHIOS_TEXT_START_MARKER: u8 = 0;
 #[cfg(target_os = "uefi")]
 #[used]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text$Z")]
-static __mochios_text_end_marker: u8 = 0;
+static __MOCHIOS_TEXT_END_MARKER: u8 = 0;
 
 #[cfg(not(target_os = "uefi"))]
 unsafe extern "C" {
@@ -46,8 +46,8 @@ unsafe extern "C" {
 #[cfg(target_os = "uefi")]
 fn kernel_text_range() -> (u64, u64) {
     (
-        core::ptr::addr_of!(__mochios_text_start_marker) as u64,
-        core::ptr::addr_of!(__mochios_text_end_marker) as u64,
+        core::ptr::addr_of!(__MOCHIOS_TEXT_START_MARKER) as u64,
+        core::ptr::addr_of!(__MOCHIOS_TEXT_END_MARKER) as u64,
     )
 }
 
@@ -608,9 +608,9 @@ pub fn map_and_copy_segment(
 
                 // 同じ物理フレームに新しいフラグで再マップ
                 let phys_frame =
-                    PhysFrame::containing_address(x86_64::PhysAddr::new(phys_frame_addr));
+                    PhysFrame::containing_address(PhysAddr::new(phys_frame_addr));
                 {
-                    let mut alloc_lock = crate::mem::frame::FRAME_ALLOCATOR.lock();
+                    let mut alloc_lock = frame::FRAME_ALLOCATOR.lock();
                     let alloc_ref = alloc_lock
                         .as_mut()
                         .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
@@ -688,10 +688,10 @@ pub fn create_user_page_table() -> Result<u64> {
             // L2[4] = 0x800000-0x9FFFFF はユーザーコード専用にクリア（exec時に再マップ）
             new_l2[4].set_unused();
 
-            new_l3[0].set_addr(x86_64::PhysAddr::new(new_l2_phys), kernel_l3[0].flags());
+            new_l3[0].set_addr(PhysAddr::new(new_l2_phys), kernel_l3[0].flags());
         }
 
-        new_l4[0].set_addr(x86_64::PhysAddr::new(new_l3_phys), kernel_l4[0].flags());
+        new_l4[0].set_addr(PhysAddr::new(new_l3_phys), kernel_l4[0].flags());
     }
 
     // カーネルヒープ (0x4444_4444_0000, L4[136]) をユーザーページテーブルと共有する。
@@ -1028,7 +1028,7 @@ pub fn unmap_range_in_table(table_phys: u64, addr: u64, length: u64) -> Result<(
 }
 
 fn deallocate_4k_frame_by_phys(frame_phys: u64) {
-    let frame = PhysFrame::<Size4KiB>::containing_address(x86_64::PhysAddr::new(frame_phys));
+    let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));
     let _ = frame::deallocate_frame(frame);
 }
 
@@ -1156,7 +1156,7 @@ pub fn map_physical_range_to_user(
     for i in 0..total_pages {
         let page =
             Page::<Size4KiB>::containing_address(VirtAddr::new(virt_start + i * 4096));
-        let frame = PhysFrame::containing_address(x86_64::PhysAddr::new(phys_start + i * 4096));
+        let frame = PhysFrame::containing_address(PhysAddr::new(phys_start + i * 4096));
 
         let map_result = unsafe {
             let mut alloc_lock = frame::FRAME_ALLOCATOR.lock();
@@ -1203,7 +1203,7 @@ pub fn switch_page_table(table_phys: u64) {
         return;
     }
     unsafe {
-        let frame = PhysFrame::<Size4KiB>::containing_address(x86_64::PhysAddr::new(table_phys));
+        let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(table_phys));
         Cr3::write(frame, Cr3Flags::empty());
     }
 }

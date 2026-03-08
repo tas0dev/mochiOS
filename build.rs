@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use builders::{
-    build_apps, build_newlib, build_service, build_user_libs, copy_newlib_libs, create_ext2_image,
+    build_apps, build_utils, build_newlib, build_service, build_user_libs, copy_newlib_libs, create_ext2_image,
     create_initfs_image, parse_service_index, setup_fs_layout,
 };
 
@@ -141,7 +141,7 @@ fn main() {
             use std::path::Path;
             if path != "libgcc_s.so.1" && Path::new(&path).exists() {
                 let dest = ramfs_dir.join("libgcc_s.so.1");
-                let _ = std::fs::copy(&path, &dest);
+                let _ = fs::copy(&path, &dest);
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::symlink;
@@ -160,7 +160,7 @@ fn main() {
                 ];
                 for c in &candidates {
                     if Path::new(c).exists() {
-                        let _ = std::fs::copy(c, ramfs_dir.join("libgcc_s.so.1"));
+                        let _ = fs::copy(c, ramfs_dir.join("libgcc_s.so.1"));
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::symlink;
@@ -210,6 +210,14 @@ fn main() {
     if apps_dir.is_dir() {
         println!("Building test applications");
         build_apps(&apps_dir, &fs_dir, "elf");
+    }
+
+    // ユーティリティコマンドをビルド
+    let utils_dir = manifest_dir.join("src/utils");
+    let binaries_dir = fs_dir.join("Binaries");
+    if utils_dir.is_dir() {
+        println!("Building utility commands");
+        build_utils(&utils_dir, &binaries_dir);
     }
 
     // initfs イメージを生成

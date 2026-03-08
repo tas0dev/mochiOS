@@ -110,7 +110,7 @@ unsafe fn load_initfs(bt: &BootServices, image_handle: Handle) -> (u64, usize) {
     let initfs_path = cstr16!(r"\System\initfs.img");
 
     // LoadedImage デバイスを優先
-    let handles: alloc::vec::Vec<uefi::Handle> = if let Ok(li) = bt.open_protocol_exclusive::<LoadedImage>(image_handle) {
+    let handles: alloc::vec::Vec<Handle> = if let Ok(li) = bt.open_protocol_exclusive::<LoadedImage>(image_handle) {
         if let Some(dev) = li.device() {
             drop(li);
             alloc::vec![dev]
@@ -135,7 +135,7 @@ unsafe fn load_initfs(bt: &BootServices, image_handle: Handle) -> (u64, usize) {
 unsafe fn load_rootfs(bt: &BootServices, image_handle: Handle) -> (u64, usize) {
     let rootfs_path = cstr16!(r"\System\rootfs.ext2");
 
-    let handles: alloc::vec::Vec<uefi::Handle> = if let Ok(li) = bt.open_protocol_exclusive::<LoadedImage>(image_handle) {
+    let handles: alloc::vec::Vec<Handle> = if let Ok(li) = bt.open_protocol_exclusive::<LoadedImage>(image_handle) {
         if let Some(dev) = li.device() {
             drop(li);
             alloc::vec![dev]
@@ -159,8 +159,8 @@ unsafe fn load_rootfs(bt: &BootServices, image_handle: Handle) -> (u64, usize) {
 /// 指定ハンドルから任意ファイルをページ単位でロードし (物理アドレス, サイズ) を返す
 unsafe fn try_load_raw(
     bt: &BootServices,
-    agent: uefi::Handle,
-    handle: uefi::Handle,
+    agent: Handle,
+    handle: Handle,
     path: &uefi::CStr16,
 ) -> Option<(u64, usize)> {
     let mut sfs = bt.open_protocol::<SimpleFileSystem>(
@@ -238,8 +238,8 @@ unsafe fn load_kernel(bt: &BootServices, image_handle: Handle) -> Option<u64> {
 /// 指定 SFS ハンドルから kernel.elf のロードを試みる
 unsafe fn try_load_from(
     bt: &BootServices,
-    agent: uefi::Handle,
-    handle: uefi::Handle,
+    agent: Handle,
+    handle: Handle,
     kernel_path: &uefi::CStr16,
 ) -> Option<u64> {
     // GetProtocol で非排他的に開く（ファームウェアが既に開いていても失敗しない）
@@ -357,14 +357,14 @@ unsafe fn try_load_from(
     // PIE としてロードアドレス == リンクアドレス (0x200000) なので load_base = 0
     let mut rela_addr = 0u64;
     let mut rela_size = 0usize;
-    let mut rela_ent = core::mem::size_of::<Elf64Rela>();
+    let mut rela_ent = size_of::<Elf64Rela>();
     for i in 0..hdr.e_phnum as usize {
         let phdr_offset = hdr.e_phoff as usize + i * hdr.e_phentsize as usize;
         let phdr = &*(buf.as_ptr().add(phdr_offset) as *const Elf64Phdr);
         if phdr.p_type != PT_DYNAMIC {
             continue;
         }
-        let dyn_count = phdr.p_memsz as usize / core::mem::size_of::<Elf64Dyn>();
+        let dyn_count = phdr.p_memsz as usize / size_of::<Elf64Dyn>();
         let dyn_ptr = phdr.p_paddr as *const Elf64Dyn;
         for j in 0..dyn_count {
             let entry = &*dyn_ptr.add(j);
@@ -494,7 +494,7 @@ unsafe fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Sta
         BOOT_INFO.stride = stride;
         BOOT_INFO.memory_map_addr = MEMORY_MAP.as_ptr() as u64;
         BOOT_INFO.memory_map_len = map_count;
-        BOOT_INFO.memory_map_entry_size = core::mem::size_of::<MemoryRegion>();
+        BOOT_INFO.memory_map_entry_size = size_of::<MemoryRegion>();
         // kernel_heap_addr はカーネル自身が entry.rs 内で設定する
         BOOT_INFO.kernel_heap_addr = 0;
         BOOT_INFO.initfs_addr = initfs_addr;

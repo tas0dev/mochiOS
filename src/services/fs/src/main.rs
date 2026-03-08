@@ -1,5 +1,5 @@
 use core::mem::size_of;
-
+use std::boxed;
 use swiftlib::ipc;
 use swiftlib::task;
 
@@ -35,7 +35,7 @@ impl OpenFile {
 static mut HANDLES: [OpenFile; MAX_HANDLES] = [OpenFile::new(); MAX_HANDLES];
 
 /// マウントされたファイルシステム（ext2 優先、InitFs フォールバック）
-static mut MOUNTED_FS: Option<std::boxed::Box<dyn FileSystem>> = None;
+static mut MOUNTED_FS: Option<Box<dyn FileSystem>> = None;
 
 /// READY通知
 const OP_NOTIFY_READY: u64 = 0xFF;
@@ -84,6 +84,7 @@ fn vfs_error_to_errno(err: VfsError) -> i64 {
     }
 }
 
+//noinspection ALL
 /// disk.service から ext2 をマウントする（失敗時は InitFs にフォールバック）
 fn mount_filesystem() {
     println!("[FS] mount_filesystem: searching for disk.service...");
@@ -102,10 +103,10 @@ fn mount_filesystem() {
         println!("[FS] Mounting ext2 from disk 1 via PID={}...", pid);
         let device = DiskServiceDevice::new(pid, 1); // disk 1 = Primary Slave = swiftCore.img
         println!("[FS] Calling Ext2Fs::new...");
-        match Ext2Fs::new(std::boxed::Box::new(device)) {
+        match Ext2Fs::new(Box::new(device)) {
             Ok(fs) => {
                 println!("[FS] ext2 filesystem mounted from ATA disk.");
-                unsafe { MOUNTED_FS = Some(std::boxed::Box::new(fs)); }
+                unsafe { MOUNTED_FS = Some(Box::new(fs)); }
                 return;
             }
             Err(e) => {
@@ -122,7 +123,7 @@ fn mount_filesystem() {
     if let Err(e) = initfs.create_sample_files() {
         println!("[FS] Warning: Failed to create sample files: {:?}", e);
     }
-    unsafe { MOUNTED_FS = Some(std::boxed::Box::new(initfs)); }
+    unsafe { MOUNTED_FS = Some(boxed::Box::new(initfs)); }
     println!("[FS] InitFS mounted as fallback.");
 }
 

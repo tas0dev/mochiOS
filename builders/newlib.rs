@@ -19,7 +19,7 @@ fn tool_exists(name: &str) -> bool {
     // Then probe well-known locations (needed when launched from IDEs that
     // inherit a stripped-down environment without linuxbrew in PATH)
     EXTRA_TOOL_PATHS.iter().any(|dir| {
-        let full = std::path::Path::new(dir).join(name);
+        let full = Path::new(dir).join(name);
         Command::new(&full).arg("--version").output().is_ok()
     })
 }
@@ -30,7 +30,7 @@ fn find_tool(name: &str) -> String {
         return name.to_string();
     }
     for dir in EXTRA_TOOL_PATHS {
-        let full = std::path::Path::new(dir).join(name);
+        let full = Path::new(dir).join(name);
         if Command::new(&full).arg("--version").output().is_ok() {
             return full.to_string_lossy().into_owned();
         }

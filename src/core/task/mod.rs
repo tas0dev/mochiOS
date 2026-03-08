@@ -8,6 +8,7 @@ pub mod process;
 pub mod scheduler;
 pub mod thread;
 pub mod usermode;
+mod elf;
 
 pub use context::{switch_context, switch_to_thread, Context};
 pub use ids::{PrivilegeLevel, ProcessId, ProcessState, ThreadId, ThreadState};

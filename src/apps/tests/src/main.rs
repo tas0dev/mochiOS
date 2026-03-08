@@ -1,5 +1,4 @@
 use core::ffi::c_char;
-use swiftlib::libc::*;
 use swiftlib::fs;
 
 extern "C" {

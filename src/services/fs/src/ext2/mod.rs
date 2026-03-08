@@ -160,7 +160,7 @@ impl Ext2Fs {
             / superblock.s_blocks_per_group) as usize;
         
         let gdt_block = if block_size == 1024 { 2 } else { 1 };
-        let gdt_size = num_groups * core::mem::size_of::<Ext2GroupDesc>();
+        let gdt_size = num_groups * size_of::<Ext2GroupDesc>();
         let gdt_blocks = (gdt_size + block_size - 1) / block_size;
         
         let mut gdt_buf = vec![0u8; gdt_blocks * block_size];
@@ -179,7 +179,7 @@ impl Ext2Fs {
 
         let mut group_desc_table = Vec::new();
         for i in 0..num_groups {
-            let offset = i * core::mem::size_of::<Ext2GroupDesc>();
+            let offset = i * size_of::<Ext2GroupDesc>();
             let desc: Ext2GroupDesc = unsafe {
                 core::ptr::read((gdt_buf.as_ptr() as usize + offset) as *const Ext2GroupDesc)
             };
@@ -394,7 +394,7 @@ impl FileSystem for Ext2Fs {
         // ディレクトリエントリを走査
         let mut offset = 0;
         while offset < size {
-            if offset + core::mem::size_of::<Ext2DirEntry>() > size {
+            if offset + size_of::<Ext2DirEntry>() > size {
                 break;
             }
 
@@ -407,7 +407,7 @@ impl FileSystem for Ext2Fs {
             }
 
             if entry.inode != 0 && entry.name_len > 0 {
-                let name_offset = offset + core::mem::size_of::<Ext2DirEntry>();
+                let name_offset = offset + size_of::<Ext2DirEntry>();
                 if name_offset + entry.name_len as usize <= size {
                     let entry_name = &data[name_offset..name_offset + entry.name_len as usize];
                     
@@ -514,7 +514,7 @@ impl FileSystem for Ext2Fs {
         let mut offset = 0;
         
         while offset < size {
-            if offset + core::mem::size_of::<Ext2DirEntry>() > size {
+            if offset + size_of::<Ext2DirEntry>() > size {
                 break;
             }
 
@@ -527,7 +527,7 @@ impl FileSystem for Ext2Fs {
             }
 
             if entry.inode != 0 && entry.name_len > 0 {
-                let name_offset = offset + core::mem::size_of::<Ext2DirEntry>();
+                let name_offset = offset + size_of::<Ext2DirEntry>();
                 if name_offset + entry.name_len as usize <= size {
                     let entry_name = &data[name_offset..name_offset + entry.name_len as usize];
                     
