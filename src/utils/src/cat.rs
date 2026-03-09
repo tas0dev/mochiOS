@@ -120,39 +120,3 @@ fn print_meow() -> Meow {
         _ => Meow::Purr,
     }
 }
-
-
-fn print_meow() -> Meow {
-    let cat_aa = r#"
-    A____A
-    | .w. |
-    |O   O|
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    |     |
-    U-----U
-    "#;
-
-    println!("{}", cat_aa);
-
-    let mut rand = RndGen::new(77697987);
-    match rand.next() % 3 {
-        0 => Meow::Meow,
-        1 => Meow::Mew,
-        _ => Meow::Purr,
-    }
-}
