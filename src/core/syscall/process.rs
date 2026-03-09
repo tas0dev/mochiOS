@@ -303,11 +303,18 @@ pub fn fork() -> u64 {
         return ENOSYS;
     }
 
+    // 親プロセスの FD テーブルを fork 前にクローンする
+    let child_fd_table = crate::task::with_process(parent_pid, |p| p.clone_fd_table_for_fork());
+
     let mut child_proc =
         crate::task::Process::new("fork", parent_priv, Some(parent_pid), parent_priority);
     child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
+    // 親の FD テーブルを子に継承する
+    if let Some(table) = child_fd_table {
+        child_proc.set_fd_table(table);
+    }
     let child_pid = child_proc.id();
     if crate::task::add_process(child_proc).is_none() {
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);

@@ -13,9 +13,9 @@ initfs/
 *.rlib
 
 # editor config files
-.idea/
-.vscode/
-.zed/
+.idea/**
+.vscode/**
+.zed/**
 
 # fossil version control
 *.fossil

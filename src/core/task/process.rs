@@ -2,6 +2,7 @@ use crate::interrupt::spinlock::SpinLock;
 
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
 use super::signal::SignalState;
+use super::fd_table::FdTable;
 
 /// プロセス構造体
 ///
@@ -39,6 +40,8 @@ pub struct Process {
     exit_code: Option<u64>,
     /// シグナル状態（ハンドラ・マスク・pending）— ヒープに置いてスタック消費を抑える
     signal_state: alloc::boxed::Box<SignalState>,
+    /// プロセスごとのファイルディスクリプタテーブル — ヒープに置いてスタック消費を抑える
+    fd_table: alloc::boxed::Box<FdTable>,
 }
 
 impl Process {
@@ -85,6 +88,7 @@ impl Process {
             priority,
             exit_code: None,
             signal_state: alloc::boxed::Box::new(SignalState::new()),
+            fd_table: FdTable::new_boxed(),
         }
     }
 
@@ -188,6 +192,26 @@ impl Process {
     /// シグナル状態への可変アクセス
     pub fn signal_state_mut(&mut self) -> &mut SignalState {
         &mut self.signal_state
+    }
+
+    /// FD テーブルへの読み取りアクセス
+    pub fn fd_table(&self) -> &FdTable {
+        &self.fd_table
+    }
+
+    /// FD テーブルへの可変アクセス
+    pub fn fd_table_mut(&mut self) -> &mut FdTable {
+        &mut self.fd_table
+    }
+
+    /// fork 用: FD テーブルをクローンして新しい Box を返す
+    pub fn clone_fd_table_for_fork(&self) -> alloc::boxed::Box<FdTable> {
+        self.fd_table.clone_for_fork()
+    }
+
+    /// FD テーブルを差し替える（fork の子プロセス初期化で使用）
+    pub fn set_fd_table(&mut self, table: alloc::boxed::Box<FdTable>) {
+        self.fd_table = table;
     }
 }
 

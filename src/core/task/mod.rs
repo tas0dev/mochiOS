@@ -3,6 +3,7 @@
 //! マルチタスク機能を提供（プロセスとスレッドの管理）
 
 pub mod context;
+pub mod fd_table;
 pub mod ids;
 pub mod process;
 pub mod scheduler;
@@ -34,3 +35,4 @@ pub use thread::{
 pub use usermode::{jump_to_usermode, jump_to_usermode_fork_child};
 pub use signal::{DefaultAction, SigAction, SignalState, default_action,
                  SIG_DFL, SIG_IGN, SIGCHLD, SIGINT, SIGKILL, SIGTERM};
+pub use fd_table::{FdTable, FileHandle, FD_BASE, PROCESS_MAX_FDS};

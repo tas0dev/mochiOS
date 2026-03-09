@@ -989,6 +989,9 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     }
     new_pt_guard.disarm();
 
+    // FD_CLOEXEC が設定された FD を exec 時に閉じる
+    crate::task::with_process_mut(pid, |p| p.fd_table_mut().close_cloexec_fds());
+
     // 新しいページテーブルに切り替えてジャンプ
     unsafe {
         crate::mem::paging::switch_page_table(new_pt_phys);
