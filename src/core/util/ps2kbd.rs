@@ -4,7 +4,6 @@
 //! 変換ロジックはユーザー空間 (shell.service) が担当する。
 
 use core::sync::atomic::{AtomicU64, Ordering};
-
 use super::fifo::Fifo;
 
 /// rawスキャンコードのバッファ (割り込みハンドラ ↔ syscall)

@@ -321,6 +321,8 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                 crate::task::mark_process_exited(pid, exit_code);
                 // 親プロセスが IPC でブロックしている可能性があるので起床させる
                 wake_parent_ipc_waiter(pid);
+                // 親プロセスへ SIGCHLD を送達する
+                crate::syscall::signal::deliver_sigchld_to_parent(pid);
             }
         }
 

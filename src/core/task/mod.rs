@@ -6,6 +6,7 @@ pub mod context;
 pub mod ids;
 pub mod process;
 pub mod scheduler;
+pub mod signal;
 pub mod thread;
 pub mod usermode;
 mod elf;
@@ -31,3 +32,5 @@ pub use thread::{
     with_thread_mut, Thread, ThreadQueue,
 };
 pub use usermode::{jump_to_usermode, jump_to_usermode_fork_child};
+pub use signal::{DefaultAction, SigAction, SignalState, default_action,
+                 SIG_DFL, SIG_IGN, SIGCHLD, SIGINT, SIGKILL, SIGTERM};

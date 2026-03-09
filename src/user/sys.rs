@@ -26,6 +26,8 @@ pub enum SyscallNumber {
     Brk = 12,
     /// シグナル処理（スタブ）
     RtSigaction = 13,
+    /// シグナルリターン
+    RtSigreturn = 15,
     /// シグナルマスク（スタブ）
     RtSigprocmask = 14,
     /// Fork
@@ -48,6 +50,8 @@ pub enum SyscallNumber {
     Futex = 202,
     /// exit_group
     ExitGroup = 231,
+    /// kill (シグナルを送る)
+    Kill = 62,
     /// getcwd
     Getcwd = 79,
 

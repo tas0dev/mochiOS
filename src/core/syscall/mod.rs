@@ -7,6 +7,7 @@ pub mod io_port;
 pub mod ipc;
 pub mod keyboard;
 pub mod process;
+pub mod signal;
 pub mod syscall_entry;
 pub mod task;
 pub mod time;
@@ -151,7 +152,7 @@ pub fn with_user_memory_access<R>(f: impl FnOnce() -> R) -> R {
 }
 
 pub use types::{
-    SyscallNumber, EAGAIN, EBADF, EFAULT, EINVAL, ENODATA, ENOENT, ENOSYS, EPERM, SUCCESS,
+    SyscallNumber, EAGAIN, EBADF, EFAULT, EINVAL, ENODATA, ENOENT, ENOSYS, EPERM, ESRCH, SUCCESS,
 };
 
 use core::arch::asm;
@@ -171,8 +172,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Mmap as u64 => process::mmap(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::Munmap as u64 => process::munmap(arg0, arg1),
         x if x == SyscallNumber::Brk as u64 => process::brk(arg0),
-        x if x == SyscallNumber::RtSigaction as u64 => ENOSYS,
-        x if x == SyscallNumber::RtSigprocmask as u64 => ENOSYS,
+        x if x == SyscallNumber::RtSigaction as u64 => signal::rt_sigaction(arg0, arg1, arg2),
+        x if x == SyscallNumber::RtSigprocmask as u64 => signal::rt_sigprocmask(arg0, arg1, arg2),
+        x if x == SyscallNumber::Kill as u64 => signal::kill(arg0, arg1),
         x if x == SyscallNumber::GetPid as u64 => process::getpid(),
         x if x == SyscallNumber::Clone as u64 => process::fork(),
         x if x == SyscallNumber::Fork as u64 => process::fork(),
@@ -304,6 +306,13 @@ pub unsafe extern "C" fn syscall_interrupt_handler() {
         // Rust 関数を呼び出し (16バイトアライン済み: 160バイトオフセット)
         "call {syscall_handler}",
 
+        // シグナル送達チェック + rt_sigreturn 処理
+        // signal_and_return(kstack=rsp, syscall_ret=rax) → 最終的な戻り値
+        // kstack[14] (=[rsp+112]) には元の syscall 番号が残っている
+        "mov rsi, rax",               // arg1 = syscall 戻り値
+        "mov rdi, rsp",               // arg0 = kstack（saved registers 先頭）
+        "call {signal_and_return}",   // signal 送達 or rt_sigreturn を処理、最終 rax を返す
+
         // 戻り値 (rax) をスタック上の保存された rax の位置に書き込む
         "mov [rsp + 112], rax",
 
@@ -334,6 +343,7 @@ pub unsafe extern "C" fn syscall_interrupt_handler() {
 
         save_ctx_fn = sym save_user_context_for_fork,
         syscall_handler = sym syscall_handler_rust,
+        signal_and_return = sym signal::signal_and_return,
     );
 }
 

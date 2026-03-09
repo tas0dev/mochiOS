@@ -1,6 +1,7 @@
 use crate::interrupt::spinlock::SpinLock;
 
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
+use super::signal::SignalState;
 
 /// プロセス構造体
 ///
@@ -36,6 +37,8 @@ pub struct Process {
     priority: u8,
     /// 終了コード（生存中はNone）
     exit_code: Option<u64>,
+    /// シグナル状態（ハンドラ・マスク・pending）
+    signal_state: SignalState,
 }
 
 impl Process {
@@ -81,6 +84,7 @@ impl Process {
             cwd_len: 1,
             priority,
             exit_code: None,
+            signal_state: SignalState::new(),
         }
     }
 
@@ -174,6 +178,16 @@ impl Process {
         let len = bytes.len().min(255);
         self.cwd[..len].copy_from_slice(&bytes[..len]);
         self.cwd_len = len;
+    }
+
+    /// シグナル状態への読み取りアクセス
+    pub fn signal_state(&self) -> &SignalState {
+        &self.signal_state
+    }
+
+    /// シグナル状態への可変アクセス
+    pub fn signal_state_mut(&mut self) -> &mut SignalState {
+        &mut self.signal_state
     }
 }
 

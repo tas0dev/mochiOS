@@ -24,6 +24,8 @@ pub enum SyscallNumber {
     Brk = 12,
     /// シグナル処理（スタブ）
     RtSigaction = 13,
+    /// シグナルリターン
+    RtSigreturn = 15,
     /// シグナルマスク（スタブ）
     RtSigprocmask = 14,
     /// clone (スレッド生成)
@@ -48,6 +50,8 @@ pub enum SyscallNumber {
     Exit = 60,
     /// exit_group (全スレッドを終了)
     ExitGroup = 231,
+    /// kill (シグナルを送る)
+    Kill = 62,
     /// getcwd
     Getcwd = 79,
 
@@ -106,6 +110,8 @@ pub const SUCCESS: u64 = 0;
 pub const EPERM: u64 = (-1i64) as u64;
 /// ファイルが見つからない
 pub const ENOENT: u64 = (-2i64) as u64;
+/// プロセスが見つからない
+pub const ESRCH: u64 = (-3i64) as u64;
 /// I/Oエラー
 pub const EIO: u64 = (-5i64) as u64;
 /// 不正なファイルディスクリプタ
