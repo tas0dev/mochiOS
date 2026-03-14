@@ -6,6 +6,29 @@ const FONT_HEIGHT: usize = 12;
 const ASCII_START: usize = 32;
 const ASCII_END: usize = 127;
 const GLYPH_COUNT: usize = ASCII_END - ASCII_START;
+const DEFAULT_FG: u32 = 0x00FF_FFFF;
+const DEFAULT_BG: u32 = 0x0000_0000;
+const ANSI_MAX_SEQ_LEN: usize = 32;
+const ANSI_COLOR_NORMAL: [u32; 8] = [
+    0x0000_0000, // black
+    0x00AA_0000, // red
+    0x0000_AA00, // green
+    0x00AA_AA00, // yellow
+    0x0000_00AA, // blue
+    0x00AA_00AA, // magenta
+    0x0000_AAAA, // cyan
+    0x00AA_AAAA, // white
+];
+const ANSI_COLOR_BRIGHT: [u32; 8] = [
+    0x0055_5555, // bright black (gray)
+    0x00FF_5555, // bright red
+    0x0055_FF55, // bright green
+    0x00FF_FF55, // bright yellow
+    0x0055_55FF, // bright blue
+    0x00FF_55FF, // bright magenta
+    0x0055_FFFF, // bright cyan
+    0x00FF_FFFF, // bright white
+];
 
 /// ASCII 文字ごとの 12 行ビットマップ (インデックス = codepoint - 32)
 pub struct Font {
@@ -84,6 +107,10 @@ pub struct Terminal {
     pub input_buf: [u8; 256],
     pub input_len: usize,
     env: Vec<(String, String)>,
+    ansi_esc_pending: bool,
+    ansi_csi_mode: bool,
+    ansi_seq: [u8; ANSI_MAX_SEQ_LEN],
+    ansi_seq_len: usize,
 }
 
 #[allow(unused)]
@@ -103,11 +130,15 @@ impl Terminal {
             max_cols,
             max_rows,
             font,
-            fg: 0x00FF_FFFF,
-            bg: 0x0000_0000,
+            fg: DEFAULT_FG,
+            bg: DEFAULT_BG,
             input_buf: [0u8; 256],
             input_len: 0,
             env,
+            ansi_esc_pending: false,
+            ansi_csi_mode: false,
+            ansi_seq: [0; ANSI_MAX_SEQ_LEN],
+            ansi_seq_len: 0,
         }
     }
 
@@ -240,9 +271,139 @@ impl Terminal {
         }
     }
 
+    fn ansi_color(index: u16, bright: bool) -> Option<u32> {
+        let i = index as usize;
+        if i >= ANSI_COLOR_NORMAL.len() {
+            return None;
+        }
+        if bright {
+            Some(ANSI_COLOR_BRIGHT[i])
+        } else {
+            Some(ANSI_COLOR_NORMAL[i])
+        }
+    }
+
+    fn apply_sgr_code(&mut self, code: u16) {
+        match code {
+            0 => {
+                self.fg = DEFAULT_FG;
+                self.bg = DEFAULT_BG;
+            }
+            30..=37 => {
+                if let Some(color) = Self::ansi_color(code - 30, false) {
+                    self.fg = color;
+                }
+            }
+            90..=97 => {
+                if let Some(color) = Self::ansi_color(code - 90, true) {
+                    self.fg = color;
+                }
+            }
+            39 => self.fg = DEFAULT_FG,
+            40..=47 => {
+                if let Some(color) = Self::ansi_color(code - 40, false) {
+                    self.bg = color;
+                }
+            }
+            100..=107 => {
+                if let Some(color) = Self::ansi_color(code - 100, true) {
+                    self.bg = color;
+                }
+            }
+            49 => self.bg = DEFAULT_BG,
+            _ => {}
+        }
+    }
+
+    fn parse_ascii_u16(bytes: &[u8]) -> Option<u16> {
+        let mut value = 0u16;
+        for &b in bytes {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            value = value.saturating_mul(10).saturating_add((b - b'0') as u16);
+        }
+        Some(value)
+    }
+
+    fn apply_sgr_sequence(&mut self) {
+        if self.ansi_seq_len == 0 {
+            self.apply_sgr_code(0);
+            return;
+        }
+
+        let mut start = 0usize;
+        for i in 0..=self.ansi_seq_len {
+            if i == self.ansi_seq_len || self.ansi_seq[i] == b';' {
+                let code = if i == start {
+                    0
+                } else {
+                    match Self::parse_ascii_u16(&self.ansi_seq[start..i]) {
+                        Some(v) => v,
+                        None => {
+                            start = i + 1;
+                            continue;
+                        }
+                    }
+                };
+                self.apply_sgr_code(code);
+                start = i + 1;
+            }
+        }
+    }
+
+    fn reset_ansi_parser(&mut self) {
+        self.ansi_esc_pending = false;
+        self.ansi_csi_mode = false;
+        self.ansi_seq_len = 0;
+    }
+
+    fn write_output_byte(&mut self, byte: u8) {
+        if self.ansi_esc_pending {
+            self.ansi_esc_pending = false;
+            if byte == b'[' {
+                self.ansi_csi_mode = true;
+                self.ansi_seq_len = 0;
+            } else if byte == 0x1B {
+                self.ansi_esc_pending = true;
+            } else {
+                self.write_byte(byte);
+            }
+            return;
+        }
+
+        if self.ansi_csi_mode {
+            if byte == b'm' {
+                self.apply_sgr_sequence();
+                self.reset_ansi_parser();
+                return;
+            }
+
+            if byte.is_ascii_digit() || byte == b';' {
+                if self.ansi_seq_len < self.ansi_seq.len() {
+                    self.ansi_seq[self.ansi_seq_len] = byte;
+                    self.ansi_seq_len += 1;
+                } else {
+                    self.reset_ansi_parser();
+                }
+                return;
+            }
+
+            self.reset_ansi_parser();
+            return;
+        }
+
+        if byte == 0x1B {
+            self.ansi_esc_pending = true;
+            return;
+        }
+
+        self.write_byte(byte);
+    }
+
     pub fn write_str(&mut self, s: &str) {
         for b in s.bytes() {
-            self.write_byte(b);
+            self.write_output_byte(b);
         }
     }
 
@@ -313,6 +474,40 @@ impl Terminal {
         self.flush();
     }
 
+    fn parse_command_line(line: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut quote: Option<u8> = None;
+
+        for b in line.bytes() {
+            match quote {
+                Some(q) => {
+                    if b == q {
+                        quote = None;
+                    } else {
+                        current.push(b as char);
+                    }
+                }
+                None => match b {
+                    b'"' | b'\'' => quote = Some(b),
+                    b' ' | b'\t' => {
+                        if !current.is_empty() {
+                            tokens.push(current);
+                            current = String::new();
+                        }
+                    }
+                    _ => current.push(b as char),
+                },
+            }
+        }
+
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+
+        tokens
+    }
+
     pub fn handle_line(&mut self) {
         // バッファから文字列をコピーして借用を解放
         let mut tmp = [0u8; 256];
@@ -333,10 +528,18 @@ impl Terminal {
             return;
         }
 
-        // コマンド名と引数を分割
-        let mut parts = cmd.splitn(2, ' ');
-        let cmd_name = parts.next().unwrap_or("");
-        let args = parts.next().unwrap_or("");
+        let tokens = Self::parse_command_line(cmd);
+        if tokens.is_empty() {
+            return;
+        }
+
+        let cmd_name = tokens[0].as_str();
+        let args = &tokens[1..];
+        let joined_args = if args.is_empty() {
+            String::new()
+        } else {
+            args.join(" ")
+        };
 
         match cmd_name {
             "help" => {
@@ -350,7 +553,7 @@ impl Terminal {
                 self.write_str("mochiOS shell v0.1\n");
             }
             "cd" => {
-                let target = if args.is_empty() { "/" } else { args };
+                let target = args.first().map(|s| s.as_str()).unwrap_or("/");
                 let ret = fs::chdir(target);
                 if ret != 0 {
                     self.write_str("cd: no such directory: ");
@@ -360,9 +563,9 @@ impl Terminal {
             }
             "export" => {
                 // export VAR=VALUE
-                if let Some(eq) = args.find('=') {
-                    let key = args[..eq].trim();
-                    let val = args[eq + 1..].trim();
+                if let Some(eq) = joined_args.find('=') {
+                    let key = joined_args[..eq].trim();
+                    let val = joined_args[eq + 1..].trim();
                     let key_owned = key.to_string();
                     let val_owned = val.to_string();
                     self.set_env(&key_owned, &val_owned);
@@ -375,12 +578,7 @@ impl Terminal {
                 let path = self.find_in_path(cmd_name).map(|s| s.to_string());
                 match path {
                     Some(bin_path) => {
-                        // 引数をスペース区切りで分割して子プロセスに渡す
-                        let arg_parts: Vec<&str> = if args.is_empty() {
-                            Vec::new()
-                        } else {
-                            args.split(' ').filter(|s| !s.is_empty()).collect()
-                        };
+                        let arg_parts: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                         let result = if arg_parts.is_empty() {
                             process::exec(&bin_path)
                         } else {

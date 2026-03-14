@@ -9,8 +9,7 @@ use builders::{
     copy_newlib_libs, create_ext2_image, create_initfs_image, parse_service_index, setup_fs_layout,
 };
 
-const BUSYBOX_URL: &str =
-    "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox";
+const BUSYBOX_URL: &str = "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox";
 
 /// カーネル ELF をビルドして fs/System/kernel.elf にコピーする
 fn build_kernel(manifest_dir: &PathBuf, fs_dir: &PathBuf, profile: &str) {
@@ -87,6 +86,11 @@ fn ensure_busybox_binary(fs_dir: &Path) -> Result<(), String> {
 
     let dest = binaries_dir.join("busybox.elf");
     let temp = binaries_dir.join("busybox.elf.download");
+
+    if dest.exists() {
+        println!("Busybox already exists at {}", dest.display());
+        return Ok(());
+    }
 
     println!("Downloading busybox from {}", BUSYBOX_URL);
 
