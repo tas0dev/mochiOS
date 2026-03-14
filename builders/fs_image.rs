@@ -171,6 +171,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 
 /// newlibライブラリをディレクトリにコピー
 pub fn copy_newlib_libs(libc_dir: &Path, dest_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("Failed to create {}: {}", dest_dir.display(), e))?;
+
     // crt0.oをコピー
     let crt0_src = libc_dir.join("crt0.o");
     let crt0_dest = dest_dir.join("crt0.o");

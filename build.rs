@@ -127,11 +127,11 @@ fn main() {
     build_user_libs(&user_src_dir, &libc_dir);
 
     // newlibライブラリをramfsとfsにコピー
-    copy_newlib_libs(&libc_dir, &ramfs_dir)
-        .expect("cargo:warning=Failed to copy newlib libs to ramfs");
-    copy_newlib_libs(&libc_dir, &fs_dir).expect("cargo:warning=Failed to copy newlib libs to fs");
+    copy_newlib_libs(&libc_dir, &ramfs_dir.join("Libraries"))
+        .expect("cargo:warning=Failed to copy newlib libs to ramfs/Libraries");
+    copy_newlib_libs(&libc_dir, &fs_dir.join("Libraries")).expect("cargo:warning=Failed to copy newlib libs to fs/Libraries");
 
-    // libgcc_sをramfsにコピー
+    // libgcc_sをfs/Librariesにコピー
     if let Ok(out) = std::process::Command::new("gcc")
         .arg("-print-file-name=libgcc_s.so.1")
         .output()
@@ -139,18 +139,20 @@ fn main() {
         if out.status.success() {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             use std::path::Path;
+            let libs_dir = fs_dir.join("Libraries");
+            let _ = fs::create_dir_all(&libs_dir);
             if path != "libgcc_s.so.1" && Path::new(&path).exists() {
-                let dest = ramfs_dir.join("libgcc_s.so.1");
+                let dest = libs_dir.join("libgcc_s.so.1");
                 let _ = fs::copy(&path, &dest);
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::symlink;
-                    let link = ramfs_dir.join("libgcc_s.so");
+                    let link = libs_dir.join("libgcc_s.so");
                     if !link.exists() {
                         let _ = symlink("libgcc_s.so.1", &link);
                     }
                 }
-                println!("Copied libgcc_s to ramfs: {}", path);
+                println!("Copied libgcc_s to fs/Libraries: {}", path);
             } else {
                 let candidates = [
                     "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
@@ -160,16 +162,16 @@ fn main() {
                 ];
                 for c in &candidates {
                     if Path::new(c).exists() {
-                        let _ = fs::copy(c, ramfs_dir.join("libgcc_s.so.1"));
+                        let _ = fs::copy(c, libs_dir.join("libgcc_s.so.1"));
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::symlink;
-                            let link = ramfs_dir.join("libgcc_s.so");
+                            let link = libs_dir.join("libgcc_s.so");
                             if !link.exists() {
                                 let _ = symlink("libgcc_s.so.1", &link);
                             }
                         }
-                        println!("Copied libgcc_s to ramfs from {}", c);
+                        println!("Copied libgcc_s to fs/Libraries from {}", c);
                         break;
                     }
                 }

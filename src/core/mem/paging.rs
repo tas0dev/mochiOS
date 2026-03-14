@@ -249,6 +249,8 @@ pub fn init(boot_info: &'static crate::BootInfo) {
         // カーネルの元のページテーブルアドレスを保存
         KERNEL_L4_PHYS.store(l4_table_addr, core::sync::atomic::Ordering::Relaxed);
     }
+    // フレームアロケータに HHDM オフセットを伝えてフリーリストを有効化
+    super::frame::set_phys_offset(physical_memory_offset);
     crate::debug!("Switched CR3 successfully.");
 
     crate::debug!(
@@ -325,6 +327,71 @@ pub fn translate_addr(addr: VirtAddr) -> Option<PhysAddr> {
 
     let page_table = PAGE_TABLE.lock();
     page_table.as_ref()?.translate_addr(addr)
+}
+
+/// 指定したページテーブル上で仮想アドレスを物理アドレスへ変換する
+pub fn translate_addr_in_table(
+    table_phys: u64,
+    addr: VirtAddr,
+) -> Option<(PhysAddr, PageTableFlags)> {
+    let phys_off = physical_memory_offset()?;
+    if (table_phys & 0xfff) != 0 {
+        return None;
+    }
+
+    let l4_vaddr = table_phys.checked_add(phys_off)?;
+    let l4 = unsafe { &*(l4_vaddr as *const PageTable) };
+    let l4i = addr.p4_index();
+    let l4e = &l4[l4i];
+    if l4e.is_unused() || !l4e.flags().contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+
+    let l3_vaddr = l4e.addr().as_u64().checked_add(phys_off)?;
+    let l3 = unsafe { &*(l3_vaddr as *const PageTable) };
+    let l3i = addr.p3_index();
+    let l3e = &l3[l3i];
+    let l3f = l3e.flags();
+    if l3e.is_unused() || !l3f.contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+    if l3f.contains(PageTableFlags::HUGE_PAGE) {
+        let page_off = addr.as_u64() & ((1u64 << 30) - 1);
+        return Some((PhysAddr::new(l3e.addr().as_u64().checked_add(page_off)?), l3f));
+    }
+
+    let l2_vaddr = l3e.addr().as_u64().checked_add(phys_off)?;
+    let l2 = unsafe { &*(l2_vaddr as *const PageTable) };
+    let l2i = addr.p2_index();
+    let l2e = &l2[l2i];
+    let l2f = l2e.flags();
+    if l2e.is_unused() || !l2f.contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+    if l2f.contains(PageTableFlags::HUGE_PAGE) {
+        let page_off = addr.as_u64() & ((1u64 << 21) - 1);
+        return Some((PhysAddr::new(l2e.addr().as_u64().checked_add(page_off)?), l2f));
+    }
+
+    let l1_vaddr = l2e.addr().as_u64().checked_add(phys_off)?;
+    let l1 = unsafe { &*(l1_vaddr as *const PageTable) };
+    let l1i = addr.p1_index();
+    let l1e = &l1[l1i];
+    let l1f = l1e.flags();
+    if l1e.is_unused() || !l1f.contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+
+    let page_off = addr.as_u64() & 0xfff;
+    Some((PhysAddr::new(l1e.addr().as_u64().checked_add(page_off)?), l1f))
+}
+
+/// 指定したページテーブル上の仮想アドレスからu64値を読み出す
+pub fn read_u64_in_table(table_phys: u64, vaddr: u64) -> Option<u64> {
+    let phys_off = physical_memory_offset()?;
+    let (phys, _) = translate_addr_in_table(table_phys, VirtAddr::new(vaddr))?;
+    let ptr = phys.as_u64().checked_add(phys_off)? as *const u64;
+    Some(unsafe { core::ptr::read_unaligned(ptr) })
 }
 
 /// 物理メモリオフセットを取得
@@ -629,6 +696,56 @@ pub fn map_and_copy_segment(
 
 pub use x86_64::PhysAddr;
 
+fn clone_kernel_l1_table_without_user_entries(src_l1_phys: u64, phys_off: u64) -> Result<u64> {
+    let src_l1 = unsafe { &*((src_l1_phys + phys_off) as *const PageTable) };
+    let new_l1_frame = frame::allocate_frame()?;
+    let new_l1_phys = new_l1_frame.start_address().as_u64();
+    let new_l1 = unsafe { &mut *((new_l1_phys + phys_off) as *mut PageTable) };
+    new_l1.zero();
+
+    for i in 0..512 {
+        let entry = src_l1[i].clone();
+        let flags = entry.flags();
+        if entry.is_unused() || !flags.contains(PageTableFlags::PRESENT) {
+            continue;
+        }
+        if flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+            continue;
+        }
+        new_l1[i] = entry;
+    }
+
+    Ok(new_l1_phys)
+}
+
+fn clone_kernel_l2_table_without_user_entries(src_l2_phys: u64, phys_off: u64) -> Result<u64> {
+    let src_l2 = unsafe { &*((src_l2_phys + phys_off) as *const PageTable) };
+    let new_l2_frame = frame::allocate_frame()?;
+    let new_l2_phys = new_l2_frame.start_address().as_u64();
+    let new_l2 = unsafe { &mut *((new_l2_phys + phys_off) as *mut PageTable) };
+    new_l2.zero();
+
+    for i in 0..512 {
+        let entry = src_l2[i].clone();
+        let flags = entry.flags();
+        if entry.is_unused() || !flags.contains(PageTableFlags::PRESENT) {
+            continue;
+        }
+
+        if flags.contains(PageTableFlags::HUGE_PAGE) {
+            if !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+                new_l2[i] = entry;
+            }
+            continue;
+        }
+
+        let new_l1_phys = clone_kernel_l1_table_without_user_entries(entry.addr().as_u64(), phys_off)?;
+        new_l2[i].set_addr(PhysAddr::new(new_l1_phys), flags);
+    }
+
+    Ok(new_l2_phys)
+}
+
 /// ユーザープロセス用の新しいL4ページテーブルを作成する
 ///
 /// カーネルのページテーブル階層を部分的にコピーして、カーネルメモリには
@@ -673,20 +790,7 @@ pub fn create_user_page_table() -> Result<u64> {
         // L3[0]: 最初の1GB（カーネルコード・スタックとユーザーコードが混在）
         if !kernel_l3[0].is_unused() {
             let kernel_l2_phys = kernel_l3[0].addr().as_u64();
-            let kernel_l2 = unsafe { &*((kernel_l2_phys + phys_off) as *const PageTable) };
-
-            let new_l2_frame = frame::allocate_frame()?;
-            let new_l2_phys = new_l2_frame.start_address().as_u64();
-            let new_l2 = unsafe { &mut *((new_l2_phys + phys_off) as *mut PageTable) };
-            new_l2.zero();
-
-            // カーネルのL2をすべてコピー（L2[0] = 0-2MB の恒等マップも含む）
-            // これによりsyscall中にカーネルが低アドレス物理フレームにアクセスできる
-            for i in 0..512 {
-                new_l2[i] = kernel_l2[i].clone();
-            }
-            // L2[4] = 0x800000-0x9FFFFF はユーザーコード専用にクリア（exec時に再マップ）
-            new_l2[4].set_unused();
+            let new_l2_phys = clone_kernel_l2_table_without_user_entries(kernel_l2_phys, phys_off)?;
 
             new_l3[0].set_addr(PhysAddr::new(new_l2_phys), kernel_l3[0].flags());
         }
@@ -955,7 +1059,8 @@ pub fn map_and_copy_segment_to(
                                 .unmap(page)
                                 .map_err(|_| Kernel::Memory(Memory::InvalidAddress))?;
                             flush.ignore();
-                            let _ = frame::deallocate_frame(old_frame);
+                            // 既存の supervisor-only マッピングはカーネル共有フレームなので解放しない。
+                            let _ = old_frame;
                             let mut alloc_lock2 = frame::FRAME_ALLOCATOR.lock();
                             let alloc_ref2 = alloc_lock2
                                 .as_mut()

@@ -151,35 +151,29 @@ pub fn kpti_leave_for_current_thread() {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // ユーザー RSP を退避（r9 は syscall の6番目引数で未使用）
-        "mov r9, rsp",
+        // ユーザーRSPを per-CPU 一時領域へ退避してからカーネルスタックへ切り替える
         "swapgs",
-
-        // ユーザー FS ベースを IA32_FS_BASE MSR から読み込んで一時退避
-        // (RDFSBASE は FSGSBASE 未対応CPUで #UD になるため MSR を使用)
-        "mov ecx, 0xC0000100",  // IA32_FS_BASE MSR
-        "rdmsr",
-        "shl rdx, 32",
-        "or rdx, rax",
-
-        // カーネルスタックに切り替え
+        "mov qword ptr gs:[{user_rsp_tmp_off}], rsp",
         "mov rsp, qword ptr gs:[{sys_rsp_off}]",
-        // ユーザーFSベースを保存
-        "push rdx",
-
-        // カーネルスタック上にコンテキストを保存
-        // SYSRETQ に必要: RCX (user RIP), R11 (user RFLAGS), user RSP
-        "push rcx",                         // user RIP
-        "push r11",                         // user RFLAGS
-        "push r9",                          // user RSP
-
-        // Callee-saved レジスタ保存
+        // ユーザー復帰時に必要な GPR を保存（Linux syscall ABI: RCX/R11以外も保持）
+        "push rax",                             // syscall 番号
+        "push rdi",                             // arg0
+        "push rsi",                             // arg1
+        "push rdx",                             // arg2
+        "push r10",                             // arg3
+        "push r8",                              // arg4
+        "push r9",                              // arg5
+        "push rcx",                             // user RIP
+        "push r11",                             // user RFLAGS
         "push rbp",
         "push rbx",
         "push r12",
         "push r13",
         "push r14",
         "push r15",
+        "push qword ptr gs:[{user_rsp_tmp_off}]", // user RSP
+        // call 前の 16-byte alignment を満たす
+        "sub rsp, 8",
 
         // カーネルデータセグメントを設定
         "mov cx, 0x10",
@@ -187,31 +181,19 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov es, cx",
 
         // fork/clone のときだけ現在スレッドへユーザーコンテキストを記録
+        // align slot ありレイアウト:
+        // [rsp+8]=user RSP, [rsp+64]=user RFLAGS, [rsp+72]=user RIP, [rsp+128]=syscall num
+        "mov rax, [rsp + 128]",
         "cmp rax, 56",
         "je 3f",
         "cmp rax, 57",
         "jne 4f",
         "3:",
-        // caller-saved を退避してから helper を呼ぶ
-        "push rax",
-        "push rdi",
-        "push rsi",
-        "push rdx",
-        "push r10",
-        "push r8",
-        // stack layout after 15 pushes:
-        // [rsp+112]=user RIP, [rsp+104]=user RFLAGS, [rsp+96]=user RSP
         "mov rdi, rax",
-        "mov rsi, [rsp + 112]",
-        "mov rdx, [rsp + 96]",
-        "mov rcx, [rsp + 104]",
+        "mov rsi, [rsp + 72]",  // user RIP
+        "mov rdx, [rsp + 8]",   // user RSP
+        "mov rcx, [rsp + 64]",  // user RFLAGS
         "call {save_ctx_fn}",
-        "pop r8",
-        "pop r10",
-        "pop rdx",
-        "pop rsi",
-        "pop rdi",
-        "pop rax",
         "4:",
 
         // 割り込みを再有効化 (カーネルスタックに切り替え済みなので安全)
@@ -219,62 +201,79 @@ pub unsafe extern "C" fn syscall_entry() {
 
         // syscall 引数を System V ABI に並べ替えて dispatch を呼ぶ
         // dispatch(num, arg0, arg1, arg2, arg3, arg4)
-        // SysV:   rdi,  rsi,  rdx,  rcx,  r8,  r9
-        // 入力:   rax,  rdi,  rsi,  rdx,  r10, r8
-        "mov r9,  r8",          // arg4 → r9
-        "mov r8,  r10",         // arg3 → r8  (Linux: arg3 は r10)
-        "mov rcx, rdx",         // arg2 → rcx
-        "mov rdx, rsi",         // arg1 → rdx
-        "mov rsi, rdi",         // arg0 → rsi
-        "mov rdi, rax",         // num  → rdi
+        // align slot ありレイアウト:
+        // [rsp+128]=num, [rsp+120]=arg0, [rsp+112]=arg1, [rsp+104]=arg2, [rsp+96]=arg3, [rsp+88]=arg4
+        "mov rdi, [rsp + 128]",
+        "mov rsi, [rsp + 120]",
+        "mov rdx, [rsp + 112]",
+        "mov rcx, [rsp + 104]",
+        "mov r8,  [rsp + 96]",
+        "mov r9,  [rsp + 88]",
         "call {dispatch}",
 
         // 割り込みを禁止 (ユーザーコンテキスト復元前)
         "cli",
+        // 戻り値を保存スロットへ退避（元 num スロットを再利用）
+        "mov [rsp + 128], rax",
+        // align slot を捨てる
+        "add rsp, 8",
 
-        // Callee-saved レジスタ復元
+        // 保存したユーザーコンテキストを復元
+        "pop rax",              // user RSP（一時）
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
         "pop rbx",
         "pop rbp",
+        "pop r11",              // user RFLAGS (SYSRET 用)
+        "pop rcx",              // user RIP (SYSRET 用)
+        "mov qword ptr gs:[{user_rsp_tmp_off}], rax",
 
-        // ユーザーコンテキスト復元 (SYSRETQ に必要: rcx=RIP, r11=RFLAGS, rsp=RSP)
-        "pop rdx",   // user RSP を一時 rdx に
-        "mov r9, rdx",
-        "pop r11",   // user RFLAGS
-        "pop rcx",   // user RIP
-        "pop rax",   // saved user FS base
-
-        // ユーザー FS ベースを IA32_FS_BASE MSR に復元 (TLS)
+        // ユーザー FS ベースを現在スレッド状態から再取得して復元 (TLS)
+        "push rcx",
+        "push r11",
+        "push rax",
+        "call {fs_base_fn}",
         "mov r8, rax",
         "mov rdx, rax",
         "shr rdx, 32",
-        "mov ecx, 0xC0000100",  // IA32_FS_BASE MSR
+        "mov ecx, 0xC0000100",  // IA32_FS_BASE MSR (ecx を上書きしても安全)
         "mov rax, r8",
         "wrmsr",
+        "pop rax",
+        "pop r11",
+        "pop rcx",
 
         // CVE-2012-0217 緩和策: SYSRETQ 前にユーザー RIP/RSP の正規アドレスチェック
         // Intel CPU では SYSRETQ 実行時にRCX/RSPが非正規アドレス（bit 63:47 が不一致）だと
         // Ring 0 で #GP が発生し、攻撃者が制御フローを握る恐れがある (CVE-2012-0217)
         // ユーザー空間の正規アドレス: bit 63:47 = 0b000...0 (0x0000_7FFF_FFFF_FFFF 以下)
-        "mov rax, r9",
+        "mov rax, qword ptr gs:[{user_rsp_tmp_off}]",
         "sar rax, 47",          // 算術右シフト47bit: 正規なら全ビット0
         "test rax, rax",
         "jnz 2f",               // 非正規アドレス → プロセスを終了
-        "mov rax, rcx",
-        "sar rax, 47",
-        "test rax, rax",
+        "mov rdx, rcx",
+        "sar rdx, 47",
+        "test rdx, rdx",
         "jnz 2f",
 
-        // ユーザーデータセグメントを設定 (ax は自由なので使用)
-        "mov ax, 0x1b",
-        "mov ds, ax",
-        "mov es, ax",
+        // ユーザーデータセグメントを再設定（後で rdx は復元される）
+        "mov dx, 0x1b",
+        "mov ds, dx",
+        "mov es, dx",
+
+        // Linux syscall ABI に合わせて volatile 引数レジスタも復元
+        "pop r9",
+        "pop r8",
+        "pop r10",
+        "pop rdx",
+        "pop rsi",
+        "pop rdi",
+        "pop rax",              // syscall 戻り値
 
         // ユーザー RSP に切り替えて SYSRETQ
-        "mov rsp, r9",
+        "mov rsp, qword ptr gs:[{user_rsp_tmp_off}]",
         "swapgs",
         "sysretq",
 
@@ -284,10 +283,21 @@ pub unsafe extern "C" fn syscall_entry() {
         "call {kill_fn}",
 
         sys_rsp_off = const crate::percpu::GS_SYSCALL_KERNEL_RSP_OFFSET,
+        user_rsp_tmp_off = const crate::percpu::GS_SYSCALL_USER_RSP_TMP_OFFSET,
         save_ctx_fn = sym super::save_user_context_for_fork,
+        fs_base_fn = sym current_thread_fs_base_for_sysret,
         dispatch   = sym super::syscall_dispatch_sysv,
         kill_fn    = sym kill_non_canonical_rsp,
     );
+}
+
+extern "sysv64" fn current_thread_fs_base_for_sysret() -> u64 {
+    if let Some(tid) = crate::task::current_thread_id() {
+        if let Some(fs_base) = crate::task::with_thread(tid, |t| t.fs_base()) {
+            return fs_base;
+        }
+    }
+    unsafe { crate::cpu::read_fs_base() }
 }
 
 /// CVE-2012-0217 緩和策: 非正規RIP/RSPを持つプロセスを終了させる

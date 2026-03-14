@@ -176,6 +176,14 @@ pub fn brk(addr: u64) -> u64 {
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
+        crate::info!(
+            "brk(pid={:?}, process='{}'): req={:#x}, heap_start={:#x}, heap_end={:#x}",
+            pid,
+            process.name(),
+            addr,
+            process.heap_start(),
+            process.heap_end()
+        );
         if process.heap_start() == 0 {
             let default_heap_base = 0x4000_0000;
             process.set_heap_start(default_heap_base);
@@ -251,9 +259,18 @@ pub fn brk(addr: u64) -> u64 {
     });
 
     match result {
-        Some(Ok(addr)) => addr,
-        Some(Err(err)) => err,
-        None => ENOSYS,
+        Some(Ok(addr)) => {
+            crate::info!("brk(pid={:?}) -> {:#x}", pid, addr);
+            addr
+        }
+        Some(Err(err)) => {
+            crate::info!("brk(pid={:?}) -> err {:#x}", pid, err);
+            err
+        }
+        None => {
+            crate::info!("brk(pid={:?}) -> ENOSYS", pid);
+            ENOSYS
+        }
     }
 }
 
@@ -303,11 +320,18 @@ pub fn fork() -> u64 {
         return ENOSYS;
     }
 
+    // 親プロセスの FD テーブルを fork 前にクローンする
+    let child_fd_table = crate::task::with_process(parent_pid, |p| p.clone_fd_table_for_fork());
+
     let mut child_proc =
         crate::task::Process::new("fork", parent_priv, Some(parent_pid), parent_priority);
     child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
+    // 親の FD テーブルを子に継承する
+    if let Some(table) = child_fd_table {
+        child_proc.set_fd_table(table);
+    }
     let child_pid = child_proc.id();
     if crate::task::add_process(child_proc).is_none() {
         let _ = crate::mem::paging::destroy_user_page_table(child_pt);
@@ -465,6 +489,16 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
     };
 
     let result = crate::task::with_process_mut(pid, |process| {
+        crate::info!(
+            "mmap(pid={:?}, process='{}'): addr={:#x}, len={:#x}, flags={:#x}, heap_start={:#x}, heap_end={:#x}",
+            pid,
+            process.name(),
+            addr,
+            length,
+            flags,
+            process.heap_start(),
+            process.heap_end()
+        );
         // mmap用のヒープ領域を現在のbrk以降に割り当てる
         // (簡易実装: brkと同じ領域を使う)
         if process.heap_start() == 0 {
@@ -529,9 +563,18 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
     });
 
     match result {
-        Some(Ok(va)) => va,
-        Some(Err(e)) => e,
-        None => ENOMEM,
+        Some(Ok(va)) => {
+            crate::info!("mmap(pid={:?}) -> {:#x}", pid, va);
+            va
+        }
+        Some(Err(e)) => {
+            crate::info!("mmap(pid={:?}) -> err {:#x}", pid, e);
+            e
+        }
+        None => {
+            crate::info!("mmap(pid={:?}) -> ENOMEM", pid);
+            ENOMEM
+        }
     }
 }
 

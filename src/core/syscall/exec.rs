@@ -10,6 +10,19 @@ use core::sync::atomic::{AtomicU64, Ordering};
 static SERVICE_MANAGER_PID: AtomicU64 = AtomicU64::new(0);
 const EM_X86_64: u16 = 0x3E;
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
+const STACK_TOP_BASE: u64 = 0x0000_7FFF_FFF0_0000;
+const STACK_ASLR_MAX_PAGES: u64 = 4096; // 16MiB
+const USER_STACK_SIZE_PAGES: usize = 8; // 32KiB stack
+const TLS_BASE_MIN: u64 = 0x3000_0000;
+const TLS_ASLR_MAX_PAGES: u64 = 0x4000; // 64MiB
+const INITIAL_TLS_SIZE: u64 = 4096;
+
+struct InitialUserStack {
+    stack_base_vaddr: u64,
+    stack_end_vaddr: u64,
+    initial_rsp: u64,
+    page_data: Vec<u8>,
+}
 
 struct UserPageTableGuard(Option<u64>);
 
@@ -110,7 +123,8 @@ fn caller_can_launch_service() -> bool {
 }
 
 /// カーネル内から実行可能ファイルを読み込み実行するシステムコール
-pub fn exec_kernel(path_ptr: u64) -> u64 {
+/// args_ptr: ヌル区切り引数文字列へのポインタ（"arg1\0arg2\0\0"形式）、0 なら引数なし
+pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
     let mut provided_path: Option<String> = None;
     if path_ptr != 0 {
         let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
@@ -126,26 +140,187 @@ pub fn exec_kernel(path_ptr: u64) -> u64 {
         return crate::syscall::types::EPERM;
     }
 
-    exec_internal(path, None)
+    // args_ptr が非 0 なら "\0" 区切り引数文字列を解析する（最大 512 バイト）
+    let mut extra_args_storage: Vec<u8> = Vec::new();
+    let extra_args: Vec<&str>;
+    if args_ptr != 0 {
+        if !crate::syscall::validate_user_ptr(args_ptr, 1) {
+            return crate::syscall::types::EFAULT;
+        }
+        // 最大 512 バイト読む
+        let max = 512usize;
+        crate::syscall::with_user_memory_access(|| unsafe {
+            let ptr = args_ptr as *const u8;
+            for i in 0..max {
+                let b = ptr.add(i).read_volatile();
+                extra_args_storage.push(b);
+                // 連続する \0\0 で終端
+                let len = extra_args_storage.len();
+                if len >= 2
+                    && extra_args_storage[len - 1] == 0
+                    && extra_args_storage[len - 2] == 0
+                {
+                    break;
+                }
+            }
+        });
+        extra_args = extra_args_storage
+            .split(|&b| b == 0)
+            .filter_map(|s| if s.is_empty() { None } else { core::str::from_utf8(s).ok() })
+            .collect();
+    } else {
+        extra_args = Vec::new();
+    }
+
+    exec_internal(path, None, &extra_args)
 }
 
 /// 名前を指定してカーネル内から実行可能ファイルを実行する（カーネル内部用）
 pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
-    exec_internal(path, Some(name))
+    exec_internal(path, Some(name), &[])
 }
 
-fn exec_internal(path: &str, name_override: Option<&str>) -> u64 {
+fn exec_internal(path: &str, name_override: Option<&str>, args: &[&str]) -> u64 {
     let process_name = name_override.unwrap_or(path);
     if let Some(data) = crate::init::fs::read(path) {
-        exec_with_data(&data, process_name)
+        exec_with_data(&data, process_name, path, args)
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
     }
 }
 
+fn map_initial_tls(table_phys: u64, aslr_seed: u64) -> Result<u64, u64> {
+    let tls_base = TLS_BASE_MIN
+        .saturating_add(aslr_offset_pages(aslr_seed ^ 0x19d7_3c6a, TLS_ASLR_MAX_PAGES) * 4096);
+    let mut tls_data = vec![0u8; INITIAL_TLS_SIZE as usize];
+    tls_data[..8].copy_from_slice(&tls_base.to_ne_bytes());
+    match crate::mem::paging::map_and_copy_segment_to(
+        table_phys,
+        tls_base,
+        INITIAL_TLS_SIZE,
+        INITIAL_TLS_SIZE,
+        &tls_data,
+        true,
+        false,
+    ) {
+        Ok(()) => Ok(tls_base),
+        Err(e) => {
+            crate::warn!("Failed to map initial TLS block at {:#x}: {:?}", tls_base, e);
+            Err(crate::syscall::types::EINVAL)
+        }
+    }
+}
+
+#[inline(never)]
+fn build_initial_user_stack(
+    aslr_seed: u64,
+    argv: &[&str],
+    envp: &[&str],
+    execfn: &str,
+    auxv_entries: &[(u64, u64)],
+) -> Result<InitialUserStack, u64> {
+    let stack_end_vaddr = STACK_TOP_BASE
+        .saturating_sub(aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, STACK_ASLR_MAX_PAGES) * 4096);
+    let stack_base_vaddr = stack_end_vaddr - (USER_STACK_SIZE_PAGES as u64 * 4096);
+
+    let mut string_block = Vec::new();
+    let mut argv_offsets = Vec::new();
+    for arg in argv {
+        argv_offsets.push(string_block.len());
+        string_block.extend_from_slice(arg.as_bytes());
+        string_block.push(0);
+    }
+
+    let mut envp_offsets = Vec::new();
+    for env in envp {
+        envp_offsets.push(string_block.len());
+        string_block.extend_from_slice(env.as_bytes());
+        string_block.push(0);
+    }
+
+    let random_offset = string_block.len();
+    let mut rng = aslr_seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    for _ in 0..16 {
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        string_block.push((rng >> 33) as u8);
+    }
+
+    let execfn_offset = string_block.len();
+    string_block.extend_from_slice(execfn.as_bytes());
+    string_block.push(0);
+
+    let string_area_len = string_block.len();
+    let pointers_bytes = 8
+        + (argv.len() * 8)
+        + 8
+        + (envp.len() * 8)
+        + 8
+        + (auxv_entries.len() * 16);
+    let total_data_needed = string_area_len + pointers_bytes;
+    let padding_len = (16 - (total_data_needed % 16)) % 16;
+    let total_size = total_data_needed + padding_len;
+
+    if total_size > 4096 {
+        crate::warn!("Arguments too large for single page stack setup");
+        return Err(crate::syscall::types::EINVAL);
+    }
+
+    let string_area_base = stack_end_vaddr - string_area_len as u64;
+    let random_addr = string_area_base + random_offset as u64;
+    let execfn_addr = string_area_base + execfn_offset as u64;
+    let initial_rsp = stack_end_vaddr - total_size as u64;
+
+    let mut page_data = Vec::new();
+    let page_offset = total_size % 4096;
+    let unused_space = if page_offset == 0 { 0 } else { 4096 - page_offset };
+    page_data.resize(unused_space, 0);
+
+    page_data.extend_from_slice(&(argv.len() as u64).to_ne_bytes());
+    for off in argv_offsets {
+        let ptr = string_area_base + off as u64;
+        page_data.extend_from_slice(&ptr.to_ne_bytes());
+    }
+    page_data.extend_from_slice(&0u64.to_ne_bytes());
+
+    for off in envp_offsets {
+        let ptr = string_area_base + off as u64;
+        page_data.extend_from_slice(&ptr.to_ne_bytes());
+    }
+    page_data.extend_from_slice(&0u64.to_ne_bytes());
+
+    for (key, value) in auxv_entries {
+        let resolved_value = match *key {
+            25 => random_addr, // AT_RANDOM
+            31 => execfn_addr, // AT_EXECFN
+            _ => *value,
+        };
+        page_data.extend_from_slice(&key.to_ne_bytes());
+        page_data.extend_from_slice(&resolved_value.to_ne_bytes());
+    }
+
+    page_data.resize(page_data.len() + padding_len, 0);
+    page_data.extend_from_slice(&string_block);
+
+    if page_data.len() != 4096 {
+        crate::warn!("internal: page_data.len() != 4096: {}", page_data.len());
+        return Err(crate::syscall::types::EINVAL);
+    }
+
+    Ok(InitialUserStack {
+        stack_base_vaddr,
+        stack_end_vaddr,
+        initial_rsp,
+        page_data,
+    })
+}
+
 /// メモリ上の ELF バッファからプロセスを生成する（内部共通実装）
-fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
+fn exec_with_data(data: &[u8], process_name: &str, exec_path: &str, args: &[&str]) -> u64 {
     crate::debug!("exec: name={}", process_name);
     let aslr_seed = next_aslr_seed(process_name);
 
@@ -176,11 +351,16 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
         crate::debug!("Created user page table at {:#x}", new_pt_phys);
 
         // ELFアーキテクチャ検証 (MED-07)
+        let mut phdr_vaddr: u64 = 0;
+        let mut phentsize: u64 = 0;
+        let mut phnum: u64 = 0;
         if let Some(eh) = elf_loader::parse_elf_header(data) {
             if eh.e_machine != EM_X86_64 {
                 crate::warn!("ELF e_machine {:#x} is not x86-64, rejecting", eh.e_machine);
                 return crate::syscall::types::EINVAL;
             }
+            phentsize = eh.e_phentsize as u64;
+            phnum = eh.e_phnum as u64;
             let phoff = eh.e_phoff as usize;
             let phentsz = eh.e_phentsize as usize;
             // phentszが0の場合は無限ループを防ぐため拒否 (MED-08)
@@ -189,6 +369,8 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
                 return crate::syscall::types::EINVAL;
             }
             let phnum = eh.e_phnum as usize;
+            let mut load_base: u64 = 0;
+            let mut load_base_set = false;
             for i in 0..phnum {
                 // オーバーフロー安全な乗算と加算 (MED-08)
                 let off_hdr = match i.checked_mul(phentsz).and_then(|x| phoff.checked_add(x)) {
@@ -242,6 +424,11 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
                         );
                         let seg_src = &data[src_off..src_end];
 
+                        if !load_base_set {
+                            load_base = ph.p_vaddr.saturating_sub(ph.p_offset);
+                            load_base_set = true;
+                        }
+
                         if let Err(e) = crate::mem::paging::map_and_copy_segment_to(
                             new_pt_phys,
                             vaddr,
@@ -257,6 +444,8 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
                     }
                 }
             }
+
+            phdr_vaddr = load_base.saturating_add(eh.e_phoff);
         }
 
         let mut sinit_addr: Option<u64> = None;
@@ -385,103 +574,57 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
             }
         }
 
-        const STACK_TOP_BASE: u64 = 0x0000_7FFF_FFF0_0000;
-        const STACK_ASLR_MAX_PAGES: u64 = 4096; // 16MiB
-        let stack_end_vaddr = STACK_TOP_BASE.saturating_sub(
-            aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, STACK_ASLR_MAX_PAGES) * 4096,
-        );
-        let stack_size_pages: usize = 8; // 32KiB stack
-        let stack_base_vaddr = stack_end_vaddr - (stack_size_pages as u64 * 4096);
-
-        // Prepare arguments (argv) and environment variables (envp)
-        let args = [process_name];
+        let base_name = exec_path.rsplit('/').next().unwrap_or(process_name);
+        let argv0 = base_name.strip_suffix(".elf").unwrap_or(base_name);
+        let mut all_args: Vec<&str> = Vec::new();
+        all_args.push(argv0);
+        for a in args {
+            all_args.push(a);
+        }
+        if process_name.ends_with("busybox.elf") {
+            let argv1 = all_args.get(1).copied().unwrap_or("");
+            crate::info!(
+                "busybox argv: argc={}, argv0='{}', argv1='{}'",
+                all_args.len(),
+                argv0,
+                argv1
+            );
+        }
         let envs: [&str; 0] = [];
-
-        let mut string_block = Vec::new();
-        let mut argv_offsets = Vec::new();
-        for arg in args {
-            argv_offsets.push(string_block.len());
-            string_block.extend_from_slice(arg.as_bytes());
-            string_block.push(0);
-        }
-        let mut envp_offsets = Vec::new();
-        for env in envs {
-            envp_offsets.push(string_block.len());
-            string_block.extend_from_slice(env.as_bytes());
-            string_block.push(0);
-        }
-
-        // Calculate layout
-        let string_area_len = string_block.len();
-
-        // Pointers: argc(8) + argv(8*N) + NULL(8) + envp(8*M) + NULL(8) + Auxv(16)
-        let pointers_bytes = 8 // argc
-            + (args.len() * 8) // argv
-            + 8 // NULL
-            + (envs.len() * 8) // envp
-            + 8 // NULL
-            + 16; // Auxv
-
-        let total_data_needed = string_area_len + pointers_bytes;
-        let padding_len = (16 - (total_data_needed % 16)) % 16;
-        let total_size = total_data_needed + padding_len;
-
-        let string_area_base = stack_end_vaddr - string_area_len as u64;
-        let initial_rsp = stack_end_vaddr - total_size as u64;
-
-        // スタックのトップページにバッファを配置
-        let mut page_data = Vec::new();
-        let page_offset = total_size % 4096;
-        let unused_space = 4096 - page_offset;
-
-        // 使用する引数と環境変数のサイズを確認
-        // 4096バイトのページに収まらない場合はエラー
-        if total_size > 4096 {
-            crate::warn!("Arguments too large for single page stack setup");
-            return crate::syscall::types::EINVAL;
-        }
-        page_data.resize(unused_space, 0);
-
-        // Push Argc
-        page_data.extend_from_slice(&(args.len() as u64).to_ne_bytes());
-
-        // Push Argv Ptrs
-        for off in argv_offsets {
-            let ptr = string_area_base + off as u64;
-            page_data.extend_from_slice(&ptr.to_ne_bytes());
-        }
-        // Push Argv NULL
-        page_data.extend_from_slice(&0u64.to_ne_bytes());
-
-        // Push Envp Ptrs
-        for off in envp_offsets {
-            let ptr = string_area_base + off as u64;
-            page_data.extend_from_slice(&ptr.to_ne_bytes());
-        }
-        // Push Envp NULL
-        page_data.extend_from_slice(&0u64.to_ne_bytes());
-
-        // Push Auxv {0, 0}
-        page_data.extend_from_slice(&0u64.to_ne_bytes());
-        page_data.extend_from_slice(&0u64.to_ne_bytes());
-
-        // Push Padding
-        page_data.resize(page_data.len() + padding_len, 0);
-
-        // Push Strings
-        page_data.extend_from_slice(&string_block);
-
-        // サイズを確認
-        if page_data.len() != 4096 {
-            crate::warn!("internal: page_data.len() != 4096: {}", page_data.len());
-            return crate::syscall::types::EINVAL;
-        }
+        let auxv_entries = [
+            (3u64, phdr_vaddr),
+            (4u64, phentsize),
+            (5u64, phnum),
+            (6u64, 4096u64),
+            (7u64, 0u64),
+            (8u64, 0u64),
+            (9u64, entry),
+            (11u64, 0u64),
+            (12u64, 0u64),
+            (13u64, 0u64),
+            (14u64, 0u64),
+            (16u64, 0u64),
+            (17u64, 100u64),
+            (23u64, 0u64),
+            (25u64, 0u64),
+            (31u64, 0u64),
+            (0u64, 0u64),
+        ];
+        let InitialUserStack {
+            stack_base_vaddr,
+            stack_end_vaddr,
+            initial_rsp,
+            page_data,
+        } = match build_initial_user_stack(aslr_seed, &all_args, &envs, exec_path, &auxv_entries) {
+            Ok(stack) => stack,
+            Err(errno) => return errno,
+        };
 
         crate::debug!(
             "Allocating user stack: base={:#x}, top={:#x}, size={} pages, rsp={:#x}",
             stack_base_vaddr,
             stack_end_vaddr,
-            stack_size_pages,
+            USER_STACK_SIZE_PAGES,
             initial_rsp
         );
 
@@ -490,7 +633,7 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
             new_pt_phys,
             stack_base_vaddr,
             0,
-            (stack_size_pages - 1) as u64 * 4096,
+            (USER_STACK_SIZE_PAGES - 1) as u64 * 4096,
             &[],
             true,
             false,
@@ -538,7 +681,7 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
                 e
             );
         } else {
-            crate::info!(
+            crate::debug!(
                 "Pre-mapped {} bytes for heap at {:#x} for {}",
                 heap_map_size,
                 default_heap_base,
@@ -607,10 +750,27 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
         };
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, 0);
         proc.set_page_table(new_pt_phys);
+        proc.set_stack_bottom(stack_base_vaddr);
+        proc.set_stack_top(stack_end_vaddr);
+        // 親プロセスの CWD を子プロセスに継承する
+        if let Some(ppid) = parent_pid {
+            let parent_cwd = crate::task::with_process(ppid, |p| {
+                let mut s = alloc::string::String::new();
+                s.push_str(p.cwd());
+                s
+            });
+            if let Some(cwd_str) = parent_cwd {
+                proc.set_cwd(&cwd_str);
+            }
+        }
         if heap_pre_mapped {
             proc.set_heap_start(default_heap_base);
             proc.set_heap_end(default_heap_base + heap_map_size);
         }
+        let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
+            Ok(base) => base,
+            Err(errno) => return errno,
+        };
         let pid = proc.id();
         let is_core_service =
             process_name.ends_with("core.service");
@@ -656,7 +816,7 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
 
         // ユーザーモードスレッドを作成
         // RSP に initial_rsp を設定
-        let thread = crate::task::Thread::new_usermode(
+        let mut thread = crate::task::Thread::new_usermode(
             pid,
             process_name,
             entry,
@@ -664,6 +824,7 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
             kstack,
             KERNEL_THREAD_STACK_SIZE,
         );
+        thread.set_fs_base(initial_fs_base);
 
         crate::info!(
             "exec: loaded '{}', entry={:#x}, pid={:?}",
@@ -698,15 +859,51 @@ fn exec_with_data(data: &[u8], process_name: &str) -> u64 {
     }
 }
 
+/// ユーザー空間の null 終端ポインタ配列（char**）を読み取る
+///
+/// 各エントリは 64 ビットポインタ。NULL で終端。
+/// max_entries を超えた場合は切り捨てる。
+fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
+    use crate::syscall::types::EFAULT;
+    if array_ptr == 0 {
+        return Vec::new();
+    }
+    let mut result = Vec::new();
+    for i in 0..=max_entries {
+        let ptr_addr = match (i as u64).checked_mul(8).and_then(|o| array_ptr.checked_add(o)) {
+            Some(a) => a,
+            None => break,
+        };
+        if !crate::syscall::validate_user_ptr(ptr_addr, 8) {
+            break;
+        }
+        let entry_ptr = crate::syscall::with_user_memory_access(|| unsafe {
+            core::ptr::read_unaligned(ptr_addr as *const u64)
+        });
+        if entry_ptr == 0 {
+            break;
+        }
+        let s = match crate::syscall::read_user_cstring(entry_ptr, 4096) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        result.push(s);
+        if result.len() >= max_entries {
+            break;
+        }
+    }
+    result
+}
+
 /// execve システムコール
 ///
 /// 現在のプロセスイメージを新しいプログラムで置き換える
 ///
 /// # 引数
 /// - `path_ptr`: 実行ファイルパスのポインタ (null 終端)
-/// - `_argv`: 引数ベクタ (現在は無視)
-/// - `_envp`: 環境変数ベクタ (現在は無視)
-pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
+/// - `argv`: 引数ポインタ配列 (char*[]) — null 終端、0 の場合は [path] を使用
+/// - `envp`: 環境変数ポインタ配列 (char*[]) — null 終端、0 の場合は空
+pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     use crate::syscall::types::{EINVAL, ENOENT, EPERM};
 
     if path_ptr == 0 {
@@ -745,22 +942,29 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     };
     let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
 
-    // PT_LOAD セグメントをマップ
+    // PT_LOAD セグメントをマップ / ELF メタデータを収集
     const USER_SPACE_END_EXECVE: u64 = 0x0000_7FFF_FFFF_FFFF;
+    let mut phdr_vaddr: u64 = 0;
+    let mut phentsize: u64 = 0;
+    let mut phnum: u64 = 0;
     if let Some(eh) = crate::elf::loader::parse_elf_header(data) {
         // ELFアーキテクチャ検証 (MED-07)
         if eh.e_machine != EM_X86_64 {
             crate::warn!("execve: ELF e_machine {:#x} is not x86-64", eh.e_machine);
             return EINVAL;
         }
+        phentsize = eh.e_phentsize as u64;
+        phnum     = eh.e_phnum as u64;
         let phoff = eh.e_phoff as usize;
         let phentsz = eh.e_phentsize as usize;
         // phentszが0の場合は無限ループを防ぐ (MED-08)
         if phentsz == 0 {
             return EINVAL;
         }
-        let phnum = eh.e_phnum as usize;
-        for i in 0..phnum {
+        let n = eh.e_phnum as usize;
+        let mut load_base: u64 = 0;
+        let mut load_base_set = false;
+        for i in 0..n {
             // オーバーフロー安全な乗算と加算 (MED-08)
             let off_hdr = match i.checked_mul(phentsz).and_then(|x| phoff.checked_add(x)) {
                 Some(o) if o < data.len() => o,
@@ -786,6 +990,11 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
                                 return EINVAL;
                             }
                         }
+                    }
+                    // 最初の PT_LOAD から load_base を計算 (AT_PHDR 算出用)
+                    if !load_base_set {
+                        load_base = ph.p_vaddr.saturating_sub(ph.p_offset);
+                        load_base_set = true;
                     }
                     // ELFセグメントの境界チェック (CRIT-04)
                     let src_off = ph.p_offset as usize;
@@ -813,59 +1022,54 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
                 }
             }
         }
+        phdr_vaddr = load_base + eh.e_phoff;
     }
 
-    // ユーザースタックをセットアップ (exec_internal と同じレイアウト)
-    const STACK_TOP_BASE: u64 = 0x0000_7FFF_FFF0_0000;
-    const STACK_ASLR_MAX_PAGES: u64 = 4096; // 16MiB
-    let stack_end_vaddr = STACK_TOP_BASE
-        .saturating_sub(aslr_offset_pages(aslr_seed ^ 0x53a9_1e2d, STACK_ASLR_MAX_PAGES) * 4096);
-    let stack_size_pages: usize = 8;
-    let stack_base_vaddr = stack_end_vaddr - (stack_size_pages as u64 * 4096);
-
-    let args = [path];
-    let mut string_block: Vec<u8> = Vec::new();
-    let mut argv_offsets: Vec<usize> = Vec::new();
-    for arg in args {
-        argv_offsets.push(string_block.len());
-        string_block.extend_from_slice(arg.as_bytes());
-        string_block.push(0);
+    // ユーザースタックをセットアップ (Linux x86_64 ABI: argc, argv[], NULL, envp[], NULL, auxv[])
+    // argv / envp をユーザー空間から読み込む
+    let mut argv_strings = read_user_ptr_array(argv, 256);
+    if argv_strings.is_empty() {
+        argv_strings.push(path_owned.clone());
     }
-    let string_area_len = string_block.len();
-    let pointers_bytes = 8 + (args.len() * 8) + 8 + 8 + 16;
-    let total_data_needed = string_area_len + pointers_bytes;
-    let padding_len = (16 - (total_data_needed % 16)) % 16;
-    let total_size = total_data_needed + padding_len;
-    if total_size > 4096 {
-        return EINVAL;
-    }
-    let string_area_base = stack_end_vaddr - string_area_len as u64;
-    let initial_rsp = stack_end_vaddr - total_size as u64;
-
-    let mut page_data: Vec<u8> = Vec::new();
-    let page_offset = total_size % 4096;
-    let unused_space = 4096 - page_offset;
-    page_data.resize(unused_space, 0);
-    page_data.extend_from_slice(&(args.len() as u64).to_ne_bytes());
-    for off in argv_offsets {
-        page_data.extend_from_slice(&(string_area_base + off as u64).to_ne_bytes());
-    }
-    page_data.extend_from_slice(&0u64.to_ne_bytes()); // argv null
-    page_data.extend_from_slice(&0u64.to_ne_bytes()); // envp null
-    page_data.extend_from_slice(&0u64.to_ne_bytes()); // auxv[0]
-    page_data.extend_from_slice(&0u64.to_ne_bytes()); // auxv[1]
-    page_data.resize(page_data.len() + padding_len, 0);
-    page_data.extend_from_slice(&string_block);
-    if page_data.len() != 4096 {
-        crate::warn!("internal: page_data.len() != 4096: {}", page_data.len());
-        return EINVAL;
-    }
+    let envp_strings = read_user_ptr_array(envp, 1024);
+    let argc = argv_strings.len();
+    let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
+    let auxv_entries = [
+        (3u64, phdr_vaddr),
+        (4u64, phentsize),
+        (5u64, phnum),
+        (6u64, 4096u64),
+        (7u64, 0u64),
+        (8u64, 0u64),
+        (9u64, entry as u64),
+        (11u64, 0u64),
+        (12u64, 0u64),
+        (13u64, 0u64),
+        (14u64, 0u64),
+        (16u64, 0u64),
+        (17u64, 100u64),
+        (23u64, 0u64),
+        (25u64, 0u64),
+        (31u64, 0u64),
+        (0u64, 0u64),
+    ];
+    let InitialUserStack {
+        stack_base_vaddr,
+        stack_end_vaddr,
+        initial_rsp,
+        page_data,
+    } = match build_initial_user_stack(aslr_seed, &argv_refs, &envp_refs, &path_owned, &auxv_entries)
+    {
+        Ok(stack) => stack,
+        Err(errno) => return errno,
+    };
 
     if crate::mem::paging::map_and_copy_segment_to(
         new_pt_phys,
         stack_base_vaddr,
         0,
-        (stack_size_pages - 1) as u64 * 4096,
+        (USER_STACK_SIZE_PAGES - 1) as u64 * 4096,
         &[],
         true,
         false,
@@ -908,6 +1112,10 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     {
         return EINVAL;
     }
+    let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
+        Ok(base) => base,
+        Err(errno) => return errno,
+    };
 
     // 現在のプロセスのページテーブルとヒープを更新
     let current_tid = match crate::task::current_thread_id() {
@@ -918,11 +1126,14 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
         Some(p) => p,
         None => return EINVAL,
     };
+    crate::task::with_thread_mut(current_tid, |t| t.set_fs_base(initial_fs_base));
     let old_pt_phys = crate::task::with_process_mut(pid, |p| {
         let prev = p.page_table();
         p.set_page_table(new_pt_phys);
         p.set_heap_start(heap_base);
         p.set_heap_end(heap_base + heap_map_size);
+        p.set_stack_bottom(stack_base_vaddr);
+        p.set_stack_top(stack_end_vaddr);
         prev
     })
     .flatten();
@@ -932,6 +1143,9 @@ pub fn execve_syscall(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
         }
     }
     new_pt_guard.disarm();
+
+    // FD_CLOEXEC が設定された FD を exec 時に閉じる
+    crate::task::with_process_mut(pid, |p| p.fd_table_mut().close_cloexec_fds());
 
     // 新しいページテーブルに切り替えてジャンプ
     unsafe {
@@ -971,5 +1185,5 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         core::ptr::copy_nonoverlapping(buf_ptr as *const u8, dst_ptr, buf_len as usize);
     });
 
-    exec_with_data(&owned, "user_exec")
+    exec_with_data(&owned, "user_exec", "user_exec", &[])
 }

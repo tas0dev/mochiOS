@@ -9,6 +9,24 @@ path = "src/ls.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "echo"
+path = "src/echo.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "cat"
+path = "src/cat.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "pwd"
+path = "src/pwd.rs"
+test = false
+bench = false
+
 [dependencies]
 swiftlib = { path = "../user", features = ["std-support"] }
 

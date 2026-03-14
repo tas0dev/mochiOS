@@ -33,3 +33,17 @@ pub fn chdir(path: &str) -> u64 {
     let (buf, _) = path_buf(path);
     syscall1(SyscallNumber::Chdir as u64, buf.as_ptr() as u64)
 }
+
+/// カレントワーキングディレクトリを取得する
+pub fn getcwd(buf: &mut [u8]) -> Option<&str> {
+    let ret = syscall2(
+        SyscallNumber::Getcwd as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    );
+    if ret == 0 || ret > 0xFFFF_FFFF_0000_0000 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    core::str::from_utf8(&buf[..len]).ok()
+}

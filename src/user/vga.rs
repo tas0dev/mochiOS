@@ -32,3 +32,13 @@ pub fn map_framebuffer() -> Option<*mut u32> {
         Some(addr as *mut u32)
     }
 }
+
+/// カーネルコンソールのカーソルをシェルのピクセルY位置に同期する
+pub fn set_console_cursor(pixel_y: u32) {
+    syscall1(SyscallNumber::SetConsoleCursor as u64, pixel_y as u64);
+}
+
+/// カーネルコンソールのカーソルの現在ピクセルY位置を取得する
+pub fn get_console_cursor() -> u32 {
+    syscall0(SyscallNumber::GetConsoleCursor as u64) as u32
+}

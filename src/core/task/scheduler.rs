@@ -20,8 +20,8 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    /// デフォルトのタイムスライス（10ms × 10 = 100ms）
-    pub const DEFAULT_TIME_SLICE: u64 = 10;
+    /// デフォルトのタイムスライス（10ms × 2 = 20ms）
+    pub const DEFAULT_TIME_SLICE: u64 = 2;
 
     /// 新しいスケジューラを作成
     pub const fn new() -> Self {
@@ -217,14 +217,61 @@ pub fn sleep_thread(id: ThreadId) {
 
 /// スレッドを起床させる
 ///
-/// Sleeping/Blocked状態のスレッドをReady状態にする
+/// Sleeping/Blocked状態のスレッドをReady状態にする。
+/// Ready状態の場合は pending_wakeup フラグを立てて競合を防ぐ。
 pub fn wake_thread(id: ThreadId) {
     with_thread_mut(id, |thread| {
         let state = thread.state();
         if state == ThreadState::Sleeping || state == ThreadState::Blocked {
             thread.set_state(ThreadState::Ready);
+        } else if state == ThreadState::Ready {
+            // まだ眠っていない場合、起床要求を記録しておく
+            thread.set_pending_wakeup();
         }
     });
+}
+
+/// 現在のスレッドをスリープ状態にする。
+///
+/// pending_wakeup フラグが立っていれば眠らずに即座に返す（競合回避）。
+/// # Returns
+/// `true` なら実際に Sleeping 状態に遷移した。`false` なら眠らなかった。
+pub fn sleep_thread_unless_woken(id: ThreadId) -> bool {
+    with_thread_mut(id, |thread| {
+        if thread.take_pending_wakeup() {
+            // 先に wake が呼ばれていたので眠らない
+            false
+        } else {
+            thread.set_state(ThreadState::Sleeping);
+            true
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// 子プロセス終了時に親プロセスの先頭スレッドの IPC waiter を起床させる。
+/// IPC recv_blocking でスリープしている親スレッドを叩き起こし、child exit を検知させる。
+fn wake_parent_ipc_waiter(exited_pid: crate::task::ProcessId) {
+    use crate::task::with_process;
+    let parent_pid = match with_process(exited_pid, |p| p.parent_id()) {
+        Some(Some(pid)) => pid,
+        _ => return,
+    };
+
+    // 親プロセスの最初のスレッドを探し、IPC mailbox に積まれた waiter を起床させる
+    let mut parent_tid: Option<ThreadId> = None;
+    crate::task::for_each_thread(|thread| {
+        if parent_tid.is_none() && thread.process_id() == parent_pid {
+            parent_tid = Some(thread.id());
+        }
+    });
+
+    if let Some(tid) = parent_tid {
+        // ゼロ長メッセージを mailbox に積んで recv_blocking が確実に戻れるようにする。
+        // wake_thread だけでは「スリープ中に Ready に変えて pending_wakeup なし」の場合、
+        // recv_blocking が yield 後に再スリープしてしまうため、必ずメッセージを使う。
+        crate::syscall::ipc::send_from_kernel(tid.as_u64(), &[]);
+    }
 }
 
 /// スレッドを終了させる
@@ -242,8 +289,10 @@ pub fn terminate_thread(id: ThreadId) {
     }
 
     crate::syscall::process::clear_futex_waiter(id);
-    // スレッドをキューから削除
-    remove_thread(id);
+    // スレッドをキューから削除し、カーネルスタックを解放
+    if let Some(thread) = remove_thread(id) {
+        crate::task::free_kernel_stack(thread.kernel_stack_base());
+    }
 }
 
 /// 現在のタスクを終了させる（exitシステムコール用）
@@ -270,6 +319,10 @@ pub fn exit_current_task(exit_code: u64) -> ! {
             });
             if !has_other_live_threads {
                 crate::task::mark_process_exited(pid, exit_code);
+                // 親プロセスが IPC でブロックしている可能性があるので起床させる
+                wake_parent_ipc_waiter(pid);
+                // 親プロセスへ SIGCHLD を送達する
+                crate::syscall::signal::deliver_sigchld_to_parent(pid);
             }
         }
 
@@ -283,7 +336,11 @@ pub fn exit_current_task(exit_code: u64) -> ! {
 
                 // スレッドをキューから削除（コンテキストスイッチ前に削除）
                 crate::syscall::process::clear_futex_waiter(current_id);
+                let kstack_base = with_thread(current_id, |t| t.kernel_stack_base()).unwrap_or(0);
                 remove_thread(current_id);
+
+                // カーネルスタックをフリーリストへ返却（スイッチ直前、まだスタックは有効）
+                crate::task::free_kernel_stack(kstack_base);
 
                 // コンテキストスイッチを実行（終了したスレッドのコンテキストは保存しない）
                 // old_context_ptr = None を渡すことで、現在のコンテキストを保存せずに次のスレッドにジャンプ
@@ -300,7 +357,9 @@ pub fn exit_current_task(exit_code: u64) -> ! {
 
         // スレッドをキューから削除
         crate::syscall::process::clear_futex_waiter(current_id);
-        remove_thread(current_id);
+        if let Some(thread) = remove_thread(current_id) {
+            crate::task::free_kernel_stack(thread.kernel_stack_base());
+        }
     }
 
     // スレッドがない場合は永久にhaltして待機

@@ -108,7 +108,7 @@ exec qemu-system-x86_64 \
     "${KVM_ARGS[@]}" \
     -bios "$OVMF" \
     -drive format=raw,file="$ESP_IMG",media=disk \
-    -drive id=disk0,file=target/swiftCore.img,format=raw,if=ide,index=1,media=disk \
+    -drive id=disk0,file=target/mochiOS.img,format=raw,if=ide,index=1,media=disk \
     -net none \
     -m 512M \
     -no-reboot \

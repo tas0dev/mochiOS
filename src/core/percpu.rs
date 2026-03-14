@@ -9,12 +9,14 @@ use x86_64::registers::control::Cr3;
 const MAX_CPUS: usize = 64;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 pub const GS_SYSCALL_KERNEL_RSP_OFFSET: usize = 8;
+pub const GS_SYSCALL_USER_RSP_TMP_OFFSET: usize = 24;
 
 #[repr(C)]
 struct PerCpuState {
     kernel_cr3: AtomicU64,
     syscall_kernel_rsp: AtomicU64,
     current_thread_id: AtomicU64,
+    syscall_user_rsp_tmp: AtomicU64,
 }
 
 impl PerCpuState {
@@ -23,6 +25,7 @@ impl PerCpuState {
             kernel_cr3: AtomicU64::new(0),
             syscall_kernel_rsp: AtomicU64::new(0),
             current_thread_id: AtomicU64::new(0),
+            syscall_user_rsp_tmp: AtomicU64::new(0),
         }
     }
 }
@@ -102,6 +105,7 @@ pub fn init_boot_cpu(syscall_kernel_rsp: u64) {
         .syscall_kernel_rsp
         .store(syscall_kernel_rsp, Ordering::SeqCst);
     state.current_thread_id.store(0, Ordering::SeqCst);
+    state.syscall_user_rsp_tmp.store(0, Ordering::SeqCst);
     install_current_cpu_gs_base();
 }
 

@@ -274,6 +274,25 @@ pub fn print(args: fmt::Arguments) {
     }
 }
 
+/// カーソルのピクセルY座標を設定する（シェルとの同期用）
+pub fn set_cursor_pixel_y(pixel_y: usize) {
+    if let Some(writer) = WRITER.get() {
+        let mut w = writer.lock();
+        w.row = pixel_y / FONT_HEIGHT;
+        w.col = 0;
+    }
+}
+
+/// カーソルの現在ピクセルY座標を取得する（シェルとの同期用）
+pub fn get_cursor_pixel_y() -> usize {
+    if let Some(writer) = WRITER.get() {
+        let w = writer.lock();
+        w.row * FONT_HEIGHT
+    } else {
+        0
+    }
+}
+
 /// フレームバッファ出力マクロ
 #[macro_export]
 macro_rules! vprint {

@@ -466,6 +466,7 @@ struct IoVec {
 }
 
 #[unsafe(no_mangle)]
+#[allow(private_interfaces)]
 pub unsafe extern "C" fn writev(fd: i32, iov: *const IoVec, iovcnt: i32) -> isize {
     let mut total: isize = 0;
     for i in 0..iovcnt {

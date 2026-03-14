@@ -1,4 +1,4 @@
-use swiftlib::{process, vga};
+use swiftlib::{fs, ipc, process, task, vga};
 
 
 const FONT_WIDTH: usize = 6;
@@ -92,7 +92,7 @@ impl Terminal {
         let max_cols = info.width / FONT_WIDTH as u32;
         let max_rows = info.height / FONT_HEIGHT as u32;
         let mut env = Vec::new();
-        env.push(("PATH".to_string(), "Binaries".to_string()));
+        env.push(("PATH".to_string(), "/Binaries".to_string()));
         Terminal {
             fb_ptr,
             width: info.width,
@@ -103,8 +103,8 @@ impl Terminal {
             max_cols,
             max_rows,
             font,
-            fg: 0x00FF_FFFF, // シアン
-            bg: 0x0000_0000, // 黒
+            fg: 0x00FF_FFFF,
+            bg: 0x0000_0000,
             input_buf: [0u8; 256],
             input_len: 0,
             env,
@@ -148,29 +148,41 @@ impl Terminal {
         if x >= self.width || y >= self.height {
             return;
         }
-        let offset = y * self.stride + x;
-        unsafe {
-            self.fb_ptr.add(offset as usize).write_volatile(color);
-        }
+        let offset = (y * self.stride + x) as usize;
+        unsafe { self.fb_ptr.add(offset).write_volatile(color); }
     }
 
     fn draw_char(&self, ch: u8, col: u32, row: u32) {
-        let glyph = self.font.glyph(ch);
+        let glyph = *self.font.glyph(ch);
         let x0 = col * FONT_WIDTH as u32;
         let y0 = row * FONT_HEIGHT as u32;
+        // 1フォント行を一括コピーすることで MMIO 書き込み回数を 72→12 に削減
+        let mut row_buf = [0u32; FONT_WIDTH];
         for (r, &bits) in glyph.iter().enumerate() {
+            let y = y0 + r as u32;
+            if y >= self.height { break; }
+            if x0 + FONT_WIDTH as u32 > self.width { break; }
             for c in 0..FONT_WIDTH {
-                // BDF: bit 7 = 左端, 6ピクセル幅なので bit (7-c) を使う
                 let on = (bits >> (7 - c)) & 1 != 0;
-                self.put_pixel(x0 + c as u32, y0 + r as u32, if on { self.fg } else { self.bg });
+                row_buf[c] = if on { self.fg } else { self.bg };
+            }
+            // row_buf → フレームバッファ（スタック→MMIO の bulk write）
+            let offset = (y * self.stride + x0) as usize;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    row_buf.as_ptr(),
+                    self.fb_ptr.add(offset),
+                    FONT_WIDTH,
+                );
             }
         }
     }
 
     pub fn clear_screen(&mut self) {
-        let total = self.height * self.stride;
-        for i in 0..total {
-            unsafe { self.fb_ptr.add(i as usize).write_volatile(self.bg); }
+        // bg = 0x00000000 なので write_bytes(0) で全ピクセルをゼロ埋め（高速）
+        let total_bytes = (self.height * self.stride) as usize * 4;
+        unsafe {
+            core::ptr::write_bytes(self.fb_ptr as *mut u8, 0, total_bytes);
         }
         self.col = 0;
         self.row = 0;
@@ -179,18 +191,26 @@ impl Terminal {
     fn scroll_up(&mut self) {
         let row_pixels = FONT_HEIGHT as u32 * self.stride;
         let total = self.height * self.stride;
-        // 1行分上にコピー
+        // 本体をコピー（MMIO read + write だが memmove 相当で効率的）
         unsafe {
             let src = self.fb_ptr.add(row_pixels as usize);
             core::ptr::copy(src, self.fb_ptr, (total - row_pixels) as usize);
         }
-        // 最終行をクリア
+        // 最終行をゼロ埋め（write_bytes で高速クリア）
         let last_row_start = (self.height - FONT_HEIGHT as u32) * self.stride;
-        for i in 0..(FONT_HEIGHT as u32 * self.stride) {
-            unsafe { self.fb_ptr.add((last_row_start + i) as usize).write_volatile(self.bg); }
+        let clear_bytes = (FONT_HEIGHT as u32 * self.stride) as usize * 4;
+        unsafe {
+            core::ptr::write_bytes(
+                self.fb_ptr.add(last_row_start as usize) as *mut u8,
+                0,
+                clear_bytes,
+            );
         }
         self.row = self.max_rows - 1;
     }
+
+    /// 互換性のために残す（シャドウバッファ廃止により no-op）
+    pub fn flush(&mut self) {}
 
     fn new_line(&mut self) {
         self.col = 0;
@@ -244,9 +264,53 @@ impl Terminal {
     }
 
     pub fn prompt(&mut self) {
+        let mut cwd_buf = [0u8; 256];
+        let cwd = fs::getcwd(&mut cwd_buf).unwrap_or("/");
         self.fg = 0x00FF_88FF; // 紫
-        self.write_str("mochi> ");
+        self.write_str(cwd);
+        self.write_str(" mochi> ");
         self.fg = 0x00FF_FFFF; // シアン
+    }
+
+    /// 子プロセスのIPC出力を受け取りながら終了を待つ
+    fn drain_child_output(&mut self, pid: u64) {
+        let mut buf = [0u8; 512];
+        loop {
+            // メッセージが届くまでスリープして待機（ビジーウェイトしない）
+            let (_, len) = ipc::ipc_recv_wait(&mut buf);
+            if len > 0 && len as usize <= buf.len() {
+                if let Ok(s) = core::str::from_utf8(&buf[..len as usize]) {
+                    self.write_str(s);
+                }
+                // 続きのメッセージをノンブロッキングで掃き出す
+                loop {
+                    let (_, len2) = ipc::ipc_recv(&mut buf);
+                    if len2 == 0 || len2 as usize > buf.len() {
+                        break;
+                    }
+                    if let Ok(s) = core::str::from_utf8(&buf[..len2 as usize]) {
+                        self.write_str(s);
+                    }
+                }
+                // バッチ分まとめてフラッシュ
+                self.flush();
+            }
+            // 子プロセスが終了していれば抜ける（exit 通知で起床した場合もここで検知）
+            if task::wait_nonblocking(pid as i64).is_some() {
+                break;
+            }
+        }
+        // 終了後に残ったメッセージを念のため掃き出す
+        loop {
+            let (_, len) = ipc::ipc_recv(&mut buf);
+            if len == 0 || len as usize > buf.len() {
+                break;
+            }
+            if let Ok(s) = core::str::from_utf8(&buf[..len as usize]) {
+                self.write_str(s);
+            }
+        }
+        self.flush();
     }
 
     pub fn handle_line(&mut self) {
@@ -272,11 +336,11 @@ impl Terminal {
         // コマンド名と引数を分割
         let mut parts = cmd.splitn(2, ' ');
         let cmd_name = parts.next().unwrap_or("");
-        let _args = parts.next().unwrap_or("");
+        let args = parts.next().unwrap_or("");
 
         match cmd_name {
             "help" => {
-                self.write_str("Commands: help, clear, version, export\n");
+                self.write_str("Commands: help, clear, version, export, cd\n");
                 self.write_str("Other commands are loaded from PATH (Binaries/*.elf)\n");
             }
             "clear" => {
@@ -285,11 +349,20 @@ impl Terminal {
             "version" => {
                 self.write_str("mochiOS shell v0.1\n");
             }
+            "cd" => {
+                let target = if args.is_empty() { "/" } else { args };
+                let ret = fs::chdir(target);
+                if ret != 0 {
+                    self.write_str("cd: no such directory: ");
+                    self.write_str(target);
+                    self.write_byte(b'\n');
+                }
+            }
             "export" => {
                 // export VAR=VALUE
-                if let Some(eq) = _args.find('=') {
-                    let key = _args[..eq].trim();
-                    let val = _args[eq + 1..].trim();
+                if let Some(eq) = args.find('=') {
+                    let key = args[..eq].trim();
+                    let val = args[eq + 1..].trim();
                     let key_owned = key.to_string();
                     let val_owned = val.to_string();
                     self.set_env(&key_owned, &val_owned);
@@ -302,8 +375,22 @@ impl Terminal {
                 let path = self.find_in_path(cmd_name).map(|s| s.to_string());
                 match path {
                     Some(bin_path) => {
-                        match process::exec(&bin_path) {
-                            Ok(_pid) => {}
+                        // 引数をスペース区切りで分割して子プロセスに渡す
+                        let arg_parts: Vec<&str> = if args.is_empty() {
+                            Vec::new()
+                        } else {
+                            args.split(' ').filter(|s| !s.is_empty()).collect()
+                        };
+                        let result = if arg_parts.is_empty() {
+                            process::exec(&bin_path)
+                        } else {
+                            process::exec_with_args(&bin_path, &arg_parts)
+                        };
+                        match result {
+                            Ok(pid) => {
+                                // 子プロセスの出力をIPCで受け取りながら終了を待つ
+                                self.drain_child_output(pid);
+                            }
                             Err(()) => {
                                 self.write_str("exec failed: ");
                                 self.write_str(&bin_path);

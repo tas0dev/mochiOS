@@ -716,11 +716,39 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     if is_user_mode {
-        // ユーザーモードでのページフォルト: プロセスを終了
+        if let Some(tid) = crate::task::current_thread_id() {
+            if let Some((pid, name)) = crate::task::with_thread(tid, |t| {
+                let pid = t.process_id();
+                let name = crate::task::with_process(pid, |p| {
+                    let mut s = alloc::string::String::new();
+                    s.push_str(p.name());
+                    s
+                })
+                .unwrap_or_else(|| alloc::string::String::from("<unknown>"));
+                (pid, name)
+            }) {
+                error!(
+                    "Faulting user context: pid={:?}, tid={:?}, process='{}', rip={:#x}, rsp={:#x}",
+                    pid,
+                    tid,
+                    name,
+                    stack_frame.instruction_pointer.as_u64(),
+                    stack_frame.stack_pointer.as_u64()
+                );
+            }
+        }
+
+        // 保護違反（既マップページへの不正アクセス）でなければスタック拡張を試みる
+        let is_protection_violation = error_code
+            .contains(x86_64::structures::idt::PageFaultErrorCode::PROTECTION_VIOLATION);
+        if !is_protection_violation {
+            if try_grow_user_stack(faulting_addr.as_u64()) {
+                return; // スタック拡張成功 → 命令を再試行
+            }
+        }
+
         error!("Terminating faulting user process");
         debug!("{:#?}", stack_frame);
-
-        // 現在のプロセスを終了させる
         crate::task::scheduler::exit_current_process(-1);
     } else {
         // カーネルモードでのページフォルト: システム全体を停止
@@ -728,6 +756,61 @@ extern "x86-interrupt" fn page_fault_handler(
         error!("{:#?}", stack_frame);
         error!("Please report this to https://github.com/tas0dev/mochiOS/issues with the above log details. :(");
         halt_cpu();
+    }
+}
+
+/// ユーザースタックの自動拡張を試みる。
+/// fault_addr がスタック下端の直下にある場合、新しいページをマップして true を返す。
+/// 最大スタックサイズは 8 MiB。
+fn try_grow_user_stack(fault_addr: u64) -> bool {
+    const MAX_STACK_SIZE: u64 = 8 * 1024 * 1024; // 8 MiB
+
+    let tid = match crate::task::current_thread_id() {
+        Some(t) => t,
+        None => return false,
+    };
+    let pid = match crate::task::with_thread(tid, |t| t.process_id()) {
+        Some(p) => p,
+        None => return false,
+    };
+    let (stack_bottom, stack_top, page_table) =
+        match crate::task::with_process(pid, |p| (p.stack_bottom(), p.stack_top(), p.page_table()))
+        {
+            Some(v) => v,
+            None => return false,
+        };
+    let page_table = match page_table {
+        Some(pt) => pt,
+        None => return false,
+    };
+    if stack_bottom == 0 || stack_top == 0 {
+        return false;
+    }
+    // フォルトアドレスは現在のスタック下端より下でなければならない
+    if fault_addr >= stack_bottom {
+        return false;
+    }
+    // 最大スタックサイズを超えて伸ばさない
+    let min_allowed = stack_top.saturating_sub(MAX_STACK_SIZE);
+    if fault_addr < min_allowed {
+        crate::error!(
+            "Stack overflow: fault at {:#x}, min allowed {:#x}",
+            fault_addr,
+            min_allowed
+        );
+        return false;
+    }
+    // フォルトページから現在の下端まで一括マップ（通常は1ページだけ）
+    let new_page = (fault_addr / 4096) * 4096;
+    let map_size = stack_bottom - new_page;
+    if crate::mem::paging::map_and_copy_segment_to(page_table, new_page, 0, map_size, &[], true, false)
+        .is_ok()
+    {
+        crate::task::with_process_mut(pid, |p| p.set_stack_bottom(new_page));
+        crate::debug!("Stack grown: {:#x} -> {:#x}", stack_bottom, new_page);
+        true
+    } else {
+        false
     }
 }
 

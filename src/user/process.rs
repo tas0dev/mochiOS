@@ -1,6 +1,6 @@
 //! プロセス管理関連のシステムコール
 
-use super::sys::{syscall1, SyscallNumber};
+use super::sys::{syscall1, syscall2, SyscallNumber};
 
 /// 実行可能ファイルを起動する
 /// パスから新しいプロセスを起動し、そのPIDを返す
@@ -17,6 +17,45 @@ pub fn exec(path: &str) -> Result<u64, ()> {
     let result = syscall1(
         SyscallNumber::Exec as u64,
         path_buf.as_ptr() as u64,
+    );
+
+    if (result as i64) < 0 {
+        Err(())
+    } else {
+        Ok(result)
+    }
+}
+
+/// 引数付きで実行可能ファイルを起動する
+/// args: 各引数のスライス（argv[0] = path は自動で設定）
+pub fn exec_with_args(path: &str, args: &[&str]) -> Result<u64, ()> {
+    let mut path_buf = [0u8; 256];
+    let path_bytes = path.as_bytes();
+    if path_bytes.len() >= 255 {
+        return Err(());
+    }
+    path_buf[..path_bytes.len()].copy_from_slice(path_bytes);
+    path_buf[path_bytes.len()] = 0;
+
+    // ヌル区切り引数文字列: "arg1\0arg2\0\0"
+    let mut args_buf = [0u8; 512];
+    let mut pos = 0usize;
+    for arg in args {
+        let b = arg.as_bytes();
+        if pos + b.len() + 2 > args_buf.len() {
+            break;
+        }
+        args_buf[pos..pos + b.len()].copy_from_slice(b);
+        pos += b.len();
+        args_buf[pos] = 0; // null terminate arg
+        pos += 1;
+    }
+    args_buf[pos] = 0; // double-null = end of args
+
+    let result = syscall2(
+        SyscallNumber::Exec as u64,
+        path_buf.as_ptr() as u64,
+        if args.is_empty() { 0 } else { args_buf.as_ptr() as u64 },
     );
 
     if (result as i64) < 0 {

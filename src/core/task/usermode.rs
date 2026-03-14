@@ -17,6 +17,9 @@ use core::arch::asm;
 pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3; // RPL=3
     let user_ss = gdt::user_data_selector() as u64 | 3; // RPL=3
+    let fs_base = crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |thread| thread.fs_base()))
+        .unwrap_or(0);
 
     // GDTエントリの内容を読み取って確認
     let cs_selector = gdt::user_code_selector();
@@ -59,10 +62,13 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
     );
 
     crate::debug!(
-        "Jumping to usermode: entry={:#x}, stack={:#x}",
+        "Jumping to usermode: entry={:#x}, stack={:#x}, fs_base={:#x}",
         entry,
-        user_stack
+        user_stack,
+        fs_base
     );
+
+    crate::cpu::write_fs_base(fs_base);
 
     // iretqスタックフレームを構築:
     // SS, RSP, RFLAGS, CS, RIP

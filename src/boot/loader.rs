@@ -277,7 +277,7 @@ unsafe fn try_load_from(
         }
     };
 
-    // ファイルサイズを取得して一時バッファに読み込む
+    // ファイルサイズを取得する
     let mut info_buf = [0u8; 512];
     let info = match file.get_info::<FileInfo>(&mut info_buf) {
         Ok(i) => i,
@@ -288,6 +288,84 @@ unsafe fn try_load_from(
     };
     let file_size = info.file_size() as usize;
     vga_println!("kernel.elf size: {} bytes", file_size);
+
+    // ELF ヘッダとプログラムヘッダを小さなスタックバッファで先読みし、
+    // カーネルのロードアドレス範囲を確定してからページを先に確保する。
+    // (フルバッファを AnyPages で先に確保すると 0x200000 に配置される場合があり、
+    //  その後の Address 指定確保が NOT_FOUND で失敗するため順序を逆にする)
+    const HDR_READ: usize = 16384; // 16 KiB: ELF ヘッダ + プログラムヘッダテーブルを包含
+    let mut hdr_buf = [0u8; HDR_READ];
+    let hdr_n = match file.read(&mut hdr_buf) {
+        Ok(n) => n,
+        Err(e) => {
+            vga_println!("header read failed: {:?}", e.status());
+            return None;
+        }
+    };
+
+    // ELF マジック / クラス / アーキテクチャを検証
+    let hdr = &*(hdr_buf.as_ptr() as *const Elf64Header);
+    if &hdr.e_ident[0..4] != b"\x7fELF" || hdr.e_ident[4] != 2 || hdr.e_machine != 0x3E {
+        vga_println!("ELF check failed: ident={:?} machine={:#x}", &hdr.e_ident[0..4], hdr.e_machine);
+        return None;
+    }
+
+    // PT_LOAD セグメント全体の物理アドレス範囲を計算する
+    // (セグメントは隣接・重複することがあるため、個別確保は不可)
+    let mut load_min = u64::MAX;
+    let mut load_max = 0u64;
+    for i in 0..hdr.e_phnum as usize {
+        let phdr_offset = hdr.e_phoff as usize + i * hdr.e_phentsize as usize;
+        if phdr_offset + size_of::<Elf64Phdr>() > hdr_n {
+            break;
+        }
+        let phdr = &*(hdr_buf.as_ptr().add(phdr_offset) as *const Elf64Phdr);
+        if phdr.p_type != PT_LOAD || phdr.p_memsz == 0 {
+            continue;
+        }
+        load_min = load_min.min(phdr.p_paddr & !0xFFF);
+        load_max = load_max.max((phdr.p_paddr + phdr.p_memsz + 0xFFF) & !0xFFF);
+    }
+    if load_min == u64::MAX {
+        vga_println!("no PT_LOAD segments");
+        return None;
+    }
+
+    // カーネルページをフルバッファより先に確保することで、
+    // 後の AnyPages 確保が同アドレスに重ならないようにする
+    let kernel_pages = ((load_max - load_min) as usize) / 0x1000;
+    vga_println!("kernel range {:#x}..{:#x} ({} pages)", load_min, load_max, kernel_pages);
+    match bt.allocate_pages(AllocateType::Address(load_min), UefiMemType::LOADER_DATA, kernel_pages) {
+        Ok(_) => {}
+        Err(e) => {
+            vga_println!("allocate_pages kernel failed: {:?}", e.status());
+            // 診断: load_min 付近のメモリマップエントリを表示する
+            if let Ok(mmap) = bt.memory_map(UefiMemType::LOADER_DATA) {
+                vga_println!("memory map around {:#x}:", load_min);
+                for desc in mmap.entries() {
+                    let end = desc.phys_start + desc.page_count * 0x1000;
+                    if end > load_min.saturating_sub(0x200000)
+                        && desc.phys_start < load_min + 0x200000
+                    {
+                        vga_println!(
+                            "  [{:#010x}..{:#010x}] type={:?}",
+                            desc.phys_start, end, desc.ty
+                        );
+                    }
+                }
+            }
+            return None;
+        }
+    }
+    // 全体をゼロクリア（BSS を含む）
+    core::ptr::write_bytes(load_min as *mut u8, 0, (load_max - load_min) as usize);
+
+    // ファイルを先頭に巻き戻してフルバッファに再読み込みする。
+    // カーネルページが確保済みなので AnyPages は別アドレスに配置される。
+    if let Err(e) = file.set_position(0) {
+        vga_println!("set_position failed: {:?}", e.status());
+        return None;
+    }
     let pages = (file_size + 0xFFF) / 0x1000;
     let buf_phys = match bt.allocate_pages(AllocateType::AnyPages, UefiMemType::LOADER_DATA, pages) {
         Ok(p) => p,
@@ -305,41 +383,8 @@ unsafe fn try_load_from(
         }
     }
 
-    // ELF マジック / クラス / アーキテクチャを検証
+    // 以降のコピー・再配置処理は buf を参照するため、hdr を buf から再取得する
     let hdr = &*(buf.as_ptr() as *const Elf64Header);
-    if &hdr.e_ident[0..4] != b"\x7fELF" || hdr.e_ident[4] != 2 || hdr.e_machine != 0x3E {
-        vga_println!("ELF check failed: ident={:?} machine={:#x}", &hdr.e_ident[0..4], hdr.e_machine);
-        return None;
-    }
-
-    // PT_LOAD セグメント全体の物理アドレス範囲を計算し、一括で確保する
-    // (セグメントは隣接・重複することがあるため、個別確保は不可)
-    let mut load_min = u64::MAX;
-    let mut load_max = 0u64;
-    for i in 0..hdr.e_phnum as usize {
-        let phdr_offset = hdr.e_phoff as usize + i * hdr.e_phentsize as usize;
-        let phdr = &*(buf.as_ptr().add(phdr_offset) as *const Elf64Phdr);
-        if phdr.p_type != PT_LOAD || phdr.p_memsz == 0 {
-            continue;
-        }
-        load_min = load_min.min(phdr.p_paddr & !0xFFF);
-        load_max = load_max.max((phdr.p_paddr + phdr.p_memsz + 0xFFF) & !0xFFF);
-    }
-    if load_min == u64::MAX {
-        vga_println!("no PT_LOAD segments");
-        return None;
-    }
-    let kernel_pages = ((load_max - load_min) as usize) / 0x1000;
-    vga_println!("kernel range {:#x}..{:#x} ({} pages)", load_min, load_max, kernel_pages);
-    match bt.allocate_pages(AllocateType::Address(load_min), UefiMemType::LOADER_DATA, kernel_pages) {
-        Ok(_) => {}
-        Err(e) => {
-            vga_println!("allocate_pages kernel failed: {:?}", e.status());
-            return None;
-        }
-    }
-    // 全体をゼロクリア（BSS を含む）
-    core::ptr::write_bytes(load_min as *mut u8, 0, (load_max - load_min) as usize);
 
     // 各 PT_LOAD セグメントのデータをコピー
     for i in 0..hdr.e_phnum as usize {
@@ -354,7 +399,7 @@ unsafe fn try_load_from(
     }
 
     // PT_DYNAMIC から RELA 再配置テーブルを探して R_X86_64_RELATIVE を適用する
-    // PIE としてロードアドレス == リンクアドレス (0x200000) なので load_base = 0
+    // ロードアドレス == リンクアドレス (0x4000000) なので load_base = 0
     let mut rela_addr = 0u64;
     let mut rela_size = 0usize;
     let mut rela_ent = size_of::<Elf64Rela>();

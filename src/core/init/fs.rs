@@ -311,13 +311,6 @@ fn read_inode_data(image: &[u8], sb: Superblock, inode_num: u32) -> Option<Vec<u
     let blocks_needed = size.div_ceil(sb.block_size as usize);
     let mut buf = Vec::with_capacity(size);
 
-    crate::debug!(
-        "read_inode_data: inode={}, size={}, blocks_needed={}",
-        inode_num,
-        size,
-        blocks_needed
-    );
-
     for block_idx in 0..blocks_needed {
         let block_num = data_block_number(image, sb, inode, block_idx)?;
         if block_num == 0 {
@@ -331,15 +324,6 @@ fn read_inode_data(image: &[u8], sb: Superblock, inode_num: u32) -> Option<Vec<u
         }
         let block = block_slice(image, sb.block_size, block_num)?;
         let to_copy = core::cmp::min(block.len(), size - buf.len());
-
-        crate::debug!(
-            "  block_idx={}, block_num={}, to_copy={}, written={}",
-            block_idx,
-            block_num,
-            to_copy,
-            buf.len()
-        );
-
         buf.extend_from_slice(&block[..to_copy]);
         if buf.len() >= size {
             break;
@@ -443,6 +427,133 @@ fn find_inode_in_dir(image: &[u8], sb: Superblock, dir_inode: Inode, name: &str)
         }
     }
     None
+}
+
+/// パスがディレクトリかどうかを確認する（rootfs優先、"."と"/"はルートとして扱う）
+/// ファイルメタデータ: (inode_mode, size_bytes)
+///
+/// - `inode_mode` は ext2 の inode mode フィールド（ファイル種別 + パーミッション）
+/// - ファイルが存在しない場合は `None`
+pub fn file_metadata(path: &str) -> Option<(u16, u64)> {
+    if !rootfs_image().is_empty() {
+        if let Some(m) = file_metadata_in(rootfs_image(), path) {
+            return Some(m);
+        }
+    }
+    file_metadata_in(ext2_image(), path)
+}
+
+fn file_metadata_in(image: &[u8], path: &str) -> Option<(u16, u64)> {
+    let sb = superblock(image)?;
+    let normalized = path.trim_matches('/');
+    if normalized.is_empty() || normalized == "." {
+        // ルートディレクトリ
+        let root = inode(image, sb, 2)?;
+        return Some((root.mode, 0));
+    }
+    let mut current = inode(image, sb, 2)?;
+    let mut parts = normalized.split('/').filter(|p| !p.is_empty()).peekable();
+    while let Some(part) = parts.next() {
+        if part == ".." || part == "." {
+            continue;
+        }
+        let inode_num = find_inode_in_dir(image, sb, current, part)?;
+        let next = inode(image, sb, inode_num)?;
+        if parts.peek().is_none() {
+            // 最終コンポーネント
+            return Some((next.mode, next.size as u64));
+        }
+        current = next;
+    }
+    None
+}
+
+pub fn is_directory(path: &str) -> bool {
+    if !rootfs_image().is_empty() && resolve_dir_inode_in(rootfs_image(), path).is_some() {
+        return true;
+    }
+    resolve_dir_inode_in(ext2_image(), path).is_some()
+}
+
+/// ディレクトリのエントリ名一覧を返す（"."と".."は除く、rootfs優先）
+pub fn readdir_path(path: &str) -> Option<alloc::vec::Vec<alloc::string::String>> {
+    if !rootfs_image().is_empty() {
+        if let Some(names) = readdir_path_in(rootfs_image(), path) {
+            return Some(names);
+        }
+    }
+    readdir_path_in(ext2_image(), path)
+}
+
+/// パスをディレクトリのinode番号に解決する（"."と"/"はルート inode 2を返す）
+fn resolve_dir_inode_in(image: &[u8], path: &str) -> Option<u32> {
+    let sb = superblock(image)?;
+    let normalized = path.trim_matches('/');
+    // "." や "" はルートを指す
+    if normalized.is_empty() || normalized == "." {
+        let root = inode(image, sb, 2)?;
+        return if is_dir(root.mode) { Some(2) } else { None };
+    }
+    let mut current_num = 2u32;
+    let mut current = inode(image, sb, current_num)?;
+    for part in normalized.split('/').filter(|p| !p.is_empty()) {
+        if part == "." {
+            continue;
+        }
+        if part == ".." {
+            // ".." はルートより上には行かない
+            continue;
+        }
+        if !is_dir(current.mode) {
+            return None;
+        }
+        let next_num = find_inode_in_dir(image, sb, current, part)?;
+        current = inode(image, sb, next_num)?;
+        current_num = next_num;
+    }
+    if is_dir(current.mode) { Some(current_num) } else { None }
+}
+
+fn readdir_path_in(image: &[u8], path: &str) -> Option<alloc::vec::Vec<alloc::string::String>> {
+    let sb = superblock(image)?;
+    let dir_inode_num = resolve_dir_inode_in(image, path)?;
+    let dir_inode = inode(image, sb, dir_inode_num)?;
+
+    let mut names = alloc::vec::Vec::new();
+    let mut block_idx = 0usize;
+    let mut offset = 0usize;
+    let mut remaining_bytes = dir_inode.size as usize;
+
+    while remaining_bytes > 0 {
+        let block_num = data_block_number(image, sb, dir_inode, block_idx)?;
+        if block_num == 0 {
+            break;
+        }
+        let data = block_slice(image, sb.block_size, block_num)?;
+        if offset >= data.len() {
+            block_idx += 1;
+            offset = 0;
+            continue;
+        }
+        let base = offset;
+        let entry_inode = read_u32(data, base)?;
+        let rec_len = read_u16(data, base + 4)? as usize;
+        let name_len = *data.get(base + 6)? as usize;
+        if rec_len == 0 {
+            break;
+        }
+        offset += rec_len;
+        remaining_bytes = remaining_bytes.saturating_sub(rec_len);
+        if entry_inode == 0 {
+            continue;
+        }
+        let name_bytes = data.get(base + 8..base + 8 + name_len)?;
+        let name = str::from_utf8(name_bytes).ok()?;
+        if name != "." && name != ".." {
+            names.push(alloc::string::String::from(name));
+        }
+    }
+    Some(names)
 }
 
 fn read_path_in(image: &[u8], path: &str) -> Option<Vec<u8>> {

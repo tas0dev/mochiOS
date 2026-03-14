@@ -32,14 +32,26 @@ pub fn fork() -> i64 {
     }
 }
 
-/// 子プロセスの終了を待つ（未実装）
+/// 子プロセスの終了を待つ
 pub fn wait(pid: i64) -> (i64, i32) {
     let ret = syscall1(SyscallNumber::Wait as u64, pid as u64);
     if (ret as i64) < 0 {
         (-1, 0)
     } else {
-        // TODO: ステータスを適切に返す
         (ret as i64, 0)
+    }
+}
+
+/// 子プロセスの終了を非ブロッキングで確認する（WNOHANG）
+/// 戻り値: Some(pid) = 終了済み, None = まだ実行中
+pub fn wait_nonblocking(pid: i64) -> Option<i64> {
+    use super::sys::syscall3;
+    const WNOHANG: u64 = 0x1;
+    let ret = syscall3(SyscallNumber::Wait as u64, pid as u64, 0, WNOHANG);
+    if (ret as i64) > 0 {
+        Some(ret as i64)
+    } else {
+        None
     }
 }
 

@@ -55,12 +55,20 @@ pub struct Thread {
     syscall_user_rflags: u64,
     /// futex wait timeout で起床したことを示すフラグ
     futex_timed_out: bool,
+    /// IPC受信などで眠る前に起床要求が来たことを示すフラグ
+    pending_wakeup: bool,
 }
 
 // Simple kernel stack pool for creating kernel stacks for threads
-const KSTACK_POOL_SIZE: usize = 4096 * 64; // 256 KiB
+const KSTACK_POOL_SIZE: usize = 4096 * 64; // 256 KiB（最大約12スレッド分、フリーリストで再利用）
 const KSTACK_PAGE_BYTES: usize = 4096;
 const KSTACK_GUARD_BYTES: usize = KSTACK_PAGE_BYTES;
+
+/// 解放済みカーネルスタックのフリーリスト
+/// 各エントリは guard_addr（= スタックベース - KSTACK_GUARD_BYTES）を格納。0 = 空き
+const KSTACK_FREE_LIST_CAP: usize = 32;
+static KSTACK_FREE_LIST: SpinLock<[u64; KSTACK_FREE_LIST_CAP]> =
+    SpinLock::new([0u64; KSTACK_FREE_LIST_CAP]);
 
 #[repr(align(4096))]
 struct KernelStackPool([u8; KSTACK_POOL_SIZE]);
@@ -100,17 +108,31 @@ fn unmap_guard_page(guard_addr: u64) -> bool {
 }
 
 /// カーネルスタックを内部プールから割り当てます。
+/// フリーリストに空きがあれば再利用し、なければバンプアロケータから新規割り当て。
 /// Returns base address (bottom) of stack.
 pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
     if size == 0 || size > KSTACK_POOL_SIZE.saturating_sub(KSTACK_GUARD_BYTES) {
         return None;
     }
-    // 1ページの未マップガードを挟むため、ページ境界で割り当てる
-    let size = size
+    let size_pages = size
         .checked_add(KSTACK_PAGE_BYTES - 1)?
         .checked_div(KSTACK_PAGE_BYTES)?
         .checked_mul(KSTACK_PAGE_BYTES)?;
-    let alloc_size = size.checked_add(KSTACK_GUARD_BYTES)?;
+
+    // フリーリストから再利用を試みる（guard ページは既に unmap 済み）
+    {
+        let mut list = KSTACK_FREE_LIST.lock();
+        for slot in list.iter_mut() {
+            if *slot != 0 {
+                let guard_addr = *slot;
+                *slot = 0;
+                return guard_addr.checked_add(KSTACK_GUARD_BYTES as u64);
+            }
+        }
+    }
+
+    // バンプアロケータから新規割り当て
+    let alloc_size = size_pages.checked_add(KSTACK_GUARD_BYTES)?;
     let off = NEXT_KSTACK_OFFSET.fetch_add(alloc_size, core::sync::atomic::Ordering::SeqCst);
     if off + alloc_size > KSTACK_POOL_SIZE {
         return None;
@@ -126,6 +148,34 @@ pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
     }
 
     guard_addr.checked_add(KSTACK_GUARD_BYTES as u64)
+}
+
+/// カーネルスタックをフリーリストへ返却する。
+/// `base` は `allocate_kernel_stack` が返したアドレス（ガードページの直上）。
+pub fn free_kernel_stack(base: u64) {
+    if base == 0 {
+        return;
+    }
+    let guard_addr = match base.checked_sub(KSTACK_GUARD_BYTES as u64) {
+        Some(a) => a,
+        None => return,
+    };
+    // プール範囲内のアドレスのみ受け付ける
+    let pool_base = {
+        let pool = KSTACK_POOL.lock();
+        pool.0.as_ptr() as u64
+    };
+    if guard_addr < pool_base || guard_addr >= pool_base + KSTACK_POOL_SIZE as u64 {
+        return;
+    }
+    let mut list = KSTACK_FREE_LIST.lock();
+    for slot in list.iter_mut() {
+        if *slot == 0 {
+            *slot = guard_addr;
+            return;
+        }
+    }
+    // フリーリストが満杯の場合はリークさせる（通常は発生しない）
 }
 
 impl Thread {
@@ -202,6 +252,7 @@ impl Thread {
             syscall_user_rsp: 0,
             syscall_user_rflags: 0,
             futex_timed_out: false,
+            pending_wakeup: false,
         }
     }
 
@@ -302,6 +353,7 @@ impl Thread {
             syscall_user_rsp: 0,
             syscall_user_rflags: 0,
             futex_timed_out: false,
+            pending_wakeup: false,
         }
     }
 
@@ -403,6 +455,7 @@ impl Thread {
             syscall_user_rsp: user_rsp,
             syscall_user_rflags: user_rflags,
             futex_timed_out: false,
+            pending_wakeup: false,
         }
     }
 
@@ -450,6 +503,18 @@ impl Thread {
         let timed_out = self.futex_timed_out;
         self.futex_timed_out = false;
         timed_out
+    }
+
+    /// 起床要求フラグを立てる（眠る前に wake が呼ばれた場合の競合回避）
+    pub fn set_pending_wakeup(&mut self) {
+        self.pending_wakeup = true;
+    }
+
+    /// 起床要求フラグを取り出して消去する。true なら眠る必要はない。
+    pub fn take_pending_wakeup(&mut self) -> bool {
+        let v = self.pending_wakeup;
+        self.pending_wakeup = false;
+        v
     }
 
     /// スレッドIDを取得
@@ -513,6 +578,11 @@ impl Thread {
         }
         let guard_start = self.kernel_stack - KSTACK_GUARD_BYTES as u64;
         crate::mem::paging::translate_addr(VirtAddr::new(guard_start)).is_none()
+    }
+
+    /// カーネルスタックのベースアドレス（フリーリスト返却用）
+    pub fn kernel_stack_base(&self) -> u64 {
+        self.kernel_stack
     }
 }
 

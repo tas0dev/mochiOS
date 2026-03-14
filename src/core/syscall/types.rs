@@ -6,6 +6,8 @@ pub enum SyscallNumber {
     Read = 0,
     /// 書き込み
     Write = 1,
+    /// ベクタ書き込み
+    Writev = 20,
     /// ファイルを開く
     Open = 2,
     /// ファイルを閉じる
@@ -24,6 +26,8 @@ pub enum SyscallNumber {
     Brk = 12,
     /// シグナル処理（スタブ）
     RtSigaction = 13,
+    /// シグナルリターン
+    RtSigreturn = 15,
     /// シグナルマスク（スタブ）
     RtSigprocmask = 14,
     /// clone (スレッド生成)
@@ -48,8 +52,68 @@ pub enum SyscallNumber {
     Exit = 60,
     /// exit_group (全スレッドを終了)
     ExitGroup = 231,
+    /// kill (シグナルを送る)
+    Kill = 62,
     /// getcwd
     Getcwd = 79,
+    /// getppid
+    GetPpid = 110,
+    /// setpgid
+    Setpgid = 109,
+    /// getpgid
+    Getpgid = 121,
+    /// setsid
+    Setsid = 112,
+    /// getsid
+    Getsid = 124,
+    /// ioctl
+    Ioctl = 16,
+    /// access
+    Access = 21,
+    /// getuid
+    Getuid = 102,
+    /// getgid
+    Getgid = 104,
+    /// geteuid
+    Geteuid = 107,
+    /// getegid
+    Getegid = 108,
+    /// lstat (stat のシンボリックリンク非追跡版、ここでは stat と同一実装)
+    Lstat = 6,
+    /// readlink (スタブ)
+    Readlink = 89,
+    /// fcntl (FD フラグ操作)
+    Fcntl = 72,
+    /// pipe
+    Pipe = 22,
+    /// dup
+    Dup = 32,
+    /// dup2
+    Dup2 = 33,
+    /// mprotect
+    Mprotect = 10,
+    /// nanosleep
+    Nanosleep = 35,
+    /// uname
+    Uname = 63,
+    /// getrlimit
+    Getrlimit = 97,
+    /// set_tid_address
+    SetTidAddress = 218,
+    /// openat
+    Openat = 257,
+    /// getdents64
+    Getdents64 = 217,
+    /// prlimit64
+    Prlimit64 = 302,
+    /// pipe2
+    Pipe2 = 293,
+    /// newfstatat (fstatat)
+    Newfstatat = 262,
+    /// faccessat
+    Faccessat = 269,
+    /// readlinkat
+    Readlinkat = 267,
 
     // mochiOS独自syscall (Linux未使用番号帯: 512+)
     /// スケジューラへ譲る
@@ -90,6 +154,12 @@ pub enum SyscallNumber {
     MapFramebuffer = 529,
     /// メモリ上の ELF バッファから新プロセスを起動
     ExecFromBuffer = 530,
+    /// コンソールカーソルのピクセルY位置を設定
+    SetConsoleCursor = 531,
+    /// コンソールカーソルのピクセルY位置を取得
+    GetConsoleCursor = 532,
+    /// IPC受信（ブロッキング版）：メッセージが届くまでスリープして待機
+    IpcRecvWait = 533,
 }
 
 /// 成功
@@ -100,6 +170,8 @@ pub const SUCCESS: u64 = 0;
 pub const EPERM: u64 = (-1i64) as u64;
 /// ファイルが見つからない
 pub const ENOENT: u64 = (-2i64) as u64;
+/// プロセスが見つからない
+pub const ESRCH: u64 = (-3i64) as u64;
 /// I/Oエラー
 pub const EIO: u64 = (-5i64) as u64;
 /// 不正なファイルディスクリプタ
@@ -118,3 +190,15 @@ pub const ENODATA: u64 = (-61i64) as u64;
 pub const EAGAIN: u64 = (-11i64) as u64;
 /// メモリ不足
 pub const ENOMEM: u64 = (-12i64) as u64;
+/// ファイルが既に存在する
+pub const EEXIST: u64 = (-17i64) as u64;
+/// デバイスでない (TTY 操作に非 TTY FD を使用した)
+pub const ENOTTY: u64 = (-25i64) as u64;
+/// 引数が範囲外
+pub const ERANGE: u64 = (-34i64) as u64;
+/// 操作がサポートされていない
+pub const ENOTSUP: u64 = (-95i64) as u64;
+/// パイプが壊れている
+pub const EPIPE: u64 = (-32i64) as u64;
+/// ファイルディスクリプタが多すぎる
+pub const EMFILE: u64 = (-24i64) as u64;

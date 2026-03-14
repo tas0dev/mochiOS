@@ -4,14 +4,14 @@ use swiftlib::ipc;
 use swiftlib::task;
 
 mod common;
-mod initfs;
-mod ext2;
 mod disk_device;
+mod ext2;
+mod initfs;
 
-use common::{FileHandle, FileSystem, VfsError, resolve_path};
-use initfs::InitFs;
-use ext2::Ext2Fs;
+use common::{resolve_path, FileHandle, FileSystem, VfsError};
 use disk_device::DiskServiceDevice;
+use ext2::Ext2Fs;
+use initfs::InitFs;
 
 const MAX_HANDLES: usize = 16;
 
@@ -26,7 +26,11 @@ impl OpenFile {
     const fn new() -> Self {
         Self {
             used: false,
-            handle: FileHandle { inode: 0, offset: 0, flags: 0 },
+            handle: FileHandle {
+                inode: 0,
+                offset: 0,
+                flags: 0,
+            },
             fs_id: 0,
         }
     }
@@ -101,12 +105,14 @@ fn mount_filesystem() {
 
     if let Some(pid) = disk_pid {
         println!("[FS] Mounting ext2 from disk 1 via PID={}...", pid);
-        let device = DiskServiceDevice::new(pid, 1); // disk 1 = Primary Slave = swiftCore.img
+        let device = DiskServiceDevice::new(pid, 1); // disk 1 = Primary Slave = mochiOS.img
         println!("[FS] Calling Ext2Fs::new...");
         match Ext2Fs::new(Box::new(device)) {
             Ok(fs) => {
                 println!("[FS] ext2 filesystem mounted from ATA disk.");
-                unsafe { MOUNTED_FS = Some(Box::new(fs)); }
+                unsafe {
+                    MOUNTED_FS = Some(Box::new(fs));
+                }
                 return;
             }
             Err(e) => {
@@ -123,7 +129,9 @@ fn mount_filesystem() {
     if let Err(e) = initfs.create_sample_files() {
         println!("[FS] Warning: Failed to create sample files: {:?}", e);
     }
-    unsafe { MOUNTED_FS = Some(boxed::Box::new(initfs)); }
+    unsafe {
+        MOUNTED_FS = Some(boxed::Box::new(initfs));
+    }
     println!("[FS] InitFS mounted as fallback.");
 }
 
@@ -164,7 +172,11 @@ fn main() {
             let req: FsRequest = unsafe { core::ptr::read(recv_buf.0.as_ptr() as *const _) };
             println!("[FS] REQ op={} from PID={}", req.op, sender);
 
-            let mut resp = FsResponse { status: -1, len: 0, data: [0; 128] };
+            let mut resp = FsResponse {
+                status: -1,
+                len: 0,
+                data: [0; 128],
+            };
 
             match req.op {
                 FsRequest::OP_OPEN => {
@@ -197,7 +209,7 @@ fn main() {
                             }
                         }
                     }
-                },
+                }
                 FsRequest::OP_READ => {
                     let fd = req.arg1 as usize;
                     let read_len = req.arg2 as usize;
@@ -228,19 +240,21 @@ fn main() {
                     } else {
                         resp.status = -9; // EBADF
                     }
-                },
+                }
                 FsRequest::OP_WRITE => {
                     resp.status = vfs_error_to_errno(VfsError::NotSupported);
-                },
+                }
                 FsRequest::OP_CLOSE => {
                     let fd = req.arg1 as usize;
                     if fd < MAX_HANDLES && unsafe { HANDLES[fd].used } {
-                        unsafe { HANDLES[fd].used = false; }
+                        unsafe {
+                            HANDLES[fd].used = false;
+                        }
                         resp.status = 0;
                     } else {
                         resp.status = -9; // EBADF
                     }
-                },
+                }
                 _ => {
                     println!("[FS] Unknown OP: {}", req.op);
                     continue;

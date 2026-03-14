@@ -195,10 +195,8 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
     crate::syscall::syscall_entry::update_kernel_rsp(next_kstack_top);
 
     // 次のスレッドの FS ベースを復元 (TLS)
-    if next_fs_base != 0 {
-        unsafe {
-            crate::cpu::write_fs_base(next_fs_base);
-        }
+    unsafe {
+        crate::cpu::write_fs_base(next_fs_base);
     }
 
     // 次のコンテキストがカーネル実行の場合はカーネルCR3に固定する
@@ -322,9 +320,7 @@ pub unsafe fn switch_to_thread_from_isr(
     crate::syscall::syscall_entry::update_kernel_rsp(next_kstack_top);
 
     // 次のスレッドの FS ベースを復元 (TLS)
-    if next_fs_base != 0 {
-        crate::cpu::write_fs_base(next_fs_base);
-    }
+    crate::cpu::write_fs_base(next_fs_base);
 
     // 次のコンテキストがカーネル実行の場合はカーネルCR3に固定する
     if next_priv == crate::task::PrivilegeLevel::Core || next_in_syscall {
