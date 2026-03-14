@@ -4,78 +4,8 @@ use std::alloc::{alloc_zeroed, Layout};
 
 use swiftlib::{keyboard, mmio, mouse, port, time};
 
-const PCI_CFG_ADDR_PORT: u16 = 0xCF8;
-const PCI_CFG_DATA_PORT: u16 = 0xCFC;
-
-const XHCI_CLASS_CODE: u8 = 0x0C;
-const XHCI_SUBCLASS: u8 = 0x03;
-const XHCI_PROG_IF: u8 = 0x30;
-
-const XHCI_MMIO_MAP_SIZE: usize = 0x10000;
-const PAGE_SIZE: usize = 4096;
-const TRB_SIZE: usize = 16;
-
-const ENOMEM: u64 = (-12i64) as u64;
-const EINVAL: u64 = (-22i64) as u64;
-
-const OP_USBCMD: usize = 0x00;
-const OP_USBSTS: usize = 0x04;
-const OP_CRCR: usize = 0x18;
-const OP_CONFIG: usize = 0x38;
-
-const USBCMD_RUN_STOP: u32 = 1 << 0;
-const USBCMD_HCRST: u32 = 1 << 1;
-const USBCMD_INTE: u32 = 1 << 2;
-const USBSTS_HCHALTED: u32 = 1 << 0;
-const USBSTS_EINT: u32 = 1 << 3;
-const USBSTS_CNR: u32 = 1 << 11;
-
-const RT_IR0_BASE: usize = 0x20;
-const IR_IMAN: usize = 0x00;
-const IR_IMOD: usize = 0x04;
-const IR_ERSTSZ: usize = 0x08;
-const IR_ERSTBA: usize = 0x10;
-const IR_ERDP: usize = 0x18;
-
-const IMAN_IP: u32 = 1 << 0;
-const IMAN_IE: u32 = 1 << 1;
-const ERDP_EHB: u64 = 1 << 3;
-
-const TRB_TYPE_LINK: u32 = 6;
-const TRB_TYPE_NOOP_CMD: u32 = 23;
-const TRB_TYPE_TRANSFER_EVENT: u32 = 32;
-const TRB_TYPE_COMMAND_COMPLETION: u32 = 33;
-const TRB_TYPE_PORT_STATUS_CHANGE: u32 = 34;
-
-#[derive(Clone, Copy)]
-struct PciBdf {
-    bus: u8,
-    device: u8,
-    function: u8,
-}
-
-#[derive(Clone, Copy)]
-struct XhciController {
-    bdf: PciBdf,
-    vendor_id: u16,
-    device_id: u16,
-    bar0: u32,
-    bar1: u32,
-    mmio_base: u64,
-    bar_is_64bit: bool,
-}
-
-#[derive(Clone, Copy)]
-struct XhciRegs {
-    base: *mut u8,
-    cap_len: usize,
-    op_base: usize,
-    db_off: usize,
-    rt_off: usize,
-    max_ports: u8,
-    max_slots: u8,
-    hci_version: u16,
-}
+mod define;
+use define::*;
 
 fn pci_config_address(bdf: PciBdf, offset: u8) -> u32 {
     0x8000_0000
@@ -234,12 +164,6 @@ fn map_xhci_mmio(controller: &XhciController) -> Result<*mut u8, u64> {
     Ok(unsafe { mapped.add(page_offset) })
 }
 
-struct DmaPage {
-    virt: *mut u8,
-    phys: u64,
-    size: usize,
-}
-
 impl DmaPage {
     fn alloc(size: usize) -> Result<Self, u64> {
         if size == 0 {
@@ -255,6 +179,103 @@ impl DmaPage {
             return Err(EINVAL);
         }
         Ok(Self { virt, phys, size })
+    }
+
+    fn zero(&self) {
+        unsafe {
+            core::ptr::write_bytes(self.virt, 0, self.size);
+        }
+    }
+
+    fn write_u32(&self, offset: usize, value: u32) {
+        if offset + 4 > self.size {
+            return;
+        }
+        unsafe {
+            write_volatile(self.virt.add(offset) as *mut u32, value);
+        }
+    }
+
+    fn read_u32(&self, offset: usize) -> u32 {
+        if offset + 4 > self.size {
+            return 0;
+        }
+        unsafe { read_volatile(self.virt.add(offset) as *const u32) }
+    }
+
+    fn write_bytes(&self, offset: usize, bytes: &[u8]) {
+        if offset + bytes.len() > self.size {
+            return;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.virt.add(offset), bytes.len());
+        }
+    }
+
+    fn read_bytes(&self, offset: usize, len: usize) -> Vec<u8> {
+        if len == 0 || offset + len > self.size {
+            return Vec::new();
+        }
+        let mut out = vec![0u8; len];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = unsafe { read_volatile(self.virt.add(offset + i)) };
+        }
+        out
+    }
+}
+
+impl TransferRing {
+    fn new() -> Result<Self, u64> {
+        let page = DmaPage::alloc(PAGE_SIZE)?;
+        let trb_count = page.size / TRB_SIZE;
+        if trb_count < 2 {
+            return Err(EINVAL);
+        }
+
+        let link_index = trb_count - 1;
+        let link = [
+            (page.phys & 0xFFFF_FFF0) as u32,
+            (page.phys >> 32) as u32,
+            0,
+            (TRB_TYPE_LINK << 10) | (1 << 1) | 1,
+        ];
+        trb_write(&page, link_index, link);
+
+        Ok(Self {
+            page,
+            trb_count,
+            enqueue_idx: 0,
+            cycle: true,
+        })
+    }
+
+    #[inline]
+    fn ring_phys(&self) -> u64 {
+        self.page.phys
+    }
+
+    #[inline]
+    fn link_index(&self) -> usize {
+        self.trb_count - 1
+    }
+
+    fn push_trb(&mut self, mut trb: [u32; 4]) -> u64 {
+        let idx = self.enqueue_idx;
+        let trb_phys = self.page.phys + (idx * TRB_SIZE) as u64;
+        if self.cycle {
+            trb[3] |= 1;
+        } else {
+            trb[3] &= !1;
+        }
+        trb_write(&self.page, idx, trb);
+        compiler_fence(AtomicOrdering::SeqCst);
+
+        self.enqueue_idx += 1;
+        if self.enqueue_idx >= self.link_index() {
+            self.enqueue_idx = 0;
+            self.cycle = !self.cycle;
+        }
+        trb_phys
     }
 }
 
@@ -323,10 +344,17 @@ impl CommandRing {
     }
 
     fn push_noop_command(&mut self) -> u64 {
+        self.push_command([0, 0, 0, TRB_TYPE_NOOP_CMD << 10])
+    }
+
+    fn push_command(&mut self, mut trb: [u32; 4]) -> u64 {
         let idx = self.enqueue_idx;
         let trb_phys = self.page.phys + (idx * TRB_SIZE) as u64;
-        let cycle_bit = if self.cycle { 1 } else { 0 };
-        let trb = [0, 0, 0, (TRB_TYPE_NOOP_CMD << 10) | cycle_bit];
+        if self.cycle {
+            trb[3] |= 1;
+        } else {
+            trb[3] &= !1;
+        }
         trb_write(&self.page, idx, trb);
         compiler_fence(AtomicOrdering::SeqCst);
 
@@ -406,11 +434,69 @@ struct HidParserState {
     prev_mouse_buttons: u8,
 }
 
+#[derive(Clone, Copy)]
+struct HidEndpointConfig {
+    ep_addr: u8,
+    dci: u8,
+    ep_type: u8,
+    max_packet: u16,
+    interval: u8,
+}
+
+struct HidEndpointState {
+    config: HidEndpointConfig,
+    ring: TransferRing,
+    report_buf: DmaPage,
+    report_len: usize,
+}
+
+struct UsbDeviceState {
+    port_id: u8,
+    port_speed: u8,
+    slot_id: u8,
+    ep0_max_packet: u16,
+    input_ctx: DmaPage,
+    dev_ctx: DmaPage,
+    ep0_ring: TransferRing,
+    descriptor_buf: DmaPage,
+    hid_ep: Option<HidEndpointState>,
+}
+
+enum PendingCommandKind {
+    Noop,
+    EnableSlot { port_id: u8 },
+    AddressDevice { slot_id: u8 },
+    ConfigureEndpoint { slot_id: u8, dci: u8 },
+}
+
+struct PendingCommand {
+    trb_phys: u64,
+    kind: PendingCommandKind,
+}
+
+enum PendingTransferKind {
+    DeviceDescriptor8 { slot_id: u8 },
+    ConfigHeader { slot_id: u8 },
+    ConfigFull { slot_id: u8 },
+    InterruptIn { slot_id: u8, dci: u8 },
+}
+
+struct PendingTransfer {
+    trb_phys: u64,
+    data_phys: u64,
+    data_len: usize,
+    kind: PendingTransferKind,
+}
+
 struct XhciRuntime {
     regs: XhciRegs,
+    dcbaa: DmaPage,
     command_ring: CommandRing,
     event_ring: EventRing,
-    pending_noop_phys: Option<u64>,
+    devices: Vec<UsbDeviceState>,
+    pending_commands: Vec<PendingCommand>,
+    pending_transfers: Vec<PendingTransfer>,
+    enumerating_port: Option<u8>,
     hid: HidParserState,
 }
 
@@ -422,10 +508,12 @@ fn read_xhci_regs(base: *mut u8) -> Option<XhciRegs> {
 
     let hci_version = mmio_read_u16(base, 0x02);
     let hcs_params1 = mmio_read_u32(base, 0x04);
+    let hccparams1 = mmio_read_u32(base, 0x10);
     let max_slots = (hcs_params1 & 0xFF) as u8;
     let max_ports = ((hcs_params1 >> 24) & 0xFF) as u8;
     let db_off = (mmio_read_u32(base, 0x14) & !0x3) as usize;
     let rt_off = (mmio_read_u32(base, 0x18) & !0x1F) as usize;
+    let context_size = if (hccparams1 & (1 << 2)) != 0 { 64 } else { 32 };
 
     Some(XhciRegs {
         base,
@@ -436,6 +524,8 @@ fn read_xhci_regs(base: *mut u8) -> Option<XhciRegs> {
         max_ports,
         max_slots,
         hci_version,
+        hccparams1,
+        context_size,
     })
 }
 
@@ -512,44 +602,399 @@ fn start_xhci(regs: &XhciRegs) -> bool {
     wait_until(1000, || (mmio_read_u32(regs.base, regs.op_base + OP_USBSTS) & USBSTS_HCHALTED) == 0)
 }
 
-fn read_transfer_report_bytes(transfer_trb_phys: u64) -> Option<Vec<u8>> {
-    let trb_map = mmio::map_physical(transfer_trb_phys & !0xFFF, PAGE_SIZE).ok()?;
-    let trb_off = (transfer_trb_phys & 0xFFF) as usize;
-    if trb_off + TRB_SIZE > PAGE_SIZE {
-        return None;
+#[inline]
+fn input_ctx_offset(ctx_size: usize, index: usize) -> usize {
+    ctx_size * index
+}
+
+#[inline]
+fn device_ctx_offset(ctx_size: usize, dci: usize) -> usize {
+    ctx_size * dci
+}
+
+#[inline]
+fn endpoint_dci_from_address(ep_addr: u8) -> u8 {
+    let ep_num = ep_addr & 0x0F;
+    if ep_num == 0 {
+        1
+    } else if (ep_addr & 0x80) != 0 {
+        ep_num.saturating_mul(2).saturating_add(1)
+    } else {
+        ep_num.saturating_mul(2)
+    }
+}
+
+fn endpoint_type_from_descriptor(ep_addr: u8, attrs: u8) -> Option<u8> {
+    match attrs & 0x3 {
+        0 => Some(4), // control
+        1 => Some(if (ep_addr & 0x80) != 0 { 5 } else { 1 }), // isoch
+        2 => Some(if (ep_addr & 0x80) != 0 { 6 } else { 2 }), // bulk
+        3 => Some(if (ep_addr & 0x80) != 0 { 7 } else { 3 }), // interrupt
+        _ => None,
+    }
+}
+
+fn default_ep0_max_packet(speed: u8) -> u16 {
+    match speed {
+        4 | 5 => 512,
+        3 => 64,
+        2 | 1 => 8,
+        _ => 8,
+    }
+}
+
+fn portsc_offset(regs: &XhciRegs, port_id: u8) -> usize {
+    regs.op_base + 0x400 + (usize::from(port_id.saturating_sub(1)) * 0x10)
+}
+
+fn read_port_speed(regs: &XhciRegs, port_id: u8) -> u8 {
+    let portsc = mmio_read_u32(regs.base, portsc_offset(regs, port_id));
+    ((portsc >> 10) & 0x0F) as u8
+}
+
+fn find_first_connected_port(regs: &XhciRegs) -> Option<u8> {
+    for p in 1..=regs.max_ports {
+        let portsc = mmio_read_u32(regs.base, portsc_offset(regs, p));
+        if (portsc & 1) != 0 {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn submit_command(runtime: &mut XhciRuntime, trb: [u32; 4], kind: PendingCommandKind) -> u64 {
+    let trb_phys = runtime.command_ring.push_command(trb);
+    runtime.pending_commands.push(PendingCommand { trb_phys, kind });
+    ring_doorbell(&runtime.regs, 0, 0);
+    trb_phys
+}
+
+fn write_dcbaa_slot(dcbaa: &DmaPage, slot_id: u8, value: u64) {
+    if slot_id == 0 {
+        return;
+    }
+    let off = usize::from(slot_id) * 8;
+    if off + 8 > dcbaa.size {
+        return;
+    }
+    dcbaa.write_u32(off, value as u32);
+    dcbaa.write_u32(off + 4, (value >> 32) as u32);
+}
+
+fn find_device_index(runtime: &XhciRuntime, slot_id: u8) -> Option<usize> {
+    runtime.devices.iter().position(|d| d.slot_id == slot_id)
+}
+
+fn build_address_input_context(regs: &XhciRegs, dev: &mut UsbDeviceState) {
+    dev.input_ctx.zero();
+    dev.input_ctx.write_u32(0x00, 0);
+    dev.input_ctx.write_u32(0x04, 0x3); // add slot + ep0
+
+    let slot_off = input_ctx_offset(regs.context_size, 1);
+    let slot_dw0 = ((u32::from(dev.port_speed) & 0xF) << 20) | (1 << 27);
+    let slot_dw1 = (u32::from(dev.port_id) & 0xFF) << 16;
+    dev.input_ctx.write_u32(slot_off + 0x00, slot_dw0);
+    dev.input_ctx.write_u32(slot_off + 0x04, slot_dw1);
+
+    let ep0_off = input_ctx_offset(regs.context_size, 2);
+    let tr_deq = (dev.ep0_ring.ring_phys() & !0xF) | 1;
+    let ep0_dw1 = 3 | (4 << 3) | (u32::from(dev.ep0_max_packet) << 16); // CErr=3, Control EP
+    dev.input_ctx.write_u32(ep0_off + 0x00, 0);
+    dev.input_ctx.write_u32(ep0_off + 0x04, ep0_dw1);
+    dev.input_ctx.write_u32(ep0_off + 0x08, tr_deq as u32);
+    dev.input_ctx.write_u32(ep0_off + 0x0C, (tr_deq >> 32) as u32);
+    dev.input_ctx
+        .write_u32(ep0_off + 0x10, u32::from(dev.ep0_max_packet));
+}
+
+fn build_configure_endpoint_input_context(regs: &XhciRegs, dev: &mut UsbDeviceState) -> Option<u8> {
+    let hid = dev.hid_ep.as_ref()?;
+    let dci = hid.config.dci;
+
+    dev.input_ctx.zero();
+    dev.input_ctx.write_u32(0x00, 0); // drop flags
+    dev.input_ctx
+        .write_u32(0x04, (1u32 << 0) | (1u32 << u32::from(dci))); // add slot + endpoint
+
+    // slot context は既存 device context をコピー
+    let slot_in_off = input_ctx_offset(regs.context_size, 1);
+    let slot_dev_off = device_ctx_offset(regs.context_size, 0);
+    for off in (0..regs.context_size).step_by(4) {
+        let v = dev.dev_ctx.read_u32(slot_dev_off + off);
+        dev.input_ctx.write_u32(slot_in_off + off, v);
     }
 
-    let trb_ptr = unsafe { trb_map.add(trb_off) as *const u32 };
-    let trb = unsafe {
+    let mut slot_dw0 = dev.input_ctx.read_u32(slot_in_off);
+    slot_dw0 &= !((0x1F << 27) | (0x0F << 20));
+    slot_dw0 |= ((u32::from(dci) & 0x1F) << 27) | ((u32::from(dev.port_speed) & 0x0F) << 20);
+    dev.input_ctx.write_u32(slot_in_off, slot_dw0);
+
+    let ep_off = input_ctx_offset(regs.context_size, usize::from(dci) + 1);
+    let tr_deq = (hid.ring.ring_phys() & !0xF) | 1;
+    let interval = u32::from(core::cmp::max(hid.config.interval, 1));
+    let ep_dw0 = interval << 16;
+    let ep_dw1 = 3 | (u32::from(hid.config.ep_type) << 3) | (u32::from(hid.config.max_packet) << 16);
+    dev.input_ctx.write_u32(ep_off + 0x00, ep_dw0);
+    dev.input_ctx.write_u32(ep_off + 0x04, ep_dw1);
+    dev.input_ctx.write_u32(ep_off + 0x08, tr_deq as u32);
+    dev.input_ctx.write_u32(ep_off + 0x0C, (tr_deq >> 32) as u32);
+    dev.input_ctx
+        .write_u32(ep_off + 0x10, u32::from(hid.config.max_packet));
+
+    Some(dci)
+}
+
+fn submit_enable_slot_for_port(runtime: &mut XhciRuntime, port_id: u8) {
+    if runtime.enumerating_port.is_some() {
+        return;
+    }
+    if runtime.devices.iter().any(|d| d.port_id == port_id) {
+        return;
+    }
+    runtime.enumerating_port = Some(port_id);
+    submit_command(
+        runtime,
+        [0, 0, 0, TRB_TYPE_ENABLE_SLOT_CMD << 10],
+        PendingCommandKind::EnableSlot { port_id },
+    );
+    println!("[xHCI] submitted Enable Slot for port {}", port_id);
+}
+
+fn create_device_for_slot(runtime: &mut XhciRuntime, port_id: u8, slot_id: u8) -> Result<(), u64> {
+    let speed = read_port_speed(&runtime.regs, port_id);
+    let mut dev = UsbDeviceState {
+        port_id,
+        port_speed: speed,
+        slot_id,
+        ep0_max_packet: default_ep0_max_packet(speed),
+        input_ctx: DmaPage::alloc(PAGE_SIZE)?,
+        dev_ctx: DmaPage::alloc(PAGE_SIZE)?,
+        ep0_ring: TransferRing::new()?,
+        descriptor_buf: DmaPage::alloc(PAGE_SIZE)?,
+        hid_ep: None,
+    };
+    dev.dev_ctx.zero();
+    build_address_input_context(&runtime.regs, &mut dev);
+    write_dcbaa_slot(&runtime.dcbaa, slot_id, dev.dev_ctx.phys);
+    let input_ctx_phys = dev.input_ctx.phys;
+
+    runtime.devices.push(dev);
+    submit_command(
+        runtime,
         [
-            read_volatile(trb_ptr.add(0)),
-            read_volatile(trb_ptr.add(1)),
-            read_volatile(trb_ptr.add(2)),
-            read_volatile(trb_ptr.add(3)),
-        ]
+            input_ctx_phys as u32,
+            (input_ctx_phys >> 32) as u32,
+            0,
+            (TRB_TYPE_ADDRESS_DEVICE_CMD << 10) | (u32::from(slot_id) << 24),
+        ],
+        PendingCommandKind::AddressDevice { slot_id },
+    );
+    println!(
+        "[xHCI] slot {} assigned to port {} (speed={} {})",
+        slot_id,
+        port_id,
+        speed,
+        decode_port_speed(speed)
+    );
+    Ok(())
+}
+
+fn submit_control_in_transfer(
+    runtime: &mut XhciRuntime,
+    slot_id: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    length: u16,
+    kind: PendingTransferKind,
+) -> bool {
+    let Some(dev_idx) = find_device_index(runtime, slot_id) else {
+        return false;
     };
 
-    let req_len = (trb[2] & 0x1FFFF) as usize;
-    if req_len == 0 || req_len > 64 {
-        return None;
+    let (status_trb_phys, data_phys, data_len) = {
+        let dev = &mut runtime.devices[dev_idx];
+        dev.descriptor_buf.zero();
+
+        let setup_packet = u64::from(0x80u8)
+            | (u64::from(request) << 8)
+            | (u64::from(value) << 16)
+            | (u64::from(index) << 32)
+            | (u64::from(length) << 48);
+
+        let setup_trb = [
+            setup_packet as u32,
+            (setup_packet >> 32) as u32,
+            8,
+            (TRB_TYPE_SETUP_STAGE << 10) | (3 << 16) | (1 << 6), // TRT=IN, IDT
+        ];
+        let data_trb = [
+            dev.descriptor_buf.phys as u32,
+            (dev.descriptor_buf.phys >> 32) as u32,
+            u32::from(length),
+            (TRB_TYPE_DATA_STAGE << 10) | (1 << 16) | (1 << 4), // IN + CH
+        ];
+        let status_trb = [0, 0, 0, (TRB_TYPE_STATUS_STAGE << 10) | (1 << 5)]; // IOC
+
+        let _ = dev.ep0_ring.push_trb(setup_trb);
+        let _ = dev.ep0_ring.push_trb(data_trb);
+        let status_trb_phys = dev.ep0_ring.push_trb(status_trb);
+        (
+            status_trb_phys,
+            dev.descriptor_buf.phys,
+            usize::from(length).min(dev.descriptor_buf.size),
+        )
+    };
+
+    runtime.pending_transfers.push(PendingTransfer {
+        trb_phys: status_trb_phys,
+        data_phys,
+        data_len,
+        kind,
+    });
+    ring_doorbell(&runtime.regs, usize::from(slot_id), 1); // EP0
+    true
+}
+
+fn submit_get_device_descriptor8(runtime: &mut XhciRuntime, slot_id: u8) -> bool {
+    submit_control_in_transfer(
+        runtime,
+        slot_id,
+        0x06,
+        USB_DESC_DEVICE << 8,
+        0,
+        8,
+        PendingTransferKind::DeviceDescriptor8 { slot_id },
+    )
+}
+
+fn submit_get_config_header(runtime: &mut XhciRuntime, slot_id: u8) -> bool {
+    submit_control_in_transfer(
+        runtime,
+        slot_id,
+        0x06,
+        USB_DESC_CONFIGURATION << 8,
+        0,
+        9,
+        PendingTransferKind::ConfigHeader { slot_id },
+    )
+}
+
+fn submit_get_config_full(runtime: &mut XhciRuntime, slot_id: u8, total_len: u16) -> bool {
+    submit_control_in_transfer(
+        runtime,
+        slot_id,
+        0x06,
+        USB_DESC_CONFIGURATION << 8,
+        0,
+        total_len,
+        PendingTransferKind::ConfigFull { slot_id },
+    )
+}
+
+fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
+    let mut idx = 0usize;
+    let mut in_hid_interface = false;
+
+    while idx + 2 <= config.len() {
+        let len = config[idx] as usize;
+        if len < 2 || idx + len > config.len() {
+            break;
+        }
+
+        let desc_type = config[idx + 1];
+        match desc_type {
+            0x04 => {
+                if len >= 9 {
+                    let class = config[idx + 5];
+                    in_hid_interface = class == 0x03;
+                } else {
+                    in_hid_interface = false;
+                }
+            }
+            0x05 if in_hid_interface && len >= 7 => {
+                let ep_addr = config[idx + 2];
+                let attrs = config[idx + 3];
+                let transfer_type = attrs & 0x3;
+                if (ep_addr & 0x80) == 0 || transfer_type != 0x03 {
+                    idx += len;
+                    continue;
+                }
+
+                let max_packet =
+                    u16::from_le_bytes([config[idx + 4], config[idx + 5]]) & 0x07FF;
+                let interval = core::cmp::max(config[idx + 6], 1);
+                let dci = endpoint_dci_from_address(ep_addr);
+                let ep_type = endpoint_type_from_descriptor(ep_addr, attrs)?;
+                return Some(HidEndpointConfig {
+                    ep_addr,
+                    dci,
+                    ep_type,
+                    max_packet,
+                    interval,
+                });
+            }
+            _ => {}
+        }
+
+        idx += len;
     }
 
-    let data_phys = u64::from(trb[0]) | (u64::from(trb[1]) << 32);
-    if data_phys == 0 {
-        return None;
-    }
+    None
+}
 
-    let data_off = (data_phys & 0xFFF) as usize;
-    if data_off + req_len > PAGE_SIZE {
-        return None;
-    }
-    let data_map = mmio::map_physical(data_phys & !0xFFF, PAGE_SIZE).ok()?;
-    let data_ptr = unsafe { data_map.add(data_off) };
-    let mut out = vec![0u8; req_len];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = unsafe { read_volatile(data_ptr.add(i)) };
-    }
-    Some(out)
+fn submit_configure_endpoint_command(runtime: &mut XhciRuntime, slot_id: u8) -> bool {
+    let Some(dev_idx) = find_device_index(runtime, slot_id) else {
+        return false;
+    };
+    let Some(dci) = build_configure_endpoint_input_context(&runtime.regs, &mut runtime.devices[dev_idx]) else {
+        return false;
+    };
+    let input_ctx_phys = runtime.devices[dev_idx].input_ctx.phys;
+    submit_command(
+        runtime,
+        [
+            input_ctx_phys as u32,
+            (input_ctx_phys >> 32) as u32,
+            0,
+            (TRB_TYPE_CONFIGURE_ENDPOINT_CMD << 10) | (u32::from(slot_id) << 24),
+        ],
+        PendingCommandKind::ConfigureEndpoint { slot_id, dci },
+    );
+    true
+}
+
+fn submit_interrupt_in_transfer(runtime: &mut XhciRuntime, slot_id: u8, dci: u8) -> bool {
+    let Some(dev_idx) = find_device_index(runtime, slot_id) else {
+        return false;
+    };
+
+    let (trb_phys, data_phys, data_len, doorbell_target) = {
+        let dev = &mut runtime.devices[dev_idx];
+        let Some(hid) = dev.hid_ep.as_mut() else {
+            return false;
+        };
+        let report_len = core::cmp::max(1usize, hid.report_len);
+        hid.report_buf.zero();
+        let trb = [
+            hid.report_buf.phys as u32,
+            (hid.report_buf.phys >> 32) as u32,
+            report_len as u32,
+            (TRB_TYPE_NORMAL << 10) | (1 << 5) | (1 << 2), // IOC + ISP
+        ];
+        let trb_phys = hid.ring.push_trb(trb);
+        (trb_phys, hid.report_buf.phys, report_len, hid.config.dci)
+    };
+
+    let target = if dci == 0 { doorbell_target } else { dci };
+    runtime.pending_transfers.push(PendingTransfer {
+        trb_phys,
+        data_phys,
+        data_len,
+        kind: PendingTransferKind::InterruptIn { slot_id, dci: target },
+    });
+    ring_doorbell(&runtime.regs, usize::from(slot_id), u32::from(target));
+    true
 }
 
 fn hid_usage_to_char(usage: u8, shift: bool) -> Option<char> {
@@ -660,6 +1105,222 @@ fn parse_hid_report(slot: u8, ep: u8, report: &[u8], state: &mut HidParserState)
     let _ = parse_hid_mouse_report(slot, ep, report, state);
 }
 
+fn handle_command_completion_event(
+    runtime: &mut XhciRuntime,
+    cmd_ptr: u64,
+    completion_code: u8,
+    slot_id_from_event: u8,
+) {
+    let Some(pos) = runtime
+        .pending_commands
+        .iter()
+        .position(|c| c.trb_phys == cmd_ptr)
+    else {
+        println!(
+            "[xHCI] command completion (untracked): code={} slot={} ptr={:#x}",
+            completion_code, slot_id_from_event, cmd_ptr
+        );
+        return;
+    };
+
+    let pending = runtime.pending_commands.remove(pos);
+    match pending.kind {
+        PendingCommandKind::Noop => {
+            println!(
+                "[xHCI] No-Op command completion: code={} slot={}",
+                completion_code, slot_id_from_event
+            );
+        }
+        PendingCommandKind::EnableSlot { port_id } => {
+            runtime.enumerating_port = None;
+            if completion_code != 1 || slot_id_from_event == 0 {
+                println!(
+                    "[xHCI] Enable Slot failed: port={} code={}",
+                    port_id, completion_code
+                );
+                return;
+            }
+            if let Err(err) = create_device_for_slot(runtime, port_id, slot_id_from_event) {
+                println!(
+                    "[xHCI] create slot/device failed: slot={} port={} err={:#x}",
+                    slot_id_from_event, port_id, err
+                );
+            }
+        }
+        PendingCommandKind::AddressDevice { slot_id } => {
+            if completion_code != 1 {
+                println!(
+                    "[xHCI] Address Device failed: slot={} code={}",
+                    slot_id, completion_code
+                );
+                return;
+            }
+            println!("[xHCI] Address Device completed: slot={}", slot_id);
+            let _ = submit_get_device_descriptor8(runtime, slot_id);
+        }
+        PendingCommandKind::ConfigureEndpoint { slot_id, dci } => {
+            if completion_code != 1 {
+                println!(
+                    "[xHCI] Configure Endpoint failed: slot={} dci={} code={}",
+                    slot_id, dci, completion_code
+                );
+                return;
+            }
+            println!(
+                "[xHCI] Configure Endpoint completed: slot={} dci={}",
+                slot_id, dci
+            );
+            let _ = submit_interrupt_in_transfer(runtime, slot_id, dci);
+        }
+    }
+}
+
+fn handle_transfer_event(
+    runtime: &mut XhciRuntime,
+    transfer_ptr: u64,
+    completion_code: u8,
+    slot_id: u8,
+    ep_id: u8,
+) {
+    let Some(pos) = runtime
+        .pending_transfers
+        .iter()
+        .position(|t| t.trb_phys == transfer_ptr)
+    else {
+        println!(
+            "[xHCI] transfer event (untracked): slot={} ep={} code={} trb={:#x}",
+            slot_id, ep_id, completion_code, transfer_ptr
+        );
+        return;
+    };
+
+    let pending = runtime.pending_transfers.remove(pos);
+    let success = completion_code == 1 || completion_code == 13; // Success / Short Packet
+
+    match pending.kind {
+        PendingTransferKind::DeviceDescriptor8 { slot_id } => {
+            if !success {
+                println!(
+                    "[xHCI] device descriptor transfer failed: slot={} code={}",
+                    slot_id, completion_code
+                );
+                return;
+            }
+            if let Some(dev_idx) = find_device_index(runtime, slot_id) {
+                let desc = runtime.devices[dev_idx].descriptor_buf.read_bytes(0, 8);
+                if desc.len() >= 8 {
+                    let mps = desc[7];
+                    if matches!(mps, 8 | 16 | 32 | 64) {
+                        runtime.devices[dev_idx].ep0_max_packet = u16::from(mps);
+                    }
+                    println!(
+                        "[xHCI] device descriptor: slot={} max_packet0={}",
+                        slot_id, runtime.devices[dev_idx].ep0_max_packet
+                    );
+                }
+            }
+            let _ = submit_get_config_header(runtime, slot_id);
+        }
+        PendingTransferKind::ConfigHeader { slot_id } => {
+            if !success {
+                println!(
+                    "[xHCI] config header transfer failed: slot={} code={}",
+                    slot_id, completion_code
+                );
+                return;
+            }
+            if let Some(dev_idx) = find_device_index(runtime, slot_id) {
+                let head = runtime.devices[dev_idx].descriptor_buf.read_bytes(0, 9);
+                if head.len() >= 4 {
+                    let total = u16::from_le_bytes([head[2], head[3]]);
+                    let clamped = usize::from(total).min(runtime.devices[dev_idx].descriptor_buf.size);
+                    if clamped >= 9 {
+                        let _ = submit_get_config_full(runtime, slot_id, clamped as u16);
+                    }
+                }
+            }
+        }
+        PendingTransferKind::ConfigFull { slot_id } => {
+            if !success {
+                println!(
+                    "[xHCI] full config transfer failed: slot={} code={}",
+                    slot_id, completion_code
+                );
+                return;
+            }
+            let Some(dev_idx) = find_device_index(runtime, slot_id) else {
+                return;
+            };
+            let config_bytes = runtime.devices[dev_idx]
+                .descriptor_buf
+                .read_bytes(0, pending.data_len);
+            let Some(hid_cfg) = parse_hid_endpoint_from_config(&config_bytes) else {
+                println!("[xHCI] HID interrupt endpoint not found in config descriptor");
+                return;
+            };
+
+            let ring = match TransferRing::new() {
+                Ok(r) => r,
+                Err(err) => {
+                    println!("[xHCI] HID ring alloc failed: {:#x}", err);
+                    return;
+                }
+            };
+            let report_buf = match DmaPage::alloc(PAGE_SIZE) {
+                Ok(p) => p,
+                Err(err) => {
+                    println!("[xHCI] HID report buffer alloc failed: {:#x}", err);
+                    return;
+                }
+            };
+            let report_len = core::cmp::max(
+                8usize,
+                core::cmp::min(usize::from(hid_cfg.max_packet), 64usize),
+            );
+            runtime.devices[dev_idx].hid_ep = Some(HidEndpointState {
+                config: hid_cfg,
+                ring,
+                report_buf,
+                report_len,
+            });
+            println!(
+                "[xHCI] HID endpoint selected: slot={} ep=0x{:02x} dci={} max_packet={} interval={}",
+                slot_id, hid_cfg.ep_addr, hid_cfg.dci, hid_cfg.max_packet, hid_cfg.interval
+            );
+            let _ = submit_configure_endpoint_command(runtime, slot_id);
+        }
+        PendingTransferKind::InterruptIn { slot_id, dci } => {
+            if !success {
+                println!(
+                    "[xHCI] interrupt IN transfer failed: slot={} dci={} code={}",
+                    slot_id, dci, completion_code
+                );
+            }
+            if let Some(dev_idx) = find_device_index(runtime, slot_id) {
+                if let Some(hid) = runtime.devices[dev_idx].hid_ep.as_ref() {
+                    let report = hid.report_buf.read_bytes(0, hid.report_len);
+                    if !report.is_empty() {
+                        parse_hid_report(slot_id, dci, &report, &mut runtime.hid);
+                    }
+                }
+            }
+            let _ = submit_interrupt_in_transfer(runtime, slot_id, dci);
+        }
+    }
+}
+
+fn handle_port_status_change_event(runtime: &mut XhciRuntime, port_id: u8, completion_code: u8) {
+    println!(
+        "[xHCI] port status change event: port={} code={}",
+        port_id, completion_code
+    );
+    dump_ports(&runtime.regs);
+    let portsc = mmio_read_u32(runtime.regs.base, portsc_offset(&runtime.regs, port_id));
+    if (portsc & 1) != 0 {
+        submit_enable_slot_for_port(runtime, port_id);
+    }
+}
+
 fn poll_xhci_events(runtime: &mut XhciRuntime) -> bool {
     let mut handled = false;
     let ir_base = runtime.regs.rt_off + RT_IR0_BASE;
@@ -678,38 +1339,15 @@ fn poll_xhci_events(runtime: &mut XhciRuntime) -> bool {
         match trb_type {
             TRB_TYPE_COMMAND_COMPLETION => {
                 let cmd_ptr = u64::from(event[0]) | (u64::from(event[1]) << 32);
-                if runtime.pending_noop_phys == Some(cmd_ptr) {
-                    println!(
-                        "[xHCI] No-Op command completion: code={} slot={}",
-                        completion_code, slot_id
-                    );
-                    runtime.pending_noop_phys = None;
-                } else {
-                    println!(
-                        "[xHCI] command completion: code={} slot={} ptr={:#x}",
-                        completion_code, slot_id, cmd_ptr
-                    );
-                }
+                handle_command_completion_event(runtime, cmd_ptr, completion_code, slot_id);
             }
             TRB_TYPE_PORT_STATUS_CHANGE => {
                 let port_id = ((event[0] >> 24) & 0xFF) as u8;
-                println!(
-                    "[xHCI] port status change event: port={} code={}",
-                    port_id, completion_code
-                );
-                dump_ports(&runtime.regs);
+                handle_port_status_change_event(runtime, port_id, completion_code);
             }
             TRB_TYPE_TRANSFER_EVENT => {
                 let transfer_ptr = u64::from(event[0]) | (u64::from(event[1]) << 32);
-                println!(
-                    "[xHCI] transfer event: slot={} ep={} code={} trb={:#x}",
-                    slot_id, ep_id, completion_code, transfer_ptr
-                );
-                if completion_code == 1 {
-                    if let Some(report) = read_transfer_report_bytes(transfer_ptr) {
-                        parse_hid_report(slot_id, ep_id, &report, &mut runtime.hid);
-                    }
-                }
+                handle_transfer_event(runtime, transfer_ptr, completion_code, slot_id, ep_id);
             }
             _ => {
                 println!(
@@ -831,7 +1469,7 @@ fn init_xhci_controller() -> Option<XhciRuntime> {
 
     dump_ports(&regs);
 
-    let mut command_ring = match CommandRing::new() {
+    let command_ring = match CommandRing::new() {
         Ok(r) => r,
         Err(err) => {
             println!("[xHCI] command ring alloc failed: {:#x}", err);
@@ -845,76 +1483,45 @@ fn init_xhci_controller() -> Option<XhciRuntime> {
             return None;
         }
     };
+    let dcbaa = match DmaPage::alloc(PAGE_SIZE) {
+        Ok(p) => p,
+        Err(err) => {
+            println!("[xHCI] DCBAA alloc failed: {:#x}", err);
+            return None;
+        }
+    };
+    dcbaa.zero();
 
     setup_command_ring_register(&regs, &command_ring);
     setup_interrupter(&regs, &event_ring);
+    mmio_write_u64(regs.base, regs.op_base + OP_DCBAAP, dcbaa.phys);
     if !start_xhci(&regs) {
         println!("[xHCI] failed to run controller");
         return None;
     }
 
-    let noop_phys = command_ring.push_noop_command();
-    ring_doorbell(&regs, 0, 0);
-    println!("[xHCI] command/event ring + interrupter configured");
-
-    Some(XhciRuntime {
+    let mut runtime = XhciRuntime {
         regs,
+        dcbaa,
         command_ring,
         event_ring,
-        pending_noop_phys: Some(noop_phys),
+        devices: Vec::new(),
+        pending_commands: Vec::new(),
+        pending_transfers: Vec::new(),
+        enumerating_port: None,
         hid: HidParserState::default(),
-    })
-}
+    };
+    let _ = submit_command(
+        &mut runtime,
+        [0, 0, 0, TRB_TYPE_NOOP_CMD << 10],
+        PendingCommandKind::Noop,
+    );
+    if let Some(port) = find_first_connected_port(&runtime.regs) {
+        submit_enable_slot_for_port(&mut runtime, port);
+    }
+    println!("[xHCI] command/event ring + interrupter configured");
 
-#[rustfmt::skip]
-const MAP_NORMAL: [u8; 128] = [
-    0,    0x1B, b'1', b'2', b'3', b'4', b'5', b'6',
-    b'7', b'8', b'9', b'0', b'-', b'=', 0x08, b'\t',
-    b'q', b'w', b'e', b'r', b't', b'y', b'u', b'i',
-    b'o', b'p', b'[', b']', b'\n', 0,   b'a', b's',
-    b'd', b'f', b'g', b'h', b'j', b'k', b'l', b';',
-    b'\'',b'`', 0,   b'\\',b'z', b'x', b'c', b'v',
-    b'b', b'n', b'm', b',', b'.', b'/', 0,   b'*',
-    0,    b' ', 0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    b'7',
-    b'8', b'9', b'-', b'4', b'5', b'6', b'+', b'1',
-    b'2', b'3', b'0', b'.', 0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-];
-
-#[rustfmt::skip]
-const MAP_SHIFT: [u8; 128] = [
-    0,    0x1B, b'!', b'@', b'#', b'$', b'%', b'^',
-    b'&', b'*', b'(', b')', b'_', b'+', 0x08, b'\t',
-    b'Q', b'W', b'E', b'R', b'T', b'Y', b'U', b'I',
-    b'O', b'P', b'{', b'}', b'\n', 0,   b'A', b'S',
-    b'D', b'F', b'G', b'H', b'J', b'K', b'L', b':',
-    b'"', b'~', 0,   b'|', b'Z', b'X', b'C', b'V',
-    b'B', b'N', b'M', b'<', b'>', b'?', 0,   b'*',
-    0,    b' ', 0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    b'7',
-    b'8', b'9', b'-', b'4', b'5', b'6', b'+', b'1',
-    b'2', b'3', b'0', b'.', 0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-    0,    0,    0,    0,    0,    0,    0,    0,
-];
-
-const SC_LSHIFT: u8 = 0x2A;
-const SC_RSHIFT: u8 = 0x36;
-const SC_CAPSLOCK: u8 = 0x3A;
-const SC_RELEASE: u8 = 0x80;
-
-#[derive(Default)]
-struct KeyboardDecoder {
-    shift: bool,
-    caps: bool,
+    Some(runtime)
 }
 
 impl KeyboardDecoder {
