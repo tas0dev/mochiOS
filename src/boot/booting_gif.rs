@@ -39,6 +39,7 @@ pub struct BootingGifPlayer {
     frames: Vec<GifFrame>,
     next_frame: usize,
     elapsed_ms: u16,
+    started: bool,
 }
 
 impl BootingGifPlayer {
@@ -66,6 +67,7 @@ impl BootingGifPlayer {
             frames,
             next_frame: 0,
             elapsed_ms: 0,
+            started: false,
         })
     }
 
@@ -73,13 +75,28 @@ impl BootingGifPlayer {
         if self.fb.is_null() || self.frames.is_empty() {
             return;
         }
-        let frame = &self.frames[self.next_frame];
-        self.draw_frame(frame);
+        if !self.started {
+            self.started = true;
+            let frame = &self.frames[self.next_frame];
+            self.draw_frame(frame);
+            return;
+        }
+
         self.elapsed_ms = self.elapsed_ms.saturating_add(TICK_QUANTUM_MS);
-        let delay_ms = frame.delay_ms.max(TICK_QUANTUM_MS);
-        if self.elapsed_ms >= delay_ms {
-            self.elapsed_ms = 0;
+        let mut advanced = false;
+        loop {
+            let delay_ms = self.frames[self.next_frame].delay_ms.max(TICK_QUANTUM_MS);
+            if self.elapsed_ms < delay_ms {
+                break;
+            }
+            self.elapsed_ms -= delay_ms;
             self.next_frame = (self.next_frame + 1) % self.frames.len();
+            advanced = true;
+        }
+
+        if advanced {
+            let frame = &self.frames[self.next_frame];
+            self.draw_frame(frame);
         }
     }
 
@@ -89,11 +106,12 @@ impl BootingGifPlayer {
         for y in 0..draw_h {
             let src_row_start = y * self.frame_w;
             let dst_row_start = (self.pos_y + y) * self.stride + self.pos_x;
-            for x in 0..draw_w {
-                let color = frame.pixels[src_row_start + x];
-                unsafe {
-                    self.fb.add(dst_row_start + x).write_volatile(color);
-                }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    frame.pixels.as_ptr().add(src_row_start),
+                    self.fb.add(dst_row_start),
+                    draw_w,
+                );
             }
         }
     }

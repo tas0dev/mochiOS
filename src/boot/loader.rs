@@ -107,7 +107,7 @@ const DT_NULL: i64 = 0;
 const DT_RELA: i64 = 7;
 const DT_RELASZ: i64 = 8;
 const DT_RELAENT: i64 = 9;
-const READ_CHUNK_BYTES: usize = 512 * 1024;
+const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 #[inline]
 fn tick_booting_gif(anim: &mut Option<&mut booting_gif::BootingGifPlayer>) {
@@ -230,7 +230,10 @@ unsafe fn try_load_raw(
         let chunk = &mut buf[read_total..read_end];
         match file.read(chunk) {
             Ok(0) => break, // EOF
-            Ok(n) => read_total += n,
+            Ok(n) => {
+                read_total += n;
+                tick_booting_gif(&mut anim);
+            }
             Err(_) => return None,
         }
     }
@@ -457,7 +460,10 @@ unsafe fn try_load_from(
         let chunk = &mut buf[read_total..read_end];
         match file.read(chunk) {
             Ok(0) => break,
-            Ok(n) => read_total += n,
+            Ok(n) => {
+                read_total += n;
+                tick_booting_gif(&mut anim);
+            }
             Err(e) => {
                 vga_println!("file read failed: {:?}", e.status());
                 return None;
