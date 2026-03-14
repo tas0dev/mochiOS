@@ -193,6 +193,9 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
     // TSSのRSP0とSYSCALL用カーネルスタックを更新
     crate::mem::tss::set_rsp0(next_kstack_top);
     crate::syscall::syscall_entry::update_kernel_rsp(next_kstack_top);
+    // SYSCALL 入口の swapgs により IA32_KERNEL_GS_BASE がユーザー値へ一時退避されるため、
+    // ブロッキング syscall 中に他スレッドへ切り替える前に per-CPU GS ベースへ戻しておく。
+    crate::percpu::install_current_cpu_gs_base();
 
     // 次のスレッドの FS ベースを復元 (TLS)
     unsafe {
@@ -316,6 +319,9 @@ pub unsafe fn switch_to_thread_from_isr(
 
     // SYSCALL用カーネルスタックも更新 (次のスレッドのカーネルスタックを使う)
     crate::syscall::syscall_entry::update_kernel_rsp(next_kstack_top);
+    // SYSCALL 入口の swapgs により IA32_KERNEL_GS_BASE がユーザー値へ一時退避されるため、
+    // ブロッキング syscall 中に他スレッドへ切り替える前に per-CPU GS ベースへ戻しておく。
+    crate::percpu::install_current_cpu_gs_base();
 
     // 次のスレッドの FS ベースを復元 (TLS)
     crate::cpu::write_fs_base(next_fs_base);

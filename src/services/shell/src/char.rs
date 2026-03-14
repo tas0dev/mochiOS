@@ -1,5 +1,7 @@
 use swiftlib::{fs, ipc, process, task, vga};
 
+// 色の編集がだるっちいったらありゃしないのでgeminiに作ってもらったエディタを使ってください。
+// https://gemini.google.com/share/02481dc7584f
 
 const FONT_WIDTH: usize = 6;
 const FONT_HEIGHT: usize = 12;
@@ -11,10 +13,10 @@ const DEFAULT_BG: u32 = 0x0000_0000;
 const ANSI_MAX_SEQ_LEN: usize = 32;
 const ANSI_COLOR_NORMAL: [u32; 8] = [
     0x0000_0000, // black
-    0x00AA_0000, // red
+    0x00EE_0000, // red
     0x0000_AA00, // green
     0x00AA_AA00, // yellow
-    0x0000_00AA, // blue
+    0x0000_99FF, // blue
     0x00AA_00AA, // magenta
     0x0000_AAAA, // cyan
     0x00AA_AAAA, // white

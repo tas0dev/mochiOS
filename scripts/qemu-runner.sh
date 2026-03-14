@@ -95,7 +95,7 @@ if [ -n "$ROOTFS_IMG" ] && [ -f "$ROOTFS_IMG" ]; then
     echo "rootfs.ext2 -> esp/System/ ($(( $(stat -c%s "$ROOTFS_IMG") / 1048576 )) MB)"
 fi
 
-# ── KVM アクセラレーション（利用可能な場合） ─────────────────────────────
+# KVM アクセラレーション（利用可能な場合）
 KVM_ARGS=()
 if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
     KVM_ARGS=(-enable-kvm -cpu host)

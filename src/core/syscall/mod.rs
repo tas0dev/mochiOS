@@ -403,6 +403,7 @@ extern "C" fn syscall_handler_rust(
     arg3: u64,
     arg4: u64,
 ) -> u64 {
+    crate::percpu::install_current_cpu_gs_base();
     let current_tid = crate::task::current_thread_id();
     let is_busybox = current_tid
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
