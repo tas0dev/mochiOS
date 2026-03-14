@@ -97,7 +97,8 @@ pub struct FsEntries<'a> {
 
 /// initfsを初期化して情報を出力する
 pub fn init() {
-    let sb = match superblock(ext2_image()) {
+    let image = ext2_image();
+    let sb = match superblock(image) {
         Some(sb) => sb,
         None => {
             crate::warn!("initfs: invalid image");
@@ -105,7 +106,7 @@ pub fn init() {
         }
     };
 
-    let root = match inode(ext2_image(), sb, 2) {
+    let root = match inode(image, sb, 2) {
         Some(inode) if is_dir(inode.mode) => inode,
         _ => {
             crate::warn!("initfs: invalid root inode");
@@ -120,9 +121,15 @@ pub fn init() {
     );
 
     let mut count = 0usize;
-    for entry in FsEntries::new(ext2_image(), sb, root) {
-        crate::debug!("initfs: {} ({} bytes)", entry.name, entry.data.len());
-        count += 1;
+    if let Some(names) = readdir_path_in(image, "/") {
+        for name in names {
+            let size = find_inode_in_dir(image, sb, root, &name)
+                .and_then(|inode_num| inode(image, sb, inode_num))
+                .map(|inode| inode.size as usize)
+                .unwrap_or(0);
+            crate::debug!("initfs: {} ({} bytes)", name, size);
+            count += 1;
+        }
     }
     crate::debug!("initfs: {} entries", count);
 }

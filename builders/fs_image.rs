@@ -28,27 +28,103 @@ fn blocks_for_dir(dir: &Path, block_size: u64) -> u64 {
     (needed + block_size - 1) / block_size
 }
 
+/// InitFS 用のブロック数を計算する
+/// 実行時最低限の内容だけを格納するため、rootfs より小さめの余裕にする
+fn blocks_for_initfs_dir(dir: &Path, block_size: u64) -> u64 {
+    let content = compute_content_size(dir);
+    let needed = ((content.saturating_mul(11) / 10) + 4 * 1024 * 1024).max(16 * 1024 * 1024);
+    (needed + block_size - 1) / block_size
+}
+
+fn should_skip_initfs_library(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("a") | Some("o")
+    )
+}
+
+fn copy_initfs_runtime_tree(src: &Path, dst: &Path, in_libraries: bool) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("Failed to create {}: {}", dst.display(), e))?;
+
+    for entry in
+        fs::read_dir(src).map_err(|e| format!("Failed to read {}: {}", src.display(), e))?
+    {
+        let entry =
+            entry.map_err(|e| format!("Failed to read entry in {}: {}", src.display(), e))?;
+        let src_path = entry.path();
+        let name = entry.file_name();
+        let dst_path = dst.join(&name);
+        let name_str = name.to_string_lossy();
+        let child_in_libraries = in_libraries || name_str == "Libraries";
+
+        if src_path.is_dir() {
+            copy_initfs_runtime_tree(&src_path, &dst_path, child_in_libraries)?;
+        } else {
+            if child_in_libraries && should_skip_initfs_library(&src_path) {
+                continue;
+            }
+            fs::copy(&src_path, &dst_path).map_err(|e| {
+                format!(
+                    "Failed to copy {} to {}: {}",
+                    src_path.display(),
+                    dst_path.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
 /// InitFS (ramfs) 用のext2イメージを生成
 pub fn create_initfs_image(ramfs_dir: &Path, output_path: &Path) -> Result<(), String> {
     println!("Creating initfs ext2 image from {}", ramfs_dir.display());
 
     emit_rerun_if_changed(ramfs_dir);
 
-    let num_blocks = blocks_for_dir(ramfs_dir, 4096);
+    // サービスのビルドでは ramfs/Libraries が必要だが、InitFS 本体には
+    // 実行時に不要な静的成果物 (.a/.o) を含めない
+    let staging_dir = output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("initfs-runtime");
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir)
+            .map_err(|e| format!("Failed to clean {}: {}", staging_dir.display(), e))?;
+    }
+    copy_initfs_runtime_tree(ramfs_dir, &staging_dir, false)?;
+
+    let original_size = compute_content_size(ramfs_dir) / (1024 * 1024);
+    let runtime_size = compute_content_size(&staging_dir) / (1024 * 1024);
+    println!("initfs runtime payload: {} MB (from {} MB)", runtime_size, original_size);
+
+    let num_blocks = blocks_for_initfs_dir(&staging_dir, 4096);
     println!(
         "initfs: {} 4K-blocks ({} MB)",
         num_blocks,
         num_blocks * 4 / 1024
     );
 
+    // 既存ファイルを使い回すとサイズが縮まらない場合があるため、毎回作り直す
+    if output_path.exists() {
+        fs::remove_file(output_path).map_err(|e| {
+            format!(
+                "Failed to remove existing image {}: {}",
+                output_path.display(),
+                e
+            )
+        })?;
+    }
+
     let status = Command::new("mke2fs")
         .args(["-t", "ext2", "-b", "4096", "-m", "0", "-L", "initfs", "-d"])
-        .arg(ramfs_dir)
+        .arg(&staging_dir)
         .arg(output_path)
         .arg(num_blocks.to_string())
         .status();
 
-    match status {
+    let result = match status {
         Ok(s) if s.success() => {
             println!("Created initfs image at {}", output_path.display());
             Ok(())
@@ -58,7 +134,10 @@ pub fn create_initfs_image(ramfs_dir: &Path, output_path: &Path) -> Result<(), S
             "Failed to execute mke2fs: {}. Please install e2fsprogs (mke2fs).",
             e
         )),
-    }
+    };
+
+    let _ = fs::remove_dir_all(&staging_dir);
+    result
 }
 
 /// EXT2 ファイルシステムイメージを生成
@@ -73,6 +152,17 @@ pub fn create_ext2_image(fs_dir: &Path, output_path: &Path) -> Result<(), String
         num_blocks,
         num_blocks * 4 / 1024
     );
+
+    // 既存ファイルを使い回すとサイズが縮まらない場合があるため、毎回作り直す
+    if output_path.exists() {
+        fs::remove_file(output_path).map_err(|e| {
+            format!(
+                "Failed to remove existing image {}: {}",
+                output_path.display(),
+                e
+            )
+        })?;
+    }
 
     let status = Command::new("mke2fs")
         .args(["-t", "ext2", "-b", "4096", "-m", "0", "-L", "rootfs", "-d"])
