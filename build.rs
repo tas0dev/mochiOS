@@ -2,12 +2,15 @@ mod builders;
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use builders::{
     build_apps, build_drivers, build_newlib, build_service, build_user_libs, build_utils,
     copy_newlib_libs, create_ext2_image, create_initfs_image, parse_service_index, setup_fs_layout,
 };
+
+const BUSYBOX_URL: &str =
+    "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox";
 
 /// カーネル ELF をビルドして fs/System/kernel.elf にコピーする
 fn build_kernel(manifest_dir: &PathBuf, fs_dir: &PathBuf, profile: &str) {
@@ -62,6 +65,96 @@ fn build_kernel(manifest_dir: &PathBuf, fs_dir: &PathBuf, profile: &str) {
             "cargo:warning=kernel binary not found at {}",
             kernel_bin.display()
         );
+    }
+}
+
+fn is_elf_binary(path: &Path) -> Result<bool, String> {
+    use std::io::Read;
+
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)
+        .map_err(|e| format!("Failed to read ELF magic from {}: {}", path.display(), e))?;
+    Ok(magic == [0x7F, b'E', b'L', b'F'])
+}
+
+/// BusyBoxをダウンロード
+fn ensure_busybox_binary(fs_dir: &Path) -> Result<(), String> {
+    let binaries_dir = fs_dir.join("Binaries");
+    fs::create_dir_all(&binaries_dir)
+        .map_err(|e| format!("Failed to create {}: {}", binaries_dir.display(), e))?;
+
+    let dest = binaries_dir.join("busybox.elf");
+    let temp = binaries_dir.join("busybox.elf.download");
+
+    println!("Downloading busybox from {}", BUSYBOX_URL);
+
+    let status = std::process::Command::new("curl")
+        .args(["-L", "--fail", "--silent", "--show-error", "--output"])
+        .arg(&temp)
+        .arg(BUSYBOX_URL)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            if !is_elf_binary(&temp)? {
+                let _ = fs::remove_file(&temp);
+                return Err(format!(
+                    "Downloaded file is not a valid ELF binary: {}",
+                    temp.display()
+                ));
+            }
+
+            if let Err(rename_err) = fs::rename(&temp, &dest) {
+                fs::copy(&temp, &dest).map_err(|copy_err| {
+                    format!(
+                        "Failed to place busybox at {} (rename: {}, copy: {})",
+                        dest.display(),
+                        rename_err,
+                        copy_err
+                    )
+                })?;
+                let _ = fs::remove_file(&temp);
+            }
+
+            println!("Downloaded busybox to {}", dest.display());
+            Ok(())
+        }
+        Ok(s) => {
+            let _ = fs::remove_file(&temp);
+            if dest.exists() {
+                println!(
+                    "cargo:warning=BusyBox download failed (status={}), using existing {}",
+                    s,
+                    dest.display()
+                );
+                Ok(())
+            } else {
+                Err(format!(
+                    "BusyBox download failed (status={}) and no fallback file exists at {}",
+                    s,
+                    dest.display()
+                ))
+            }
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&temp);
+            if dest.exists() {
+                println!(
+                    "cargo:warning=Failed to execute curl ({}), using existing {}",
+                    e,
+                    dest.display()
+                );
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to execute curl ({}) and no fallback file exists at {}",
+                    e,
+                    dest.display()
+                ))
+            }
+        }
     }
 }
 
@@ -222,6 +315,8 @@ fn main() {
         println!("Building utility commands");
         build_utils(&utils_dir, &binaries_dir);
     }
+
+    ensure_busybox_binary(&fs_dir).expect("Failed to ensure busybox binary");
 
     // ドライバをビルド
     let drivers_dir = manifest_dir.join("src/drivers");
