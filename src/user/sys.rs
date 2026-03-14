@@ -108,6 +108,8 @@ pub enum SyscallNumber {
     MouseRead = 535,
     /// 物理アドレス範囲をユーザー空間にマップ
     MapPhysicalRange = 536,
+    /// ユーザー仮想アドレスを物理アドレスへ変換
+    VirtToPhys = 537,
 }
 
 /// 入力が空

@@ -1,6 +1,6 @@
 //! MMIO/物理メモリマップ関連システムコール
 
-use crate::sys::{syscall2, SyscallNumber};
+use crate::sys::{syscall1, syscall2, SyscallNumber};
 
 const EINVAL: u64 = (-22i64) as u64;
 
@@ -17,5 +17,15 @@ pub fn map_physical(phys_addr: u64, size: usize) -> Result<*mut u8, u64> {
         Err(ret)
     } else {
         Ok(ret as *mut u8)
+    }
+}
+
+/// ユーザー仮想アドレスを物理アドレスへ変換する
+pub fn virt_to_phys(ptr: *const u8) -> Result<u64, u64> {
+    let ret = syscall1(SyscallNumber::VirtToPhys as u64, ptr as u64);
+    if ret == 0 || (ret as i64) < 0 {
+        Err(ret)
+    } else {
+        Ok(ret)
     }
 }

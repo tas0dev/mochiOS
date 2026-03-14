@@ -1,4 +1,5 @@
-use super::types::{EINVAL, ENOMEM, EPERM};
+use super::types::{EFAULT, EINVAL, ENOMEM, EPERM};
+use x86_64::VirtAddr;
 
 const MAX_MMIO_MAP_SIZE: u64 = 64 * 1024 * 1024;
 
@@ -14,6 +15,13 @@ fn caller_has_mmio_privilege() -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn current_process_page_table() -> Option<u64> {
+    crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+        .and_then(|pid| crate::task::with_process(pid, |p| p.page_table()))
+        .flatten()
 }
 
 /// 物理アドレス範囲を呼び出し元プロセスへマップする
@@ -83,5 +91,30 @@ pub fn map_physical_range(phys_addr: u64, size: u64) -> u64 {
         Some(Ok(va)) => va,
         Some(Err(e)) => e,
         None => ENOMEM,
+    }
+}
+
+/// ユーザー仮想アドレスを物理アドレスへ変換する
+///
+/// xHCI など DMA デバイスに渡すアドレス算出で使用する。
+pub fn virt_to_phys(user_vaddr: u64) -> u64 {
+    if !caller_has_mmio_privilege() {
+        return EPERM;
+    }
+    if user_vaddr == 0 {
+        return EFAULT;
+    }
+    if !crate::syscall::validate_user_ptr(user_vaddr, 1) {
+        return EFAULT;
+    }
+
+    let table_phys = match current_process_page_table() {
+        Some(pt) => pt,
+        None => return ENOMEM,
+    };
+
+    match crate::mem::paging::translate_addr_in_table(table_phys, VirtAddr::new(user_vaddr)) {
+        Some((phys, _)) => phys.as_u64(),
+        None => EFAULT,
     }
 }

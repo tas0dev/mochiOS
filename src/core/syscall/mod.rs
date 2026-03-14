@@ -215,6 +215,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::KeyboardReadTap as u64 => keyboard::read_char_tap(),
         x if x == SyscallNumber::MouseRead as u64 => mouse::read_packet(),
         x if x == SyscallNumber::MapPhysicalRange as u64 => mmio::map_physical_range(arg0, arg1),
+        x if x == SyscallNumber::VirtToPhys as u64 => mmio::virt_to_phys(arg0),
         x if x == SyscallNumber::FindProcessByName as u64 => {
             process::find_process_by_name(arg0, arg1)
         }
