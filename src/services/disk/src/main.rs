@@ -9,6 +9,7 @@ mod ata;
 use ata::{AtaDrive, AtaPorts, DriveType};
 
 const MAX_DISKS: usize = 4;
+const MAX_BULK_READ_SECTORS: u64 = 32;
 
 static mut DISKS: [Option<AtaDrive>; MAX_DISKS] = [None, None, None, None];
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -138,6 +139,14 @@ fn notify_ready_to_core() {
     }
 }
 
+#[inline]
+fn send_response(dest_thread: u64, resp: &DiskResponse) {
+    let resp_slice = unsafe {
+        core::slice::from_raw_parts(resp as *const _ as *const u8, size_of::<DiskResponse>())
+    };
+    let _ = ipc::ipc_send(dest_thread, resp_slice);
+}
+
 #[allow(static_mut_refs)]
 fn main() {
     println!("[DISK] Disk I/O Service Started.");
@@ -166,13 +175,7 @@ fn main() {
             if sender_privilege > 1 {
                 println!("[DISK] Rejecting request from unprivileged thread {}", sender);
                 let resp = DiskResponse { status: -1, len: 0, data: [0; 512] };
-                let resp_slice = unsafe {
-                    core::slice::from_raw_parts(
-                        &resp as *const _ as *const u8,
-                        size_of::<DiskResponse>(),
-                    )
-                };
-                let _ = ipc::ipc_send(sender, resp_slice);
+                send_response(sender, &resp);
                 continue;
             }
 
@@ -193,18 +196,41 @@ fn main() {
             match req.op {
                 DiskRequest::OP_READ => {
                     let disk_id = req.disk_id as usize;
-                    if disk_id < MAX_DISKS {
+                    if req.count == 0 || req.count > MAX_BULK_READ_SECTORS {
+                        resp.status = -22; // EINVAL
+                    } else if disk_id < MAX_DISKS {
                         unsafe {
                             if let Some(ref drive) = DISKS[disk_id] {
-                                match drive.read_sector(req.lba, &mut resp.data) {
+                                let count = req.count as usize;
+                                let total_bytes = match count.checked_mul(512) {
+                                    Some(v) => v,
+                                    None => {
+                                        resp.status = -22; // EINVAL
+                                        send_response(sender, &resp);
+                                        continue;
+                                    }
+                                };
+                                let mut bulk = vec![0u8; total_bytes];
+                                match drive.read_sectors(req.lba, req.count as u8, &mut bulk) {
                                     Ok(_) => {
-                                        resp.status = 0;
-                                        resp.len = 512;
+                                        for i in 0..count {
+                                            let mut chunk_resp = DiskResponse {
+                                                status: 0,
+                                                len: 512,
+                                                data: [0; 512],
+                                            };
+                                            let start = i * 512;
+                                            let end = start + 512;
+                                            chunk_resp.data.copy_from_slice(&bulk[start..end]);
+                                            send_response(sender, &chunk_resp);
+                                        }
                                     }
                                     Err(_) => {
                                         resp.status = -5; // EIO
+                                        send_response(sender, &resp);
                                     }
-                                }
+                                };
+                                continue;
                             } else {
                                 resp.status = -6; // ENXIO (No such device)
                             }
@@ -273,14 +299,7 @@ fn main() {
                 }
             }
 
-            let resp_slice = unsafe {
-                core::slice::from_raw_parts(
-                    &resp as *const _ as *const u8,
-                    size_of::<DiskResponse>(),
-                )
-            };
-
-            let _ = ipc::ipc_send(sender, resp_slice);
+            send_response(sender, &resp);
         }
     }
 }

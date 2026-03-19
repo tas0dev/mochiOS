@@ -3,8 +3,8 @@
 
 extern crate alloc;
 
-mod vga_console;
 mod booting_gif;
+mod vga_console;
 
 use core::ptr::addr_of_mut;
 use mochios::{BootInfo, MemoryRegion, MemoryType};
@@ -139,9 +139,14 @@ unsafe fn load_initfs(
 
     for handle in handles {
         tick_booting_gif(&mut anim);
-        if let Some((addr, size)) =
-            try_load_raw(bt, image_handle, handle, initfs_path, "initfs", anim.as_deref_mut())
-        {
+        if let Some((addr, size)) = try_load_raw(
+            bt,
+            image_handle,
+            handle,
+            initfs_path,
+            "initfs",
+            anim.as_deref_mut(),
+        ) {
             vga_println!("initfs loaded at {:#x} ({} bytes)", addr, size);
             return (addr, size);
         }
@@ -433,7 +438,11 @@ unsafe fn try_load_from(
     }
     vga_println!("read {} / {} bytes", read_total, file_size);
     if read_total != file_size {
-        vga_println!("[WARN] kernel.elf: read {} / {} bytes", read_total, file_size);
+        vga_println!(
+            "[WARN] kernel.elf: read {} / {} bytes",
+            read_total,
+            file_size
+        );
         return None;
     }
     tick_booting_gif(&mut anim);
@@ -528,14 +537,14 @@ unsafe fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Sta
 
     vga_println!("mochiOS bootloader");
     vga_println!("Framebuffer: {}x{} stride={}", screen_w, screen_h, stride);
-    let mut booting_anim = match booting_gif::BootingGifPlayer::new(fb_ptr, screen_w, screen_h, stride)
-    {
-        Ok(anim) => Some(anim),
-        Err(e) => {
-            vga_println!("[WARN] booting.gif disabled: {}", e);
-            None
-        }
-    };
+    let mut booting_anim =
+        match booting_gif::BootingGifPlayer::new(fb_ptr, screen_w, screen_h, stride) {
+            Ok(anim) => Some(anim),
+            Err(e) => {
+                vga_println!("[WARN] booting.gif disabled: {}", e);
+                None
+            }
+        };
     if let Some(anim) = booting_anim.as_mut() {
         anim.tick();
     }

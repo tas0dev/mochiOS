@@ -97,7 +97,10 @@ pub fn create_initfs_image(ramfs_dir: &Path, output_path: &Path) -> Result<(), S
 
     let original_size = compute_content_size(ramfs_dir) / (1024 * 1024);
     let runtime_size = compute_content_size(&staging_dir) / (1024 * 1024);
-    println!("initfs runtime payload: {} MB (from {} MB)", runtime_size, original_size);
+    println!(
+        "initfs runtime payload: {} MB (from {} MB)",
+        runtime_size, original_size
+    );
 
     let num_blocks = blocks_for_initfs_dir(&staging_dir, 4096);
     println!(

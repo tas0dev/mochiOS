@@ -2,6 +2,7 @@
 //!
 //! Linux標準のext2ファイルシステムをサポート
 
+use core::mem::size_of;
 use std::boxed::Box;
 use std::string::String;
 use std::vec::Vec;
@@ -20,6 +21,28 @@ pub trait BlockDevice: Send + Sync {
     
     /// ブロックを読み取る
     fn read_block(&self, block_num: u64, buf: &mut [u8]) -> Result<(), ()>;
+
+    /// 連続ブロックを読み取る（デフォルトは単発読み込みを繰り返す）
+    fn read_blocks(&self, start_block: u64, count: usize, buf: &mut [u8]) -> Result<(), ()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let block_size = self.block_size();
+        let total = count.checked_mul(block_size).ok_or(())?;
+        if buf.len() < total {
+            return Err(());
+        }
+
+        for i in 0..count {
+            let lba = start_block
+                .checked_add(i as u64)
+                .ok_or(())?;
+            let begin = i * block_size;
+            let end = begin + block_size;
+            self.read_block(lba, &mut buf[begin..end])?;
+        }
+        Ok(())
+    }
     
     /// ブロックに書き込む
     fn write_block(&mut self, block_num: u64, buf: &[u8]) -> Result<(), ()>;
@@ -207,12 +230,12 @@ impl Ext2Fs {
         let blocks_per_fs_block = self.block_size / self.device.block_size();
         let start_block = block_num as u64 * blocks_per_fs_block as u64;
 
-        for i in 0..blocks_per_fs_block {
-            let offset = i * self.device.block_size();
-            self.device
-                .read_block(start_block + i as u64, &mut buf[offset..offset + self.device.block_size()])
-                .map_err(|_| VfsError::IoError)?;
-        }
+        let total = blocks_per_fs_block
+            .checked_mul(self.device.block_size())
+            .ok_or(VfsError::InvalidArgument)?;
+        self.device
+            .read_blocks(start_block, blocks_per_fs_block, &mut buf[..total])
+            .map_err(|_| VfsError::IoError)?;
 
         Ok(())
     }
@@ -324,6 +347,46 @@ impl Ext2Fs {
 
         // 三重間接ブロックは未サポート
         Err(VfsError::NotSupported)
+    }
+
+    #[inline]
+    fn get_block_num_cached(
+        &self,
+        inode: &Ext2Inode,
+        block_idx: u32,
+        ptrs_per_block: u32,
+        single_indirect_cache: &mut Option<Vec<u8>>,
+    ) -> VfsResult<u32> {
+        if block_idx < 12 {
+            return Ok(inode.i_block[block_idx as usize]);
+        }
+
+        if block_idx < 12 + ptrs_per_block {
+            let indirect_block = inode.i_block[12];
+            if indirect_block == 0 {
+                return Ok(0);
+            }
+
+            if single_indirect_cache.is_none() {
+                let mut indirect = vec![0u8; self.block_size];
+                self.read_fs_block(indirect_block, &mut indirect)?;
+                *single_indirect_cache = Some(indirect);
+            }
+
+            if let Some(ref indirect) = single_indirect_cache {
+                let ptr_off = ((block_idx - 12) * 4) as usize;
+                return Ok(u32::from_le_bytes([
+                    indirect[ptr_off],
+                    indirect[ptr_off + 1],
+                    indirect[ptr_off + 2],
+                    indirect[ptr_off + 3],
+                ]));
+            }
+
+            return Ok(0);
+        }
+
+        self.get_block_num(inode, block_idx)
     }
 }
 
@@ -451,41 +514,86 @@ impl FileSystem for Ext2Fs {
         let mut block_buf = vec![0u8; self.block_size];
         
         while bytes_read < to_read {
-            let block_num = if current_block < 12 {
-                ext2_inode.i_block[current_block as usize]
-            } else if current_block < 12 + ptrs_per_block {
-                let indirect_block = ext2_inode.i_block[12];
-                if indirect_block == 0 {
-                    0
-                } else {
-                    if single_indirect_cache.is_none() {
-                        let mut indirect = vec![0u8; self.block_size];
-                        self.read_fs_block(indirect_block, &mut indirect)?;
-                        single_indirect_cache = Some(indirect);
-                    }
-
-                    if let Some(ref indirect) = single_indirect_cache {
-                        let ptr_off = ((current_block - 12) * 4) as usize;
-                        u32::from_le_bytes([
-                            indirect[ptr_off],
-                            indirect[ptr_off + 1],
-                            indirect[ptr_off + 2],
-                            indirect[ptr_off + 3],
-                        ])
-                    } else {
-                        0
-                    }
-                }
-            } else {
-                self.get_block_num(&ext2_inode, current_block)?
-            };
-
             let start = if current_block == start_block { block_offset } else { 0 };
             let remaining = to_read - bytes_read;
+            let mut next_block = current_block;
+            let mut run_len = 0usize;
+
+            while bytes_read + run_len * self.block_size < to_read {
+                let bn = self.get_block_num_cached(
+                    &ext2_inode,
+                    next_block,
+                    ptrs_per_block,
+                    &mut single_indirect_cache,
+                )?;
+                if bn == 0 {
+                    break;
+                }
+                if run_len == 0 {
+                    run_len = 1;
+                    next_block += 1;
+                    continue;
+                }
+                let prev = self.get_block_num_cached(
+                    &ext2_inode,
+                    next_block - 1,
+                    ptrs_per_block,
+                    &mut single_indirect_cache,
+                )?;
+                if bn == prev + 1 {
+                    run_len += 1;
+                    next_block += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if run_len > 0 {
+                let first_block = self.get_block_num_cached(
+                    &ext2_inode,
+                    current_block,
+                    ptrs_per_block,
+                    &mut single_indirect_cache,
+                )?;
+                let mut run_buf = vec![0u8; run_len * self.block_size];
+                let blocks_per_fs_block = self.block_size / self.device.block_size();
+                let start_dev_block = first_block as u64 * blocks_per_fs_block as u64;
+                let total_dev_blocks = run_len * blocks_per_fs_block;
+                self.device
+                    .read_blocks(start_dev_block, total_dev_blocks, &mut run_buf)
+                    .map_err(|_| VfsError::IoError)?;
+
+                let mut run_offset = 0usize;
+                for i in 0..run_len {
+                    let block_start = i * self.block_size;
+                    let start_in_block = if i == 0 { start } else { 0 };
+                    let remaining_after = remaining.saturating_sub(run_offset);
+                    if remaining_after == 0 {
+                        break;
+                    }
+                    let to_copy = core::cmp::min(remaining_after, self.block_size - start_in_block);
+                    let src_begin = block_start + start_in_block;
+                    let src_end = src_begin + to_copy;
+                    let dst_begin = bytes_read + run_offset;
+                    let dst_end = dst_begin + to_copy;
+                    buf[dst_begin..dst_end].copy_from_slice(&run_buf[src_begin..src_end]);
+                    run_offset += to_copy;
+                }
+
+                bytes_read += run_offset;
+                current_block += run_len as u32;
+                continue;
+            }
+
+            let block_num = self.get_block_num_cached(
+                &ext2_inode,
+                current_block,
+                ptrs_per_block,
+                &mut single_indirect_cache,
+            )?;
             let to_copy = core::cmp::min(remaining, self.block_size - start);
 
             if block_num == 0 {
-                // スパースファイル - ゼロで埋める
                 buf[bytes_read..bytes_read + to_copy].fill(0);
             } else {
                 self.read_fs_block(block_num, &mut block_buf)?;
@@ -494,7 +602,6 @@ impl FileSystem for Ext2Fs {
             }
 
             bytes_read += to_copy;
-            
             current_block += 1;
         }
 

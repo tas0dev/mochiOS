@@ -143,9 +143,7 @@ fn decode_gif(data: &[u8]) -> Result<(usize, usize, Vec<GifFrame>), &'static str
     let mut pos = 13usize;
     let mut global_palette = [0u32; 256];
     if has_gct {
-        let need = gct_entries
-            .checked_mul(3)
-            .ok_or("gif palette overflow")?;
+        let need = gct_entries.checked_mul(3).ok_or("gif palette overflow")?;
         if pos + need > data.len() || gct_entries > 256 {
             return Err("invalid global palette");
         }
@@ -358,7 +356,11 @@ fn expand_code(
     Ok((len, first))
 }
 
-fn decode_lzw(min_code_size: u8, data: &[u8], expected_len: usize) -> Result<Vec<u8>, &'static str> {
+fn decode_lzw(
+    min_code_size: u8,
+    data: &[u8],
+    expected_len: usize,
+) -> Result<Vec<u8>, &'static str> {
     if min_code_size == 0 || min_code_size > 8 {
         return Err("unsupported LZW min code size");
     }
@@ -394,7 +396,8 @@ fn decode_lzw(min_code_size: u8, data: &[u8], expected_len: usize) -> Result<Vec
             expand_code(code, clear_code, &prefix, &suffix, &mut stack)?
         } else if code == next_code {
             let prev = prev_code.ok_or("broken LZW stream")?;
-            let (mut prev_len, first) = expand_code(prev, clear_code, &prefix, &suffix, &mut stack)?;
+            let (mut prev_len, first) =
+                expand_code(prev, clear_code, &prefix, &suffix, &mut stack)?;
             if prev_len >= stack.len() {
                 return Err("LZW stack overflow");
             }

@@ -7,6 +7,8 @@ use swiftlib::ipc;
 use crate::common::vfs::{VfsError, VfsResult};
 use crate::ext2::BlockDevice;
 
+const MAX_SECTORS_PER_REQ: usize = 32;
+
 /// ディスク操作リクエスト（書き込みデータを含む）
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -53,7 +55,22 @@ impl DiskServiceDevice {
 
     /// セクタを読み取る（内部用）
     fn read_sector(&self, lba: u64, buf: &mut [u8]) -> VfsResult<()> {
-        if buf.len() < 512 {
+        if buf.len() < self.sector_size {
+            return Err(VfsError::InvalidArgument);
+        }
+
+        self.read_sectors(lba, 1, &mut buf[..self.sector_size])
+    }
+
+    /// 連続セクタを読み取る（内部用）
+    fn read_sectors(&self, lba: u64, count: usize, buf: &mut [u8]) -> VfsResult<()> {
+        if count == 0 || count > MAX_SECTORS_PER_REQ {
+            return Err(VfsError::InvalidArgument);
+        }
+        let total = count
+            .checked_mul(self.sector_size)
+            .ok_or(VfsError::InvalidArgument)?;
+        if buf.len() < total {
             return Err(VfsError::InvalidArgument);
         }
 
@@ -61,7 +78,7 @@ impl DiskServiceDevice {
             op: DiskRequest::OP_READ,
             disk_id: self.disk_id,
             lba,
-            count: 1,
+            count: count as u64,
             data: [0u8; 512],
         };
 
@@ -75,30 +92,34 @@ impl DiskServiceDevice {
             return Err(VfsError::IoError);
         }
 
-        // レスポンスを受信（ブロッキング）
+        // count 件のレスポンスを順次受信（ブロッキング）
         let mut resp_buf = [0u8; size_of::<DiskResponse>()];
-        let (sender, len) = loop {
-            let (s, l) = ipc::ipc_recv_wait(&mut resp_buf);
-            if s == 0 && l == 0 {
-                continue;
+        for i in 0..count {
+            let (sender, len) = loop {
+                let (s, l) = ipc::ipc_recv_wait(&mut resp_buf);
+                if s == 0 && l == 0 {
+                    continue;
+                }
+                break (s, l);
+            };
+
+            if sender != self.disk_service_pid || (len as usize) < size_of::<DiskResponse>() {
+                return Err(VfsError::IoError);
             }
-            break (s, l);
-        };
 
-        if sender != self.disk_service_pid || (len as usize) < size_of::<DiskResponse>() {
-            return Err(VfsError::IoError);
+            let resp: DiskResponse = unsafe {
+                core::ptr::read_unaligned(resp_buf.as_ptr() as *const DiskResponse)
+            };
+
+            if resp.status != 0 || resp.len < self.sector_size as u64 {
+                return Err(VfsError::IoError);
+            }
+
+            let start = i * self.sector_size;
+            let end = start + self.sector_size;
+            buf[start..end].copy_from_slice(&resp.data[..self.sector_size]);
         }
 
-        let resp: DiskResponse = unsafe {
-            core::ptr::read_unaligned(resp_buf.as_ptr() as *const DiskResponse)
-        };
-
-        if resp.status != 0 {
-            return Err(VfsError::IoError);
-        }
-
-        // データをコピー
-        buf[..512].copy_from_slice(&resp.data);
         Ok(())
     }
 
@@ -159,6 +180,31 @@ impl BlockDevice for DiskServiceDevice {
 
     fn read_block(&self, block_num: u64, buf: &mut [u8]) -> Result<(), ()> {
         self.read_sector(block_num, buf).map_err(|_| ())
+    }
+
+    fn read_blocks(&self, start_block: u64, count: usize, buf: &mut [u8]) -> Result<(), ()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let total = count
+            .checked_mul(self.sector_size)
+            .ok_or(())?;
+        if buf.len() < total {
+            return Err(());
+        }
+
+        let mut done = 0usize;
+        while done < count {
+            let chunk = core::cmp::min(MAX_SECTORS_PER_REQ, count - done);
+            let lba = start_block
+                .checked_add(done as u64)
+                .ok_or(())?;
+            let begin = done * self.sector_size;
+            let end = begin + chunk * self.sector_size;
+            self.read_sectors(lba, chunk, &mut buf[begin..end]).map_err(|_| ())?;
+            done += chunk;
+        }
+        Ok(())
     }
 
     fn write_block(&mut self, block_num: u64, buf: &[u8]) -> Result<(), ()> {

@@ -78,8 +78,13 @@ pub fn map_physical_range(phys_addr: u64, size: u64) -> u64 {
             None => return Err(ENOMEM),
         };
 
-        crate::mem::paging::map_physical_range_to_user(pt_phys, map_start, aligned_phys, mapped_size)
-            .map_err(|_| ENOMEM)?;
+        crate::mem::paging::map_physical_range_to_user(
+            pt_phys,
+            map_start,
+            aligned_phys,
+            mapped_size,
+        )
+        .map_err(|_| ENOMEM)?;
 
         let new_end = map_start.checked_add(mapped_size).unwrap_or(map_start);
         process.set_heap_end(new_end);

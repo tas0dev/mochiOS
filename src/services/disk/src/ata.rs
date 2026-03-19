@@ -206,47 +206,64 @@ impl AtaDrive {
         self.initialized.load(Ordering::Acquire)
     }
 
-    /// セクタを読み取る（LBA28モード）
-    pub fn read_sector(&self, lba: u64, buffer: &mut [u8]) -> AtaResult<()> {
+    /// 複数セクタを連続読み取りする（LBA28モード）
+    pub fn read_sectors(&self, lba: u64, count: u8, buffer: &mut [u8]) -> AtaResult<()> {
         if !self.is_initialized() {
             return Err(AtaError::NotReady);
         }
-
-        if buffer.len() < 512 {
+        if count == 0 {
             return Err(AtaError::InvalidArgument);
         }
 
-        if lba >= (1 << 28) {
-            // LBA28の範囲外
+        let count_usize = count as usize;
+        let total_bytes = count_usize
+            .checked_mul(512)
+            .ok_or(AtaError::InvalidArgument)?;
+        if buffer.len() < total_bytes {
             return Err(AtaError::InvalidArgument);
         }
 
-        // ドライブを選択してLBAを設定
+        let max_lba_exclusive = 1u64 << 28;
+        let end_lba_exclusive = lba
+            .checked_add(count as u64)
+            .ok_or(AtaError::InvalidArgument)?;
+        if end_lba_exclusive > max_lba_exclusive {
+            return Err(AtaError::InvalidArgument);
+        }
+
         self.select_drive();
         self.wait_400ns();
 
         unsafe {
             self.write_lba28(lba);
-            self.write_sector_count(1);
+            self.write_sector_count(count);
             self.write_command(command::READ_SECTORS);
         }
 
-        // ビジー待ち＆DRQ待ち
         self.wait_not_busy()?;
-        self.wait_drq()?;
 
-        // データを読み取る（512バイト = 256ワード）
-        let word_buffer = unsafe {
-            core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u16, 256)
-        };
+        for sector_idx in 0..count_usize {
+            self.wait_drq()?;
 
-        unsafe {
-            for word in word_buffer.iter_mut() {
-                *word = self.read_data();
+            let start = sector_idx * 512;
+            let end = start + 512;
+            let word_buffer = unsafe {
+                core::slice::from_raw_parts_mut(buffer[start..end].as_mut_ptr() as *mut u16, 256)
+            };
+            unsafe {
+                for word in word_buffer.iter_mut() {
+                    *word = self.read_data();
+                }
             }
         }
 
+        self.wait_not_busy()?;
         Ok(())
+    }
+
+    /// セクタを読み取る（LBA28モード）
+    pub fn read_sector(&self, lba: u64, buffer: &mut [u8]) -> AtaResult<()> {
+        self.read_sectors(lba, 1, buffer)
     }
 
     /// セクタに書き込む（LBA28モード）
