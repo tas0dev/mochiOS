@@ -5,7 +5,8 @@
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
-use swiftlib::libc::{inb, outb, inw, outw};
+use swiftlib::libc::{inb, outb};
+use swiftlib::port::{inw_words, outw_words};
 
 /// ATAポート
 #[allow(dead_code)]
@@ -147,7 +148,7 @@ impl AtaDrive {
 
         // ステータスをチェック
         let status = unsafe { self.read_status() };
-        if status == 0 {
+        if status == 0 || status == 0xFF {
             // ドライブが存在しない
             return Err(AtaError::NotFound);
         }
@@ -157,8 +158,11 @@ impl AtaDrive {
 
         // DRQまたはERRを待つ (H-15修正: タイムアウトを追加して無限ループを防ぐ)
         let mut drq_waited = false;
-        for _ in 0..1_000_000 {
+        for _ in 0..50_000 {
             let status = unsafe { self.read_status() };
+            if status == 0 || status == 0xFF {
+                return Err(AtaError::NotFound);
+            }
             if status & status::ERR != 0 {
                 return Err(AtaError::IoError);
             }
@@ -174,10 +178,8 @@ impl AtaDrive {
 
         // IDENTIFY情報を読み取る（512バイト）
         let mut identify_data = [0u16; 256];
-        unsafe {
-            for word in &mut identify_data {
-                *word = self.read_data();
-            }
+        if inw_words(self.ports.data, &mut identify_data).is_err() {
+            return Err(AtaError::IoError);
         }
 
         // セクタ数を取得（LBA28の場合はワード60-61、LBA48の場合はワード100-103）
@@ -250,10 +252,8 @@ impl AtaDrive {
             let word_buffer = unsafe {
                 core::slice::from_raw_parts_mut(buffer[start..end].as_mut_ptr() as *mut u16, 256)
             };
-            unsafe {
-                for word in word_buffer.iter_mut() {
-                    *word = self.read_data();
-                }
+            if inw_words(self.ports.data, word_buffer).is_err() {
+                return Err(AtaError::IoError);
             }
         }
 
@@ -298,10 +298,8 @@ impl AtaDrive {
         let word_buffer =
             unsafe { core::slice::from_raw_parts(buffer.as_ptr() as *const u16, 256) };
 
-        unsafe {
-            for &word in word_buffer.iter() {
-                self.write_data(word);
-            }
+        if outw_words(self.ports.data, word_buffer).is_err() {
+            return Err(AtaError::IoError);
         }
 
         // キャッシュフラッシュ
@@ -362,21 +360,13 @@ impl AtaDrive {
         inb(self.ports.control)
     }
 
-    /// データを読み取る
-    unsafe fn read_data(&self) -> u16 {
-        inw(self.ports.data)
-    }
-
-    /// データを書き込む
-    #[allow(dead_code)]
-    unsafe fn write_data(&self, data: u16) {
-        outw(self.ports.data, data);
-    }
-
     /// ビジーが解除されるまで待つ
     fn wait_not_busy(&self) -> AtaResult<()> {
-        for _ in 0..1_000_000 {
+        for _ in 0..200_000 {
             let status = unsafe { self.read_status() };
+            if status == 0 || status == 0xFF {
+                return Err(AtaError::NotFound);
+            }
             if status & status::BSY == 0 {
                 return Ok(());
             }
@@ -387,8 +377,11 @@ impl AtaDrive {
 
     /// DRQフラグが立つまで待つ
     fn wait_drq(&self) -> AtaResult<()> {
-        for _ in 0..1_000_000 {
+        for _ in 0..200_000 {
             let status = unsafe { self.read_status() };
+            if status == 0 || status == 0xFF {
+                return Err(AtaError::NotFound);
+            }
             if status & status::ERR != 0 {
                 return Err(AtaError::IoError);
             }

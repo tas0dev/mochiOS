@@ -806,14 +806,14 @@ pub fn arch_prctl(code: u64, addr: u64) -> u64 {
 
 /// FindProcessByNameシステムコール
 ///
-/// プロセス名からPIDを検索する
+/// プロセス名から、IPC送信先として使えるスレッドIDを検索する
 ///
 /// # 引数
 /// - `name_ptr`: プロセス名のポインタ
 /// - `len`: プロセス名の長さ
 ///
 /// # 戻り値
-/// 見つかった場合はPID、見つからない場合は0
+/// 見つかった場合はスレッドID、見つからない場合は0
 pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
     use crate::task;
     use core::str;
@@ -831,10 +831,22 @@ pub fn find_process_by_name(name_ptr: u64, len: u64) -> u64 {
         Err(_) => return 0,
     };
 
-    // プロセスリストを検索
-    // TODO: 直接タスク管理モジュールにアクセスするのはリスキーなのでロックをかける
-    // taskモジュールに検索関数を追加するのが望ましい
-    task::find_process_id_by_name(name)
-        .map(|pid| pid.as_u64())
-        .unwrap_or(0)
+    let pid = match task::find_process_id_by_name(name) {
+        Some(pid) => pid,
+        None => return 0,
+    };
+
+    // IPCの宛先はプロセスIDではなくスレッドIDなので、
+    // 対象プロセスに属する先頭スレッドIDを返す。
+    let mut thread_id: Option<u64> = None;
+    task::for_each_thread(|thread| {
+        if thread_id.is_none()
+            && thread.process_id() == pid
+            && thread.state() != task::ThreadState::Terminated
+        {
+            thread_id = Some(thread.id().as_u64());
+        }
+    });
+
+    thread_id.unwrap_or(0)
 }

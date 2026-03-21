@@ -8,7 +8,6 @@ use swiftlib::time;
 const OP_NOTIFY_READY: u64 = 0xFF;
 const FS_PATH_MAX: usize = 128;
 const FS_DATA_MAX: usize = 560;
-const FS_RESPONSE_WAIT_TRIES: usize = 12000; // 120s (10ms * 12000)
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -98,12 +97,9 @@ fn wait_for_ready(expected_pids: &[u64]) {
 
     println!("[CORE] Waiting for {} critical service(s) to be ready...", total);
 
-    // 最大 30 秒待つ（タイムアウト: 3000 × 10ms）
-    for _ in 0..3000 {
-        let (sender, len) = ipc::ipc_recv(&mut recv_buf);
-
+    while pending_len > 0 {
+        let (sender, len) = ipc::ipc_recv_wait(&mut recv_buf);
         if sender == 0 && len == 0 {
-            time::sleep_ms(10);
             continue;
         }
 
@@ -133,12 +129,6 @@ fn wait_for_ready(expected_pids: &[u64]) {
             }
         }
     }
-
-    let ready_count = total - pending_len;
-    println!(
-        "[CORE] WARNING: Timed out waiting for critical READY (got {}/{})",
-        ready_count, total
-    );
 }
 
 fn fs_request(fs_pid: u64, req: &FsRequest) -> Result<FsResponse, &'static str> {
@@ -150,10 +140,9 @@ fn fs_request(fs_pid: u64, req: &FsRequest) -> Result<FsResponse, &'static str> 
     }
 
     let mut resp_buf = [0u8; size_of::<FsResponse>()];
-    for _ in 0..FS_RESPONSE_WAIT_TRIES {
-        let (sender, len) = ipc::ipc_recv(&mut resp_buf);
+    loop {
+        let (sender, len) = ipc::ipc_recv_wait(&mut resp_buf);
         if sender == 0 && len == 0 {
-            time::sleep_ms(10);
             continue;
         }
         if sender != fs_pid || (len as usize) < size_of::<FsResponse>() {
@@ -165,15 +154,13 @@ fn fs_request(fs_pid: u64, req: &FsRequest) -> Result<FsResponse, &'static str> 
         };
         return Ok(resp);
     }
-
-    Err("fs response timeout")
 }
 
 fn exec_file_via_fs_service(path: &str) -> Result<u64, &'static str> {
-    let fs_pid = task::find_process_by_name("fs.service")
+    let fs_tid = task::find_process_by_name("fs.service")
         .ok_or("fs.service not found")?;
     let exec_req = FsRequest::exec(path).ok_or("path too long")?;
-    let resp = fs_request(fs_pid, &exec_req)?;
+    let resp = fs_request(fs_tid, &exec_req)?;
     if resp.status < 0 {
         return Err("exec failed");
     }

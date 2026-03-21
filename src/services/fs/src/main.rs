@@ -220,7 +220,10 @@ fn read_exec_image_from_inode(fs: &dyn FileSystem, inode: u64) -> Result<Vec<u8>
     }
 
     let mut image = vec![0u8; required_end];
-    read_exact_at(fs, inode, 0, &mut image)?;
+    image[..ph_end].copy_from_slice(&hdr_and_ph);
+    if required_end > ph_end {
+        read_exact_at(fs, inode, ph_end as u64, &mut image[ph_end..])?;
+    }
     Ok(image)
 }
 
@@ -296,11 +299,10 @@ fn main() {
     let mut recv_buf = AlignedBuffer([0u8; 256]);
 
     loop {
-        let (sender, len) = ipc::ipc_recv(&mut recv_buf.0);
+        let (sender, len) = ipc::ipc_recv_wait(&mut recv_buf.0);
 
-        // メッセージなし（ipc_recv の戻り値は (0, 0)）
+        // メッセージなし（エラー等で (0,0) が返る場合）
         if sender == 0 && len == 0 {
-            task::yield_now();
             continue;
         }
 

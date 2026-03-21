@@ -168,6 +168,10 @@ pub enum SyscallNumber {
     MapPhysicalRange = 536,
     /// ユーザー仮想アドレスを物理アドレスへ変換
     VirtToPhys = 537,
+    /// I/Oポートから 16-bit ワード列を一括読み取り
+    PortInWords = 538,
+    /// I/Oポートへ 16-bit ワード列を一括書き込み
+    PortOutWords = 539,
 }
 
 /// 成功

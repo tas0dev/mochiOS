@@ -104,10 +104,11 @@ pub fn copy_from_user(src_ptr: u64, dst: &mut [u8]) -> Result<(), u64> {
         return Err(EFAULT);
     }
 
-    for (i, out) in dst.iter_mut().enumerate() {
-        let addr = src_ptr.checked_add(i as u64).ok_or(EFAULT)?;
-        *out = with_user_memory_access(|| unsafe { core::ptr::read(addr as *const u8) });
-    }
+    let dst_ptr = dst.as_mut_ptr();
+    let len = dst.len();
+    with_user_memory_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(src_ptr as *const u8, dst_ptr, len);
+    });
     Ok(())
 }
 
@@ -207,6 +208,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Log as u64 => io::log(arg0, arg1, arg2),
         x if x == SyscallNumber::PortIn as u64 => io_port::port_in(arg0, arg1),
         x if x == SyscallNumber::PortOut as u64 => io_port::port_out(arg0, arg1, arg2),
+        x if x == SyscallNumber::PortInWords as u64 => io_port::port_in_words(arg0, arg1, arg2),
+        x if x == SyscallNumber::PortOutWords as u64 => io_port::port_out_words(arg0, arg1, arg2),
         x if x == SyscallNumber::Mkdir as u64 => fs::mkdir(arg0, arg1),
         x if x == SyscallNumber::Rmdir as u64 => fs::rmdir(arg0),
         x if x == SyscallNumber::Readdir as u64 => fs::readdir(arg0, arg1, arg2),
