@@ -156,13 +156,13 @@ fn fs_request(fs_pid: u64, req: &FsRequest) -> Result<FsResponse, &'static str> 
     }
 }
 
-fn exec_file_via_fs_service(path: &str) -> Result<u64, &'static str> {
+fn exec_file_via_fs_service(path: &str) -> Result<u64, i64> {
     let fs_tid = task::find_process_by_name("fs.service")
-        .ok_or("fs.service not found")?;
-    let exec_req = FsRequest::exec(path).ok_or("path too long")?;
-    let resp = fs_request(fs_tid, &exec_req)?;
+        .ok_or(-3)?; // ESRCH
+    let exec_req = FsRequest::exec(path).ok_or(-22)?; // EINVAL
+    let resp = fs_request(fs_tid, &exec_req).map_err(|_| -5)?; // EIO
     if resp.status < 0 {
-        return Err("exec failed");
+        return Err(resp.status);
     }
     Ok(resp.status as u64)
 }
@@ -172,8 +172,11 @@ fn start_shell_service() {
     println!("[CORE] Loading shell.service via fs.service...");
     match exec_file_via_fs_service("Services/shell.service") {
         Ok(pid) => println!("[CORE] shell.service started (PID={})", pid),
-        Err(e) => {
-            println!("[CORE] Failed to exec shell.service via fs.service: {}", e);
+        Err(errno) => {
+            println!(
+                "[CORE] Failed to exec shell.service via fs.service: errno={}",
+                errno
+            );
             println!("[CORE] Fallback: launching shell.service from initfs...");
             match process::exec("shell.service") {
                 Ok(pid) => println!("[CORE] shell.service started (PID={})", pid),

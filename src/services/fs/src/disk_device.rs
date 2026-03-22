@@ -5,7 +5,9 @@ use core::mem::size_of;
 use swiftlib::ipc;
 
 use crate::common::vfs::{VfsError, VfsResult};
+use crate::enqueue_pending_message;
 use crate::ext2::BlockDevice;
+use crate::take_pending_message_for_sender;
 
 const MAX_SECTORS_PER_REQ: usize = 32;
 
@@ -95,15 +97,41 @@ impl DiskServiceDevice {
         // count 件のレスポンスを順次受信（ブロッキング）
         let mut resp_buf = [0u8; size_of::<DiskResponse>()];
         for i in 0..count {
-            let (sender, len) = loop {
+            if let Some(n) = take_pending_message_for_sender(self.disk_service_pid, &mut resp_buf) {
+                if n < size_of::<DiskResponse>() {
+                    return Err(VfsError::IoError);
+                }
+                let resp: DiskResponse = unsafe {
+                    core::ptr::read_unaligned(resp_buf.as_ptr() as *const DiskResponse)
+                };
+                if resp.status != 0 || resp.len < self.sector_size as u64 {
+                    return Err(VfsError::IoError);
+                }
+                let start = i * self.sector_size;
+                let end = start + self.sector_size;
+                buf[start..end].copy_from_slice(&resp.data[..self.sector_size]);
+                continue;
+            }
+
+            let (_, len) = loop {
                 let (s, l) = ipc::ipc_recv_wait(&mut resp_buf);
                 if s == 0 && l == 0 {
+                    continue;
+                }
+                if s != self.disk_service_pid {
+                    let msg_len = core::cmp::min(l as usize, resp_buf.len());
+                    if !enqueue_pending_message(s, &resp_buf[..msg_len]) {
+                        println!(
+                            "[FS] WARN: pending IPC queue full while stashing req (sender={}, len={})",
+                            s, l
+                        );
+                    }
                     continue;
                 }
                 break (s, l);
             };
 
-            if sender != self.disk_service_pid || (len as usize) < size_of::<DiskResponse>() {
+            if (len as usize) < size_of::<DiskResponse>() {
                 return Err(VfsError::IoError);
             }
 
@@ -149,16 +177,32 @@ impl DiskServiceDevice {
 
         // レスポンスを受信（ブロッキング）
         let mut resp_buf = [0u8; size_of::<DiskResponse>()];
-        let (sender, len) = loop {
-            let (s, l) = ipc::ipc_recv_wait(&mut resp_buf);
-            if s == 0 && l == 0 {
-                continue;
+        if let Some(n) = take_pending_message_for_sender(self.disk_service_pid, &mut resp_buf) {
+            if n < size_of::<DiskResponse>() {
+                return Err(VfsError::IoError);
             }
-            break (s, l);
-        };
+        } else {
+            let (_, len) = loop {
+                let (s, l) = ipc::ipc_recv_wait(&mut resp_buf);
+                if s == 0 && l == 0 {
+                    continue;
+                }
+                if s != self.disk_service_pid {
+                    let msg_len = core::cmp::min(l as usize, resp_buf.len());
+                    if !enqueue_pending_message(s, &resp_buf[..msg_len]) {
+                        println!(
+                            "[FS] WARN: pending IPC queue full while stashing req (sender={}, len={})",
+                            s, l
+                        );
+                    }
+                    continue;
+                }
+                break (s, l);
+            };
 
-        if sender != self.disk_service_pid || (len as usize) < size_of::<DiskResponse>() {
-            return Err(VfsError::IoError);
+            if (len as usize) < size_of::<DiskResponse>() {
+                return Err(VfsError::IoError);
+            }
         }
 
         let resp: DiskResponse = unsafe {

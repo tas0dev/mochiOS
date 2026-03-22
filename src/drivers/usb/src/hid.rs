@@ -72,9 +72,8 @@ fn map_hid_usage_to_set1_scancode(usage: u8) -> Option<u8> {
 
 #[inline]
 fn inject_scancode(scancode: u8, state: &mut HidParserState) {
-    if let Err(err) = input::inject_scancode(scancode) {
+    if let Err(_err) = input::inject_scancode(scancode) {
         if !state.warned_kbd_inject {
-            println!("[xHCI] keyboard inject failed: {:#x}", err);
             state.warned_kbd_inject = true;
         }
     }
@@ -125,7 +124,7 @@ fn hid_usage_to_char(usage: u8, shift: bool) -> Option<char> {
     }
 }
 
-fn parse_hid_keyboard_report(slot: u8, ep: u8, report: &[u8], state: &mut HidParserState) -> bool {
+fn parse_hid_keyboard_report(_slot: u8, _ep: u8, report: &[u8], state: &mut HidParserState) -> bool {
     if report.len() < 8 {
         return false;
     }
@@ -141,11 +140,6 @@ fn parse_hid_keyboard_report(slot: u8, ep: u8, report: &[u8], state: &mut HidPar
         }
         if let Some(scancode) = map_hid_usage_to_set1_scancode(usage) {
             inject_scancode(scancode | SC_RELEASE, state);
-        } else {
-            println!(
-                "[xHCI][HID][slot:{} ep:{}] unknown release usage=0x{:02x}",
-                slot, ep, usage
-            );
         }
     }
 
@@ -156,14 +150,8 @@ fn parse_hid_keyboard_report(slot: u8, ep: u8, report: &[u8], state: &mut HidPar
         }
         if let Some(scancode) = map_hid_usage_to_set1_scancode(usage) {
             inject_scancode(scancode, state);
-            if let Some(ch) = hid_usage_to_char(usage, shift) {
-                println!("[xHCI][HID][slot:{} ep:{}] key '{}'", slot, ep, ch);
+            if let Some(..) = hid_usage_to_char(usage, shift) {
             }
-        } else {
-            println!(
-                "[xHCI][HID][slot:{} ep:{}] usage=0x{:02x} modifiers=0x{:02x}",
-                slot, ep, usage, modifiers
-            );
         }
     }
 
@@ -171,7 +159,7 @@ fn parse_hid_keyboard_report(slot: u8, ep: u8, report: &[u8], state: &mut HidPar
     true
 }
 
-fn parse_hid_mouse_report(slot: u8, ep: u8, report: &[u8], state: &mut HidParserState) -> bool {
+fn parse_hid_mouse_report(_slot: u8, _ep: u8, report: &[u8], state: &mut HidParserState) -> bool {
     if report.len() < 3 {
         return false;
     }
@@ -198,23 +186,11 @@ fn parse_hid_mouse_report(slot: u8, ep: u8, report: &[u8], state: &mut HidParser
     };
 
     if dx != 0 || dy != 0 || wheel != 0 || buttons != state.prev_mouse_buttons {
-        if let Err(err) = input::inject_mouse_packet(buttons, dx, dy) {
+        if let Err(_err) = input::inject_mouse_packet(buttons, dx, dy) {
             if !state.warned_mouse_inject {
-                println!("[xHCI] mouse inject failed: {:#x}", err);
                 state.warned_mouse_inject = true;
             }
         }
-        println!(
-            "[xHCI][HID][slot:{} ep:{}] mouse dx={} dy={} wheel={} L={} R={} M={}",
-            slot,
-            ep,
-            dx,
-            dy,
-            wheel,
-            buttons & 0x01,
-            (buttons >> 1) & 0x01,
-            (buttons >> 2) & 0x01
-        );
     }
     state.prev_mouse_buttons = buttons;
     true

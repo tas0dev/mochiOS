@@ -1,4 +1,5 @@
-use swiftlib::{fs, io, ipc, process, task, vga};
+use core::mem::size_of;
+use swiftlib::{fs, io, ipc, task, vga};
 
 // 色の編集がだるっちいったらありゃしないのでgeminiに作ってもらったエディタを使ってください。
 // https://gemini.google.com/share/02481dc7584f
@@ -33,9 +34,37 @@ const ANSI_COLOR_BRIGHT: [u32; 8] = [
 ];
 const FONT_BIN_PATH: &str = "/System/fonts/ter-u12b.bin";
 const FONT_BDF_PATH: &str = "/System/fonts/ter-u12b.bdf";
+const ENV_FILE_PATH: &str = "/Config/env.txt";
 const FONT_BIN_SIZE: usize = GLYPH_COUNT * FONT_HEIGHT;
 const FONT_BDF_MAX_SIZE: usize = 512 * 1024;
+const ENV_FILE_MAX_SIZE: usize = 4096;
 const FONT_READ_CHUNK: usize = 512;
+const FS_PATH_MAX: usize = 128;
+const FS_DATA_MAX: usize = 560;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FsRequest {
+    op: u64,
+    arg1: u64,
+    arg2: u64,
+    path: [u8; FS_PATH_MAX],
+}
+
+impl FsRequest {
+    const OP_OPEN: u64 = 1;
+    const OP_READ: u64 = 2;
+    const OP_CLOSE: u64 = 4;
+    const OP_EXEC: u64 = 5;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FsResponse {
+    status: i64,
+    len: u64,
+    data: [u8; FS_DATA_MAX],
+}
 
 fn read_file(path: &str, max_size: usize) -> Option<Vec<u8>> {
     if max_size == 0 {
@@ -69,6 +98,138 @@ fn read_file(path: &str, max_size: usize) -> Option<Vec<u8>> {
     } else {
         Some(out)
     }
+}
+
+fn encode_exec_path_and_args(path: &str, args: &[&str]) -> Option<[u8; FS_PATH_MAX]> {
+    let mut out = [0u8; FS_PATH_MAX];
+    let path_bytes = path.as_bytes();
+    if path_bytes.is_empty() || path_bytes.len() + 1 > FS_PATH_MAX {
+        return None;
+    }
+    out[..path_bytes.len()].copy_from_slice(path_bytes);
+    let mut pos = path_bytes.len() + 1; // path の終端 NUL
+
+    for arg in args {
+        let b = arg.as_bytes();
+        if b.is_empty() {
+            continue;
+        }
+        if pos + b.len() + 1 > FS_PATH_MAX {
+            return None;
+        }
+        out[pos..pos + b.len()].copy_from_slice(b);
+        pos += b.len();
+        out[pos] = 0;
+        pos += 1;
+    }
+    Some(out)
+}
+
+fn fs_request(fs_tid: u64, req: &FsRequest) -> Result<FsResponse, ()> {
+    let req_slice = unsafe {
+        core::slice::from_raw_parts(&req as *const _ as *const u8, size_of::<FsRequest>())
+    };
+    if ipc::ipc_send(fs_tid, req_slice) != 0 {
+        return Err(());
+    }
+
+    let mut resp_buf = [0u8; size_of::<FsResponse>()];
+    loop {
+        let (sender, len) = ipc::ipc_recv_wait(&mut resp_buf);
+        if sender == 0 && len == 0 {
+            continue;
+        }
+        if sender != fs_tid || (len as usize) < size_of::<FsResponse>() {
+            continue;
+        }
+        let resp: FsResponse = unsafe {
+            core::ptr::read_unaligned(resp_buf.as_ptr() as *const FsResponse)
+        };
+        return Ok(resp);
+    }
+}
+
+fn open_via_fs_service(fs_tid: u64, path: &str) -> Result<u64, ()> {
+    let path_field = encode_exec_path_and_args(path, &[]).ok_or(())?;
+    let req = FsRequest {
+        op: FsRequest::OP_OPEN,
+        arg1: 0,
+        arg2: 0,
+        path: path_field,
+    };
+    let resp = fs_request(fs_tid, &req)?;
+    if resp.status < 0 {
+        return Err(());
+    }
+    Ok(resp.status as u64)
+}
+
+fn close_via_fs_service(fs_tid: u64, fd: u64) {
+    let req = FsRequest {
+        op: FsRequest::OP_CLOSE,
+        arg1: fd,
+        arg2: 0,
+        path: [0; FS_PATH_MAX],
+    };
+    let _ = fs_request(fs_tid, &req);
+}
+
+fn read_file_via_fs_service(path: &str, max_size: usize) -> Option<Vec<u8>> {
+    let fs_tid = task::find_process_by_name("fs.service")?;
+    let fd = match open_via_fs_service(fs_tid, path) {
+        Ok(fd) => fd,
+        Err(()) => return None,
+    };
+
+    let mut out = Vec::new();
+    while out.len() < max_size {
+        let req_len = core::cmp::min(FS_DATA_MAX, max_size - out.len());
+        if req_len == 0 {
+            break;
+        }
+
+        let req = FsRequest {
+            op: FsRequest::OP_READ,
+            arg1: fd,
+            arg2: req_len as u64,
+            path: [0; FS_PATH_MAX],
+        };
+        let resp = match fs_request(fs_tid, &req) {
+            Ok(r) => r,
+            Err(()) => {
+                close_via_fs_service(fs_tid, fd);
+                return None;
+            }
+        };
+        if resp.status < 0 {
+            close_via_fs_service(fs_tid, fd);
+            return None;
+        }
+
+        let n = core::cmp::min(resp.len as usize, FS_DATA_MAX);
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&resp.data[..n]);
+    }
+    close_via_fs_service(fs_tid, fd);
+    Some(out)
+}
+
+fn exec_via_fs_service(path: &str, args: &[&str]) -> Result<u64, i64> {
+    let fs_tid = task::find_process_by_name("fs.service").ok_or(-5)?;
+    let path_field = encode_exec_path_and_args(path, args).ok_or(-22)?;
+    let req = FsRequest {
+        op: FsRequest::OP_EXEC,
+        arg1: 0,
+        arg2: 0,
+        path: path_field,
+    };
+    let resp = fs_request(fs_tid, &req).map_err(|_| -5)?;
+    if resp.status < 0 {
+        return Err(resp.status);
+    }
+    Ok(resp.status as u64)
 }
 
 /// ASCII 文字ごとの 12 行ビットマップ (インデックス = codepoint - 32)
@@ -143,8 +304,11 @@ fn parse_bdf(data: &[u8], glyphs: &mut [[u8; FONT_HEIGHT]; GLYPH_COUNT]) {
     let mut in_bitmap = false;
     let mut row = 0usize;
 
-    while let Some(line) = lines.next() {
-        let line = line.trim();
+    loop {
+        let line = match lines.next() {
+            Some(l) => l.trim(),
+            None => break,
+        };
         if line.starts_with("ENCODING ") {
             encoding = line[9..].trim().parse::<usize>().ok();
             in_bitmap = false;
@@ -196,12 +360,71 @@ pub struct Terminal {
 
 #[allow(unused)]
 impl Terminal {
+    fn load_env_file(&mut self) {
+        let data = match read_file_via_fs_service(ENV_FILE_PATH, ENV_FILE_MAX_SIZE) {
+            Some(d) => d,
+            None => return,
+        };
+        let text = match core::str::from_utf8(&data) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        for raw_line in text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(eq) = line.find('=') {
+                let key = line[..eq].trim();
+                let val = line[eq + 1..].trim();
+                if !key.is_empty() {
+                    self.set_env(key, val);
+                }
+            } else {
+                self.set_env("PATH", line);
+            }
+        }
+    }
+
+    fn command_exists(&self, path: &str) -> bool {
+        if let Some(fs_tid) = task::find_process_by_name("fs.service") {
+            if let Ok(fd) = open_via_fs_service(fs_tid, path) {
+                close_via_fs_service(fs_tid, fd);
+                return true;
+            }
+        }
+
+        let fd = swiftlib::io::open(path, io::O_RDONLY);
+        if fd >= 0 {
+            swiftlib::io::close(fd as u64);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn busybox_fallback_in_path(&self) -> Option<String> {
+        let path_val = self.get_env("PATH").unwrap_or_default();
+        for dir in path_val.split(':') {
+            let dir = dir.trim();
+            if dir.is_empty() {
+                continue;
+            }
+            let candidate = format!("{}/busybox.elf", dir);
+            if self.command_exists(&candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
     pub fn new(fb_ptr: *mut u32, info: vga::FbInfo, font: Font) -> Self {
         let max_cols = info.width / FONT_WIDTH as u32;
         let max_rows = info.height / FONT_HEIGHT as u32;
         let mut env = Vec::new();
         env.push(("PATH".to_string(), "/Binaries".to_string()));
-        Terminal {
+        let mut term = Terminal {
             fb_ptr,
             width: info.width,
             height: info.height,
@@ -220,7 +443,9 @@ impl Terminal {
             ansi_csi_mode: false,
             ansi_seq: [0; ANSI_MAX_SEQ_LEN],
             ansi_seq_len: 0,
-        }
+        };
+        term.load_env_file();
+        term
     }
 
     fn get_env(&self, key: &str) -> Option<String> {
@@ -245,11 +470,13 @@ impl Terminal {
             format!("{}.elf", cmd)
         };
         for dir in path_val.split(':') {
+            let dir = dir.trim();
+            if dir.is_empty() {
+                continue;
+            }
             let candidate = format!("{}/{}", dir, filename);
             // stat syscall 未実装のため open/close で存在確認
-            let fd = swiftlib::io::open(&candidate, 0);
-            if fd >= 0 {
-                swiftlib::io::close(fd as u64);
+            if self.command_exists(&candidate) {
                 return Some(candidate);
             }
         }
@@ -626,6 +853,7 @@ impl Terminal {
             "help" => {
                 self.write_str("Commands: help, clear, version, export, cd\n");
                 self.write_str("Other commands are loaded from PATH (Binaries/*.elf)\n");
+                self.write_str("BusyBox applets are available via aliases (e.g. 'ls' -> busybox ls)\n");
             }
             "clear" => {
                 self.clear_screen();
@@ -656,21 +884,31 @@ impl Terminal {
             }
             _ => {
                 // PATH からコマンドを探して実行
-                let path = self.find_in_path(cmd_name).map(|s| s.to_string());
+                let mut path = self.find_in_path(cmd_name).map(|s| s.to_string());
+                if path.is_none() && cmd_name != "busybox" && cmd_name != "busybox.elf" {
+                    path = self.busybox_fallback_in_path();
+                }
                 match path {
                     Some(bin_path) => {
-                        let arg_parts: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                        let result = if arg_parts.is_empty() {
-                            process::exec(&bin_path)
-                        } else {
-                            process::exec_with_args(&bin_path, &arg_parts)
-                        };
+                        let mut arg_parts: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                        // busybox は applet 名を argv[1] に要求するため補完する。
+                        if (cmd_name == "busybox" || cmd_name == "busybox.elf")
+                            && arg_parts.is_empty()
+                        {
+                            // no-op (usage 表示)
+                        } else if cmd_name != "busybox"
+                            && cmd_name != "busybox.elf"
+                            && bin_path.ends_with("/busybox.elf")
+                        {
+                            arg_parts.insert(0, cmd_name);
+                        }
+                        let result = exec_via_fs_service(&bin_path, &arg_parts);
                         match result {
                             Ok(pid) => {
                                 // 子プロセスの出力をIPCで受け取りながら終了を待つ
                                 self.drain_child_output(pid);
                             }
-                            Err(()) => {
+                            Err(_) => {
                                 self.write_str("exec failed: ");
                                 self.write_str(&bin_path);
                                 self.write_byte(b'\n');

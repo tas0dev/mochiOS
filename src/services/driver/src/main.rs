@@ -49,7 +49,11 @@ fn fs_request(fs_tid: u64, req: &FsRequest) -> Option<FsResponse> {
         if sender == 0 && len == 0 {
             continue;
         }
-        if sender != fs_tid || (len as usize) < size_of::<FsResponse>() {
+        if sender != fs_tid {
+            continue;
+        }
+        if (len as usize) < size_of::<FsResponse>() {
+            println!("[DRIVER] fs response too short: len={}", len);
             continue;
         }
         let resp: FsResponse = unsafe {
@@ -59,11 +63,11 @@ fn fs_request(fs_tid: u64, req: &FsRequest) -> Option<FsResponse> {
     }
 }
 
-fn fs_exec(fs_tid: u64, path: &str) -> Result<u64, ()> {
+fn fs_exec(fs_tid: u64, path: &str) -> Result<u64, i64> {
     let mut path_buf = [0u8; FS_PATH_MAX];
     let bytes = path.as_bytes();
     if bytes.len() >= FS_PATH_MAX {
-        return Err(());
+        return Err(-22);
     }
     path_buf[..bytes.len()].copy_from_slice(bytes);
     let req = FsRequest {
@@ -72,18 +76,19 @@ fn fs_exec(fs_tid: u64, path: &str) -> Result<u64, ()> {
         arg2: 0,
         path: path_buf,
     };
-    let resp = fs_request(fs_tid, &req).ok_or(())?;
+    let resp = fs_request(fs_tid, &req).ok_or(-5)?;
     if resp.status < 0 {
-        return Err(());
+        println!("[DRIVER] fs exec errno={} path={}", resp.status, path);
+        return Err(resp.status);
     }
     Ok(resp.status as u64)
 }
 
-fn fs_open(fs_tid: u64, path: &str) -> Result<u64, ()> {
+fn fs_open(fs_tid: u64, path: &str) -> Result<u64, i64> {
     let mut path_buf = [0u8; FS_PATH_MAX];
     let bytes = path.as_bytes();
     if bytes.len() >= FS_PATH_MAX {
-        return Err(());
+        return Err(-22);
     }
     path_buf[..bytes.len()].copy_from_slice(bytes);
     let req = FsRequest {
@@ -92,27 +97,29 @@ fn fs_open(fs_tid: u64, path: &str) -> Result<u64, ()> {
         arg2: 0,
         path: path_buf,
     };
-    let resp = fs_request(fs_tid, &req).ok_or(())?;
+    let resp = fs_request(fs_tid, &req).ok_or(-5)?;
     if resp.status < 0 {
-        return Err(());
+        println!("[DRIVER] fs open errno={} path={}", resp.status, path);
+        return Err(resp.status);
     }
     Ok(resp.status as u64)
 }
 
-fn fs_read(fs_tid: u64, fd: u64, out: &mut [u8]) -> Result<usize, ()> {
+fn fs_read(fs_tid: u64, fd: u64, out: &mut [u8]) -> Result<usize, i64> {
     let req = FsRequest {
         op: FsRequest::OP_READ,
         arg1: fd,
         arg2: out.len() as u64,
         path: [0u8; FS_PATH_MAX],
     };
-    let resp = fs_request(fs_tid, &req).ok_or(())?;
+    let resp = fs_request(fs_tid, &req).ok_or(-5)?;
     if resp.status < 0 {
-        return Err(());
+        println!("[DRIVER] fs read errno={} fd={}", resp.status, fd);
+        return Err(resp.status);
     }
     let n = resp.len as usize;
     if n > out.len() || n > FS_DATA_MAX {
-        return Err(());
+        return Err(-5);
     }
     out[..n].copy_from_slice(&resp.data[..n]);
     Ok(n)
@@ -139,7 +146,10 @@ fn load_driver_list(fs_tid: u64) -> Vec<String> {
             loop {
                 let n = match fs_read(fs_tid, fd, &mut chunk) {
                     Ok(n) => n,
-                    Err(_) => break,
+                    Err(errno) => {
+                        println!("[DRIVER] fs read failed errno={} path={}", errno, DRIVER_CONFIG_PATH);
+                        break;
+                    }
                 };
                 if n == 0 {
                     break;
@@ -158,10 +168,10 @@ fn load_driver_list(fs_tid: u64) -> Vec<String> {
                 drivers.push(line.to_string());
             }
         }
-        Err(_) => {
+        Err(errno) => {
             println!(
-                "[DRIVER] Failed to open {} via fs.service (using defaults)",
-                DRIVER_CONFIG_PATH
+                "[DRIVER] Failed to open {} via fs.service (errno={}, using defaults)",
+                DRIVER_CONFIG_PATH, errno
             );
         }
     }
@@ -179,7 +189,7 @@ fn start_driver(fs_tid: u64, path: &str) {
     println!("[DRIVER] Starting {}", path);
     match fs_exec(fs_tid, path) {
         Ok(pid) => println!("[DRIVER] Started {} (PID={})", path, pid),
-        Err(_) => println!("[DRIVER] Failed to start {}", path),
+        Err(errno) => println!("[DRIVER] Failed to start {} (errno={})", path, errno),
     }
 }
 

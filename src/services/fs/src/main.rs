@@ -22,6 +22,8 @@ const ELF_HEADER_SIZE: usize = 64;
 const ELF_PHDR_SIZE: usize = 56;
 const ELF_PT_LOAD: u32 = 1;
 const MAX_EXEC_IMAGE_SIZE: usize = 64 * 1024 * 1024;
+pub(crate) const IPC_MAX_MSG_SIZE: usize = 576;
+const PENDING_IPC_CAPACITY: usize = 16;
 
 #[derive(Clone, Copy)]
 struct OpenFile {
@@ -84,7 +86,112 @@ struct FsResponse {
 }
 
 #[repr(align(8))]
-struct AlignedBuffer([u8; 256]);
+struct AlignedBuffer([u8; IPC_MAX_MSG_SIZE]);
+
+#[inline]
+fn decode_message_op(data: &[u8], len: usize) -> Option<u64> {
+    if len < 8 || data.len() < 8 {
+        return None;
+    }
+    Some(u64::from_le_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ]))
+}
+
+#[inline]
+fn is_fs_request_message(data: &[u8], len: usize) -> bool {
+    if len < size_of::<FsRequest>() {
+        return false;
+    }
+    match decode_message_op(data, len) {
+        Some(op) => (FsRequest::OP_OPEN..=FsRequest::OP_EXEC).contains(&op),
+        None => false,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingIpcMessage {
+    used: bool,
+    sender: u64,
+    len: usize,
+    data: [u8; IPC_MAX_MSG_SIZE],
+}
+
+impl PendingIpcMessage {
+    const fn new() -> Self {
+        Self {
+            used: false,
+            sender: 0,
+            len: 0,
+            data: [0; IPC_MAX_MSG_SIZE],
+        }
+    }
+}
+
+static mut PENDING_IPC_MESSAGES: [PendingIpcMessage; PENDING_IPC_CAPACITY] =
+    [PendingIpcMessage::new(); PENDING_IPC_CAPACITY];
+
+pub(crate) fn enqueue_pending_message(sender: u64, data: &[u8]) -> bool {
+    let copy_len = core::cmp::min(data.len(), IPC_MAX_MSG_SIZE);
+    if copy_len == 0 {
+        return true;
+    }
+    unsafe {
+        for slot in &mut PENDING_IPC_MESSAGES {
+            if !slot.used {
+                slot.used = true;
+                slot.sender = sender;
+                slot.len = copy_len;
+                slot.data[..copy_len].copy_from_slice(&data[..copy_len]);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn take_pending_message_for_sender(sender: u64, buf: &mut [u8]) -> Option<usize> {
+    unsafe {
+        for slot in &mut PENDING_IPC_MESSAGES {
+            if slot.used && slot.sender == sender {
+                let copy_len = core::cmp::min(slot.len, buf.len());
+                buf[..copy_len].copy_from_slice(&slot.data[..copy_len]);
+                slot.used = false;
+                slot.sender = 0;
+                slot.len = 0;
+                return Some(copy_len);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn take_pending_fs_request(
+    disk_sender: Option<u64>,
+    buf: &mut [u8],
+) -> Option<(u64, usize)> {
+    unsafe {
+        for slot in &mut PENDING_IPC_MESSAGES {
+            if !slot.used {
+                continue;
+            }
+            if matches!(disk_sender, Some(disk_tid) if slot.sender == disk_tid) {
+                continue;
+            }
+            if !is_fs_request_message(&slot.data, slot.len) {
+                continue;
+            }
+            let copy_len = core::cmp::min(slot.len, buf.len());
+            buf[..copy_len].copy_from_slice(&slot.data[..copy_len]);
+            let sender = slot.sender;
+            slot.used = false;
+            slot.sender = 0;
+            slot.len = 0;
+            return Some((sender, copy_len));
+        }
+    }
+    None
+}
 
 fn vfs_error_to_errno(err: VfsError) -> i64 {
     match err {
@@ -227,6 +334,37 @@ fn read_exec_image_from_inode(fs: &dyn FileSystem, inode: u64) -> Result<Vec<u8>
     Ok(image)
 }
 
+fn decode_exec_path_and_args(raw: &[u8; 128]) -> Result<(String, Vec<String>), i64> {
+    let mut path_end = 0usize;
+    while path_end < raw.len() && raw[path_end] != 0 {
+        path_end += 1;
+    }
+    if path_end == 0 {
+        return Err(-22); // EINVAL
+    }
+    let path = core::str::from_utf8(&raw[..path_end]).map_err(|_| -22)?.to_string();
+
+    let mut args = Vec::new();
+    let mut i = path_end + 1;
+    while i < raw.len() {
+        if raw[i] == 0 {
+            break;
+        }
+        let start = i;
+        while i < raw.len() && raw[i] != 0 {
+            i += 1;
+        }
+        let arg = core::str::from_utf8(&raw[start..i]).map_err(|_| -22)?;
+        if !arg.is_empty() {
+            args.push(arg.to_string());
+        }
+        if i < raw.len() {
+            i += 1;
+        }
+    }
+    Ok((path, args))
+}
+
 //noinspection ALL
 /// disk.service から ext2 をマウントする（失敗時は InitFs にフォールバック）
 fn mount_filesystem() {
@@ -296,17 +434,44 @@ fn main() {
     mount_filesystem();
     notify_ready_to_core();
 
-    let mut recv_buf = AlignedBuffer([0u8; 256]);
+    let mut recv_buf = AlignedBuffer([0u8; IPC_MAX_MSG_SIZE]);
 
     loop {
-        let (sender, len) = ipc::ipc_recv_wait(&mut recv_buf.0);
+        let disk_tid = task::find_process_by_name("disk.service");
+        let (sender, len) = match take_pending_fs_request(disk_tid, &mut recv_buf.0) {
+            Some((sender, len)) => (sender, len),
+            None => {
+                let (sender, len) = ipc::ipc_recv_wait(&mut recv_buf.0);
+                if sender == 0 && len == 0 {
+                    continue;
+                }
+                (sender, len as usize)
+            }
+        };
 
         // メッセージなし（エラー等で (0,0) が返る場合）
         if sender == 0 && len == 0 {
             continue;
         }
 
-        if sender != 0 && (len as usize) >= size_of::<FsRequest>() {
+        // disk.service からのメッセージは、FsRequest 形式でないものを
+        // disk_device 側待ち受け用の保留キューへ退避する。
+        if let Some(disk_tid) = disk_tid {
+            if sender == disk_tid {
+                if !is_fs_request_message(&recv_buf.0, len) {
+                    let msg_len = core::cmp::min(len, recv_buf.0.len());
+                    if !enqueue_pending_message(sender, &recv_buf.0[..msg_len]) {
+                        println!(
+                            "[FS] WARN: pending IPC queue full (sender={}, len={})",
+                            sender, len
+                        );
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if sender != 0 && len >= size_of::<FsRequest>() {
             let req: FsRequest = unsafe { core::ptr::read_unaligned(recv_buf.0.as_ptr() as *const _) };
             if req.op != FsRequest::OP_READ {
                 println!("[FS] REQ op={} from PID={}", req.op, sender);
@@ -439,41 +604,49 @@ fn main() {
                     }
                 }
                 FsRequest::OP_EXEC => {
-                    let mut path_len = 0;
-                    while path_len < 128 && req.path[path_len] != 0 {
-                        path_len += 1;
-                    }
-
-                    if let Ok(path_str) = core::str::from_utf8(&req.path[..path_len]) {
-                        println!("[FS] OP_EXEC: {}", path_str);
-                        unsafe {
-                            if let Some(ref fs) = MOUNTED_FS {
-                                match resolve_path(fs.as_ref(), path_str) {
-                                    Ok(inode) => match read_exec_image_from_inode(fs.as_ref(), inode) {
-                                        Ok(elf_data) => {
-                                            match process::exec_from_buffer_named(path_str, &elf_data) {
-                                                Ok(pid) => {
-                                                    resp.status = pid as i64;
-                                                }
-                                                Err(_) => {
-                                                    resp.status = -5; // EIO
-                                                }
+                    let (path_owned, args_owned) = match decode_exec_path_and_args(&req.path) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            resp.status = e;
+                            continue;
+                        }
+                    };
+                    let path_str = path_owned.as_str();
+                    println!("[FS] OP_EXEC: {}", path_str);
+                    unsafe {
+                        if let Some(ref fs) = MOUNTED_FS {
+                            match resolve_path(fs.as_ref(), path_str) {
+                                Ok(inode) => match read_exec_image_from_inode(fs.as_ref(), inode) {
+                                    Ok(elf_data) => {
+                                        let arg_refs: Vec<&str> =
+                                            args_owned.iter().map(|s| s.as_str()).collect();
+                                        let exec_ret = if arg_refs.is_empty() {
+                                            process::exec_from_buffer_named(path_str, &elf_data)
+                                        } else {
+                                            process::exec_from_buffer_named_with_args(
+                                                path_str, &elf_data, &arg_refs,
+                                            )
+                                        };
+                                        match exec_ret {
+                                            Ok(pid) => {
+                                                resp.status = pid as i64;
+                                            }
+                                            Err(errno) => {
+                                                resp.status = errno;
                                             }
                                         }
-                                        Err(e) => {
-                                            resp.status = vfs_error_to_errno(e);
-                                        }
-                                    },
+                                    }
                                     Err(e) => {
                                         resp.status = vfs_error_to_errno(e);
                                     }
+                                },
+                                Err(e) => {
+                                    resp.status = vfs_error_to_errno(e);
                                 }
-                            } else {
-                                resp.status = -5; // EIO
                             }
+                        } else {
+                            resp.status = -5; // EIO
                         }
-                    } else {
-                        resp.status = -22; // EINVAL
                     }
                 }
                 _ => {

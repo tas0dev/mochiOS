@@ -33,10 +33,7 @@ pub fn getpgid(pid_arg: u64) -> u64 {
         crate::task::ids::ProcessId::from_u64(pid_arg)
     };
 
-    match crate::task::with_process(target_pid, |p| p.pgid()) {
-        Some(pgid) => pgid,
-        None => ESRCH,
-    }
+    crate::task::with_process(target_pid, |p| p.pgid()).unwrap_or_else(|| ESRCH)
 }
 
 /// Setpgid システムコール
@@ -87,14 +84,11 @@ pub fn setsid() -> u64 {
         None => return ESRCH,
     };
     let pid_val = pid.as_u64();
-    match crate::task::with_process_mut(pid, |p| {
+    crate::task::with_process_mut(pid, |p| {
         p.set_pgid(pid_val);
         p.set_sid(pid_val);
         pid_val
-    }) {
-        Some(new_sid) => new_sid,
-        None => ESRCH,
-    }
+    }).unwrap_or_else(|| ESRCH)
 }
 
 /// Getsid システムコール
@@ -108,10 +102,7 @@ pub fn getsid(pid_arg: u64) -> u64 {
         crate::task::ids::ProcessId::from_u64(pid_arg)
     };
 
-    match crate::task::with_process(target_pid, |p| p.sid()) {
-        Some(sid) => sid,
-        None => ESRCH,
-    }
+    crate::task::with_process(target_pid, |p| p.sid()).unwrap_or_else(|| ESRCH)
 }
 
 /// ioctl システムコール

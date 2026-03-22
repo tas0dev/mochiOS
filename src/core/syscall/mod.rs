@@ -233,6 +233,9 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::ExecFromBufferNamed as u64 => {
             exec::exec_from_buffer_named_syscall(arg0, arg1, arg2)
         }
+        x if x == SyscallNumber::ExecFromBufferNamedArgs as u64 => {
+            exec::exec_from_buffer_named_args_syscall(arg0, arg1, arg2, arg3)
+        }
         x if x == SyscallNumber::SetConsoleCursor as u64 => {
             crate::util::vga::set_cursor_pixel_y(arg0 as usize);
             0

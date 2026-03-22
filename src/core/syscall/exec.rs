@@ -133,6 +133,43 @@ fn caller_can_launch_service() -> bool {
     .unwrap_or(false)
 }
 
+fn read_nul_args_from_user(args_ptr: u64, max_total_bytes: usize, max_args: usize) -> Result<Vec<String>, u64> {
+    use crate::syscall::types::{EFAULT, EINVAL};
+
+    if args_ptr == 0 {
+        return Ok(Vec::new());
+    }
+    if !crate::syscall::validate_user_ptr(args_ptr, 1) {
+        return Err(EFAULT);
+    }
+
+    let mut storage: Vec<u8> = Vec::new();
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let ptr = args_ptr as *const u8;
+        for i in 0..max_total_bytes {
+            let b = ptr.add(i).read_volatile();
+            storage.push(b);
+            let len = storage.len();
+            if len >= 2 && storage[len - 1] == 0 && storage[len - 2] == 0 {
+                break;
+            }
+        }
+    });
+
+    let mut out = Vec::new();
+    for s in storage.split(|&b| b == 0) {
+        if s.is_empty() {
+            continue;
+        }
+        let text = core::str::from_utf8(s).map_err(|_| EINVAL)?;
+        out.push(String::from(text));
+        if out.len() >= max_args {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 /// カーネル内から実行可能ファイルを読み込み実行するシステムコール
 /// args_ptr: ヌル区切り引数文字列へのポインタ（"arg1\0arg2\0\0"形式）、0 なら引数なし
 pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
@@ -151,42 +188,11 @@ pub fn exec_kernel(path_ptr: u64, args_ptr: u64) -> u64 {
         return crate::syscall::types::EPERM;
     }
 
-    // args_ptr が非 0 なら "\0" 区切り引数文字列を解析する（最大 512 バイト）
-    let mut extra_args_storage: Vec<u8> = Vec::new();
-    let extra_args: Vec<&str>;
-    if args_ptr != 0 {
-        if !crate::syscall::validate_user_ptr(args_ptr, 1) {
-            return crate::syscall::types::EFAULT;
-        }
-        // 最大 512 バイト読む
-        let max = 512usize;
-        crate::syscall::with_user_memory_access(|| unsafe {
-            let ptr = args_ptr as *const u8;
-            for i in 0..max {
-                let b = ptr.add(i).read_volatile();
-                extra_args_storage.push(b);
-                // 連続する \0\0 で終端
-                let len = extra_args_storage.len();
-                if len >= 2 && extra_args_storage[len - 1] == 0 && extra_args_storage[len - 2] == 0
-                {
-                    break;
-                }
-            }
-        });
-        extra_args = extra_args_storage
-            .split(|&b| b == 0)
-            .filter_map(|s| {
-                if s.is_empty() {
-                    None
-                } else {
-                    core::str::from_utf8(s).ok()
-                }
-            })
-            .collect();
-    } else {
-        extra_args = Vec::new();
-    }
-
+    let extra_args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
     exec_internal(path, None, &extra_args)
 }
 
@@ -1070,7 +1076,7 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         (6u64, 4096u64),
         (7u64, 0u64),
         (8u64, 0u64),
-        (9u64, entry as u64),
+        (9u64, entry),
         (11u64, 0u64),
         (12u64, 0u64),
         (13u64, 0u64),
@@ -1253,4 +1259,50 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
     });
 
     exec_with_data(&owned, process_name, path.as_str(), &[])
+}
+
+/// メモリ上の ELF バッファと実行パス名・引数から新プロセスを起動するシステムコール
+///
+/// # 引数
+/// - `buf_ptr`: ユーザー空間の ELF データへのポインタ
+/// - `buf_len`: バッファのバイト数
+/// - `path_ptr`: ユーザー空間の null 終端パス文字列
+/// - `args_ptr`: ユーザー空間の null 区切り引数列（"arg1\0arg2\0\0"）
+pub fn exec_from_buffer_named_args_syscall(
+    buf_ptr: u64,
+    buf_len: u64,
+    path_ptr: u64,
+    args_ptr: u64,
+) -> u64 {
+    use crate::syscall::types::{EFAULT, EINVAL, EPERM};
+
+    if !caller_can_launch_service() {
+        return EPERM;
+    }
+    if buf_ptr == 0 || buf_len == 0 || buf_len > 32 * 1024 * 1024 || path_ptr == 0 {
+        return EINVAL;
+    }
+    if !crate::syscall::validate_user_ptr(buf_ptr, buf_len) {
+        return EFAULT;
+    }
+
+    let path = match crate::syscall::read_user_cstring(path_ptr, 256) {
+        Ok(s) => s,
+        Err(_) => return EINVAL,
+    };
+    let process_name = path.rsplit('/').next().unwrap_or(path.as_str());
+
+    let args_owned = match read_nul_args_from_user(args_ptr, 512, 64) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+
+    let mut owned = alloc::vec![0u8; buf_len as usize];
+    let dst_ptr = owned.as_mut_ptr();
+    crate::syscall::with_user_memory_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(buf_ptr as *const u8, dst_ptr, buf_len as usize);
+    });
+
+    exec_with_data(&owned, process_name, path.as_str(), &args_refs)
 }

@@ -327,7 +327,8 @@ pub unsafe extern "C" fn posix_spawn(
     _envp: *const *const u8,
 ) -> i32 {
     // カーネルの Exec syscall (516) を使って新しいプロセスを生成する
-    let ret = syscall1(SyscallNumber::Exec as u64, path as u64);
+    // 第2引数(args_ptr)は未使用でも0を明示してABIを安定化させる
+    let ret = syscall2(SyscallNumber::Exec as u64, path as u64, 0);
     let ret_i64 = ret as i64;
     if ret_i64 < 0 {
         return (-ret_i64) as i32; // posix_spawn は正のerror numberを返す

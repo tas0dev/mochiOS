@@ -6,6 +6,8 @@ use keyboard::Ps2Keyboard;
 use swiftlib::{time, vga};
 
 fn main() {
+    println!("[SHELL] Service Started.");
+
     let info = match vga::get_info() {
         Some(i) => i,
         None => {

@@ -120,6 +120,8 @@ pub enum SyscallNumber {
     MouseInject = 541,
     /// メモリ上の ELF バッファと実行パス名から新プロセスを起動
     ExecFromBufferNamed = 542,
+    /// メモリ上の ELF バッファと実行パス名＋引数から新プロセスを起動
+    ExecFromBufferNamedArgs = 543,
 }
 
 /// 操作が許可されていない
