@@ -201,6 +201,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::IpcRecv as u64 => ipc::recv(arg0, arg1),
         x if x == SyscallNumber::IpcRecvWait as u64 => ipc::recv_blocking(arg0, arg1),
         x if x == SyscallNumber::Exec as u64 => exec::exec_kernel(arg0, arg1),
+        x if x == SyscallNumber::ExecFromFsStream as u64 => exec::exec_from_fs_stream(arg0, arg1),
         x if x == SyscallNumber::Sleep as u64 => process::sleep(arg0),
         x if x == SyscallNumber::Log as u64 => io::log(arg0, arg1, arg2),
         x if x == SyscallNumber::PortIn as u64 => io_port::port_in(arg0, arg1),

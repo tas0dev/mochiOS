@@ -182,6 +182,8 @@ pub enum SyscallNumber {
     ExecFromBufferNamedArgs = 543,
     /// メモリ上の ELF バッファと実行パス名＋引数＋要求元スレッドIDから新プロセスを起動
     ExecFromBufferNamedArgsWithRequester = 544,
+    /// Execute by streaming ELF image from fs.service into kernel (path_ptr, args_ptr)
+    ExecFromFsStream = 545,
 }
 
 /// 成功

@@ -1141,6 +1141,40 @@ pub fn unmap_range_in_table(table_phys: u64, addr: u64, length: u64) -> Result<(
     Ok(())
 }
 
+/// アンマップするが、フレームの解放は行わない（フレーム所有権を移すときに使用）
+pub fn unmap_range_in_table_preserve_frames(table_phys: u64, addr: u64, length: u64) -> Result<()> {
+    if length == 0 {
+        return Ok(());
+    }
+    let phys_off = physical_memory_offset().ok_or(Kernel::Memory(Memory::NotMapped))?;
+    let end_raw = addr
+        .checked_add(length)
+        .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+    let start = addr & !0xfffu64;
+    let end = end_raw
+        .checked_add(0xfff)
+        .map(|v| v & !0xfffu64)
+        .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+
+    let l4 = unsafe { &mut *((table_phys + phys_off) as *mut PageTable) };
+    let mut pt = unsafe { OffsetPageTable::new(l4, VirtAddr::new(phys_off)) };
+
+    let mut page_addr = start;
+    while page_addr < end {
+        if !page_is_user_mapped_in_table(table_phys, page_addr) {
+            page_addr += 4096;
+            continue;
+        }
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
+        if let Ok((_, flush)) = pt.unmap(page) {
+            // do not deallocate the physical frame; ownership transferred
+            flush.ignore();
+        }
+        page_addr += 4096;
+    }
+    Ok(())
+}
+
 fn deallocate_4k_frame_by_phys(frame_phys: u64) {
     let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(frame_phys));
     let _ = frame::deallocate_frame(frame);

@@ -14,6 +14,9 @@ pub struct Message {
     to_generation: u64,
     len: usize,
     data: [u8; MAX_MSG_SIZE],
+    // Support up to 128 external pages (adjustable). Each entry is a physical page frame address.
+    ext_pages_count: u16,
+    ext_pages: [u64; 128],
 }
 
 impl Message {
@@ -25,6 +28,8 @@ impl Message {
             to_generation: 0,
             len: 0,
             data: [0; MAX_MSG_SIZE],
+            ext_pages_count: 0,
+            ext_pages: [0; 128],
         }
     }
 }
@@ -113,6 +118,7 @@ impl Mailbox {
         msg.to_slot = to_slot;
         msg.to_generation = to_generation;
         msg.len = data.len();
+        msg.ext_pages_count = 0;
         if !data.is_empty() {
             msg.data[..data.len()].copy_from_slice(data);
         }
@@ -136,7 +142,15 @@ impl Mailbox {
                 && msg.to_slot == receiver_slot
                 && msg.to_generation == receiver_generation
             {
+                // If this message carries external pages and caller requested 0-copy mapping,
+                // indicate that by returning len==0 and the receiver can inspect ext_pages_count/ext_pages
                 let copy_len = core::cmp::min(msg.len, out.len());
+                if msg.ext_pages_count > 0 && msg.len == 0 {
+                    // leave out untouched; return 0 to indicate special pages-only message
+                    let from = msg.from;
+                    self.free_slot(slot_idx);
+                    return Some((from, 0usize));
+                }
                 if copy_len > 0 {
                     out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
                 }
@@ -218,6 +232,64 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
             .push_message(sender, dest_thread_id, idx as u16, dest_generation, data)
             .is_ok()
         {
+            let waiter = mb.take_waiter();
+            if waiter != 0 {
+                crate::task::wake_thread(crate::task::ThreadId::from_u64(waiter));
+            }
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Kernel -> recipient: send a message that carries physical page frame addresses
+/// Pages are explicit physical frame addresses (one per 4KiB page). Up to 32 entries supported.
+pub fn send_pages_from_kernel(dest_thread_id: u64, map_start: u64, total: u64, pages: &[u64]) -> bool {
+    if pages.len() > 128 {
+        return false;
+    }
+    let (idx, dest_generation) =
+        match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
+            Some(v) => v,
+            None => return false,
+        };
+    if idx >= MAX_THREADS {
+        return false;
+    }
+    let sender = crate::task::current_thread_id().map(|t| t.as_u64()).unwrap_or(0);
+    let mut boxes = MAILBOXES.lock();
+    boxes.get_mut(idx).map_or(false, |mb| {
+        if let Some(slot_idx) = mb.alloc_slot() {
+            let msg = &mut mb.slots[slot_idx];
+            msg.from = sender;
+            msg.to = dest_thread_id;
+            msg.to_slot = idx as u16;
+            msg.to_generation = dest_generation;
+            // serialize map_start, total, then pages into data
+            let mut off = 0usize;
+            if (16 + pages.len() * 8) > MAX_MSG_SIZE {
+                mb.free_slot(slot_idx);
+                return false;
+            }
+            msg.data[off..off + 8].copy_from_slice(&map_start.to_ne_bytes());
+            off += 8;
+            msg.data[off..off + 8].copy_from_slice(&(total as u64).to_ne_bytes());
+            off += 8;
+            for p in pages.iter() {
+                msg.data[off..off + 8].copy_from_slice(&p.to_ne_bytes());
+                off += 8;
+            }
+            msg.len = off;
+            msg.ext_pages_count = pages.len() as u16;
+            for i in 0..pages.len() {
+                msg.ext_pages[i] = pages[i];
+            }
+            // enqueue
+            if mb.enqueue_slot(slot_idx).is_err() {
+                mb.free_slot(slot_idx);
+                return false;
+            }
             let waiter = mb.take_waiter();
             if waiter != 0 {
                 crate::task::wake_thread(crate::task::ThreadId::from_u64(waiter));

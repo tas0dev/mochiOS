@@ -8,6 +8,9 @@ mod ata;
 
 use ata::{AtaDrive, AtaPorts, DriveType};
 
+use std::sync::{Arc, Mutex};
+use std::thread;
+
 const MAX_DISKS: usize = 4;
 const MAX_BULK_READ_SECTORS: u64 = 64;
 const BULK_SECTORS_PER_MSG: usize = 4;
@@ -15,6 +18,9 @@ const BULK_SECTORS_PER_MSG: usize = 4;
 static mut DISKS: [Option<AtaDrive>; MAX_DISKS] = [None, None, None, None];
 static mut DISK_PROBE_ATTEMPTED: [bool; MAX_DISKS] = [false; MAX_DISKS];
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+// per-disk locks to serialize hardware access while allowing parallel requests across disks
+static mut DISK_LOCKS: Option<Vec<Arc<Mutex<()>>>> = None;
 
 /// ディスク操作リクエスト（書き込みデータを含む）
 #[repr(C)]
@@ -99,6 +105,15 @@ fn init_disks() {
     // secondary はアクセス要求が来た時点で遅延検出する。
     try_probe_disk(0);
     try_probe_disk(1);
+
+    // initialize per-disk locks for concurrent handling
+    unsafe {
+        let mut v: Vec<Arc<Mutex<()>>> = Vec::new();
+        for _ in 0..MAX_DISKS {
+            v.push(Arc::new(Mutex::new(())));
+        }
+        DISK_LOCKS = Some(v);
+    }
 
     INITIALIZED.store(true, Ordering::Release);
     println!("[DISK] ATA initialization complete");
@@ -218,48 +233,50 @@ fn main() {
                         resp.status = -22; // EINVAL
                     } else if disk_id < MAX_DISKS {
                         try_probe_disk(disk_id);
-                        unsafe {
-                            if let Some(ref drive) = DISKS[disk_id] {
-                                let count = req.count as usize;
-                                let total_bytes = match count.checked_mul(512) {
-                                    Some(v) => v,
-                                    None => {
-                                        resp.status = -22; // EINVAL
-                                        send_response(sender, &resp);
-                                        continue;
+                        // spawn a worker thread to handle the read so multiple requests can be processed concurrently
+                        let sender_local = sender;
+                        let lba_local = req.lba;
+                        let count_local = req.count as usize;
+                        let disk_id_local = disk_id;
+
+                        // clone lock Arc if available
+                        let lock_arc = unsafe { DISK_LOCKS.as_ref().and_then(|v| v.get(disk_id_local).cloned()) };
+
+                        thread::spawn(move || {
+                            // validate and probe
+                            try_probe_disk(disk_id_local);
+                            unsafe {
+                                if let Some(ref drive) = DISKS[disk_id_local] {
+                                    let total_bytes = match count_local.checked_mul(512) { Some(v) => v, None => { let resp = DiskResponse { status: -22, len: 0, data: [0;512] }; send_response(sender_local, &resp); return; } };
+                                    let mut bulk = vec![0u8; total_bytes];
+
+                                    // use AtaDrive's async enqueue API to allow coalescing across requests
+                                    match drive.enqueue_read_sectors(lba_local, count_local as u8) {
+                                        Ok(rx) => match rx.recv() {
+                                            Ok(Ok(vec)) => { bulk.copy_from_slice(&vec[..]); }
+                                            Ok(Err(_e)) => { let resp = DiskResponse { status: -5, len: 0, data: [0;512] }; send_response(sender_local, &resp); return; }
+                                            Err(_) => { let resp = DiskResponse { status: -5, len: 0, data: [0;512] }; send_response(sender_local, &resp); return; }
+                                        },
+                                        Err(_) => { let resp = DiskResponse { status: -5, len: 0, data: [0;512] }; send_response(sender_local, &resp); return; }
                                     }
-                                };
-                                let mut bulk = vec![0u8; total_bytes];
-                                match drive.read_sectors(req.lba, req.count as u8, &mut bulk) {
-                                    Ok(_) => {
-                                        let mut offset = 0usize;
-                                        while offset < total_bytes {
-                                            let chunk_bytes = core::cmp::min(
-                                                BULK_SECTORS_PER_MSG * 512,
-                                                total_bytes - offset,
-                                            );
-                                            let mut chunk_resp = DiskBulkResponse {
-                                                status: 0,
-                                                len: chunk_bytes as u64,
-                                                data: [0; BULK_SECTORS_PER_MSG * 512],
-                                            };
-                                            let end = offset + chunk_bytes;
-                                            chunk_resp.data[..chunk_bytes]
-                                                .copy_from_slice(&bulk[offset..end]);
-                                            send_bulk_response(sender, &chunk_resp);
-                                            offset = end;
-                                        }
+
+                                    // send bulk responses in chunks
+                                    let mut offset = 0usize;
+                                    while offset < total_bytes {
+                                        let chunk_bytes = core::cmp::min(BULK_SECTORS_PER_MSG * 512, total_bytes - offset);
+                                        let mut chunk_resp = DiskBulkResponse { status: 0, len: chunk_bytes as u64, data: [0; BULK_SECTORS_PER_MSG * 512] };
+                                        let end = offset + chunk_bytes;
+                                        chunk_resp.data[..chunk_bytes].copy_from_slice(&bulk[offset..end]);
+                                        send_bulk_response(sender_local, &chunk_resp);
+                                        offset = end;
                                     }
-                                    Err(_) => {
-                                        resp.status = -5; // EIO
-                                        send_response(sender, &resp);
-                                    }
-                                };
-                                continue;
-                            } else {
-                                resp.status = -6; // ENXIO (No such device)
+                                } else {
+                                    let resp = DiskResponse { status: -6, len: 0, data: [0;512] };
+                                    send_response(sender_local, &resp);
+                                }
                             }
-                        }
+                        });
+                        continue;
                     } else {
                         resp.status = -22; // EINVAL
                     }

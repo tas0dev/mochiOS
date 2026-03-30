@@ -113,6 +113,10 @@ pub enum AtaError {
 pub type AtaResult<T> = Result<T, AtaError>;
 
 /// ATAドライブ
+use std::collections::VecDeque;
+use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::{Arc, Mutex};
+
 pub struct AtaDrive {
     /// ドライブに対応するI/Oポート
     ports: AtaPorts,
@@ -122,9 +126,36 @@ pub struct AtaDrive {
     sectors: u64,
     /// ドライブが初期化されているか
     initialized: AtomicBool,
+    /// Optional async queue for read coalescing
+    read_queue: Option<Arc<Mutex<VecDeque<QueuedRead>>>>,
+    /// NCQ（ネイティブコマンドキュー）対応フラグ（検出済みフラグ）
+    ncq_supported: bool,
+}
+
+struct QueuedRead {
+    lba: u64,
+    count: u8,
+    responder: Sender<Result<Vec<u8>, AtaError>>,
 }
 
 impl AtaDrive {
+    /// returns whether NCQ is supported by the device (identify-based detection)
+    pub fn supports_ncq(&self) -> bool {
+        self.ncq_supported
+    }
+
+    /// Attempt to send NCQ/native queued commands.
+    ///
+    /// NOTE: 真の NCQ 実装には AHCI/SATA コントローラの DMA およびコマンド送信経路が必要です。
+    /// ここでは AHCI ドライバが存在しない限り NotSupported を返します。将来的に AHCI サブシステムを
+    /// 実装した際にこのメソッドを拡張してください。
+    pub fn send_ncq_commands(&self, _lbas: &[(u64, u8)]) -> AtaResult<()> {
+        // If we had an AHCI driver, we would build a PRDT, command table/list and program the HBA
+        // to submit multiple READ DMA EXT or similar commands. That code requires PCI/AHCI support and
+        // DMA memory management; it's out of scope for the legacy PIO-based driver implemented here.
+        Err(AtaError::NotSupported)
+    }
+
     /// 新しいATAドライブインスタンスを作成
     pub const fn new(ports: AtaPorts, drive_type: DriveType) -> Self {
         Self {
@@ -194,7 +225,84 @@ impl AtaDrive {
                 | identify_data[100] as u64
         };
 
+        // NCQ 検出（注意: 本実装は AHCI ドライバ未実装のためソフトウェア側の検出のみ）
+        // 実機での NCQ の利用には AHCI/SATA コントローラの DMA/コマンドキュー サポートとドライバが必要
+        // ここでは Identify 情報から NCQ に関連するフラグ（キュー深度/コマンドキューサポート）を簡便に確認し、フラグを設定する。
+        // 将来的に AHCI ドライバを実装する際、このフラグを使ってネイティブNCQ経路へ分岐できます。
+        let mut ncq = false;
+        // Identify のワード 75-76 あたりにキュー情報が入ることがあるが、機種依存のため慎重に扱う。
+        // 安全側として現状は false に設定。将来的に精密なビット解析を追加してください。
+        let _ = identify_data; // keep variable referenced when building with different cfg
+        self.ncq_supported = ncq;
+
         self.initialized.store(true, Ordering::Release);
+
+        // initialize async read queue and spawn worker thread for coalescing reads
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        self.read_queue = Some(queue.clone());
+        // create a raw pointer to self for worker thread to call into (unsafe but acceptable here because AtaDrive remains in DISKS)
+        let self_ptr: *mut AtaDrive = self as *mut _;
+        std::thread::spawn(move || {
+            loop {
+                // collect next batch
+                let mut batch: Vec<QueuedRead> = Vec::new();
+                {
+                    let mut q = queue.lock().unwrap();
+                    if q.is_empty() {
+                        // release lock and sleep briefly
+                        drop(q);
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        continue;
+                    }
+                    // pop first
+                    if let Some(first) = q.pop_front() {
+                        batch.push(first);
+                        // try to coalesce subsequent contiguous requests
+                        while let Some(next) = q.front() {
+                            let last = batch.last().unwrap();
+                            let last_end = last.lba + (last.count as u64);
+                            let current_total: usize = batch.iter().map(|r| r.count as usize).sum();
+                            if next.lba == last_end && (current_total + (next.count as usize)) <= 64 {
+                                // contiguous and within coalesce limit
+                                if let Some(n) = q.pop_front() { batch.push(n); } else { break; }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if batch.is_empty() { continue; }
+
+                // perform single larger read covering the batch
+                let start_lba = batch.first().unwrap().lba;
+                let total_sectors: usize = batch.iter().map(|r| r.count as usize).sum();
+                let mut bigbuf = vec![0u8; total_sectors * 512];
+
+                // call into the AtaDrive instance to perform blocking read
+                unsafe {
+                    let drv: &mut AtaDrive = &mut *self_ptr;
+                    match drv.perform_blocking_read_coalesced(start_lba, total_sectors, &mut bigbuf) {
+                        Ok(()) => {
+                            // split results and send back
+                            let mut offset = 0usize;
+                            for r in batch {
+                                let bytes = (r.count as usize) * 512;
+                                let slice = bigbuf[offset..offset + bytes].to_vec();
+                                let _ = r.responder.send(Ok(slice));
+                                offset += bytes;
+                            }
+                        }
+                        Err(e) => {
+                            for r in batch {
+                                let _ = r.responder.send(Err(e));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(())
     }
 
@@ -210,51 +318,68 @@ impl AtaDrive {
 
     /// 複数セクタを連続読み取りする（LBA28モード）
     pub fn read_sectors(&self, lba: u64, count: u8, buffer: &mut [u8]) -> AtaResult<()> {
-        if !self.is_initialized() {
-            return Err(AtaError::NotReady);
+        // backward-compatible: enqueue and block on completion
+        let rx = self.enqueue_read_sectors(lba, count)?;
+        match rx.recv() {
+            Ok(Ok(vec)) => {
+                if vec.len() != (count as usize) * 512 { return Err(AtaError::IoError); }
+                if buffer.len() < vec.len() { return Err(AtaError::InvalidArgument); }
+                buffer[..vec.len()].copy_from_slice(&vec);
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(AtaError::IoError),
         }
-        if count == 0 {
-            return Err(AtaError::InvalidArgument);
-        }
+    }
 
-        let count_usize = count as usize;
-        let total_bytes = count_usize
-            .checked_mul(512)
-            .ok_or(AtaError::InvalidArgument)?;
-        if buffer.len() < total_bytes {
-            return Err(AtaError::InvalidArgument);
-        }
+    /// enqueue read request and return a Receiver to obtain result
+    pub fn enqueue_read_sectors(&self, lba: u64, count: u8) -> Result<Receiver<Result<Vec<u8>, AtaError>>, AtaError> {
+        if !self.is_initialized() { return Err(AtaError::NotReady); }
+        if count == 0 { return Err(AtaError::InvalidArgument); }
+        let end_lba_exclusive = lba.checked_add(count as u64).ok_or(AtaError::InvalidArgument)?;
+        if end_lba_exclusive > (1u64 << 28) { return Err(AtaError::InvalidArgument); }
 
-        let max_lba_exclusive = 1u64 << 28;
-        let end_lba_exclusive = lba
-            .checked_add(count as u64)
-            .ok_or(AtaError::InvalidArgument)?;
-        if end_lba_exclusive > max_lba_exclusive {
-            return Err(AtaError::InvalidArgument);
+        let (tx, rx) = channel();
+        let qr = QueuedRead { lba, count, responder: tx };
+        if let Some(ref q) = self.read_queue {
+            let mut guard = q.lock().unwrap();
+            guard.push_back(qr);
+            Ok(rx)
+        } else {
+            // queue not initialized: fallback to immediate synchronous read
+            let mut buf = vec![0u8; (count as usize) * 512];
+            // perform blocking read directly
+            match self.perform_blocking_read_coalesced(lba, count as usize, &mut buf) {
+                Ok(()) => Ok({ let (tx2, rx2) = channel(); let _ = tx2.send(Ok(buf)); rx2 }),
+                Err(e) => Ok({ let (tx2, rx2) = channel(); let _ = tx2.send(Err(e)); rx2 }),
+            }
         }
+    }
+
+    /// perform a blocking coalesced read covering total_sectors starting at start_lba
+    fn perform_blocking_read_coalesced(&mut self, start_lba: u64, total_sectors: usize, buffer: &mut [u8]) -> AtaResult<()> {
+        if total_sectors == 0 || total_sectors > 255 { return Err(AtaError::InvalidArgument); }
+        let total_bytes = total_sectors.checked_mul(512).ok_or(AtaError::InvalidArgument)?;
+        if buffer.len() < total_bytes { return Err(AtaError::InvalidArgument); }
 
         self.select_drive();
         self.wait_400ns();
 
         unsafe {
-            self.write_lba28(lba);
-            self.write_sector_count(count);
+            // sector count must fit in u8; if >255 we should split, but callers cap to 64
+            self.write_lba28(start_lba);
+            self.write_sector_count(total_sectors as u8);
             self.write_command(command::READ_SECTORS);
         }
 
         self.wait_not_busy()?;
 
-        for sector_idx in 0..count_usize {
+        for sector_idx in 0..total_sectors {
             self.wait_drq()?;
-
             let start = sector_idx * 512;
             let end = start + 512;
-            let word_buffer = unsafe {
-                core::slice::from_raw_parts_mut(buffer[start..end].as_mut_ptr() as *mut u16, 256)
-            };
-            if inw_words(self.ports.data, word_buffer).is_err() {
-                return Err(AtaError::IoError);
-            }
+            let word_buffer = unsafe { core::slice::from_raw_parts_mut(buffer[start..end].as_mut_ptr() as *mut u16, 256) };
+            if inw_words(self.ports.data, word_buffer).is_err() { return Err(AtaError::IoError); }
         }
 
         self.wait_not_busy()?;

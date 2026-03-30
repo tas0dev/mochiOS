@@ -5,6 +5,7 @@ use super::types::{EBADF, EFAULT, EINVAL, EIO, ENOENT, ENOSYS, ESRCH, SUCCESS};
 use crate::task::fd_table::{FdTable, FileHandle, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS};
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::vec;
 use alloc::vec::Vec;
 
 // グローバル FD テーブルは廃止。各プロセスの Process::fd_table を使用する。
@@ -37,32 +38,33 @@ include!("../../../shared/fs_consts.rs");
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct FsRequest {
-    op: u64,
-    arg1: u64,
-    arg2: u64,
-    path: [u8; FS_PATH_MAX],
+pub(crate) struct FsRequest {
+    pub(crate) op: u64,
+    pub(crate) arg1: u64,
+    pub(crate) arg2: u64,
+    pub(crate) path: [u8; FS_PATH_MAX],
 }
 
 impl FsRequest {
-    const OP_OPEN: u64 = 1;
-    const OP_READ: u64 = 2;
-    const OP_CLOSE: u64 = 4;
-    const OP_STAT: u64 = 6;
-    const OP_FSTAT: u64 = 7;
-    const OP_READDIR: u64 = 8;
+    pub(crate) const OP_OPEN: u64 = 1;
+    pub(crate) const OP_READ: u64 = 2;
+    pub(crate) const OP_CLOSE: u64 = 4;
+    pub(crate) const OP_STAT: u64 = 6;
+    pub(crate) const OP_FSTAT: u64 = 7;
+    pub(crate) const OP_READDIR: u64 = 8;
+    pub(crate) const OP_EXEC_STREAM: u64 = 9; // new: stream exec image to kernel
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct FsResponse {
-    status: i64,
-    len: u64,
-    data: [u8; FS_DATA_MAX],
+pub(crate) struct FsResponse {
+    pub(crate) status: i64,
+    pub(crate) len: u64,
+    pub(crate) data: [u8; FS_DATA_MAX],
 }
 
 #[inline]
-fn fs_service_tid() -> Option<u64> {
+pub(crate) fn fs_service_tid() -> Option<u64> {
     crate::task::find_process_id_by_name("fs.service").and_then(|pid| {
         let mut tid = None;
         crate::task::for_each_thread(|thread| {
@@ -77,7 +79,7 @@ fn fs_service_tid() -> Option<u64> {
     })
 }
 
-fn fs_service_request(fs_tid: u64, req: &FsRequest) -> Result<FsResponse, u64> {
+pub(crate) fn fs_service_request(fs_tid: u64, req: &FsRequest) -> Result<FsResponse, u64> {
     let req_slice = unsafe {
         core::slice::from_raw_parts(req as *const _ as *const u8, core::mem::size_of::<FsRequest>())
     };
@@ -97,7 +99,64 @@ fn fs_service_request(fs_tid: u64, req: &FsRequest) -> Result<FsResponse, u64> {
     }
 }
 
-fn encode_fs_path(path: &str) -> Result<[u8; FS_PATH_MAX], u64> {
+// Internal: send request then receive a streamed image from fs.service. Protocol:
+// 1) send FsRequest with OP_EXEC_STREAM
+// 2) receive initial FsResponse (status,len) where len == total image size
+// 3) receive raw data chunks (no per-chunk header) until total bytes received == initial len
+fn fs_service_request_stream(fs_tid: u64, req: &FsRequest) -> Result<Vec<u8>, u64> {
+    let req_slice = unsafe {
+        core::slice::from_raw_parts(req as *const _ as *const u8, core::mem::size_of::<FsRequest>())
+    };
+    if !crate::syscall::ipc::send_from_kernel(fs_tid, req_slice) {
+        return Err(EIO);
+    }
+    // receive initial FsResponse header
+    let mut header_buf = [0u8; core::mem::size_of::<FsResponse>()];
+    let n = crate::syscall::ipc::recv_blocking_from_sender_for_kernel(fs_tid, &mut header_buf)
+        .map_err(|e| if e == super::EAGAIN { EIO } else { e })?;
+    if n < core::mem::size_of::<FsResponse>() {
+        return Err(EIO);
+    }
+    let header: FsResponse = unsafe { core::ptr::read_unaligned(header_buf.as_ptr() as *const FsResponse) };
+    if header.status < 0 {
+        return Err(header.status as u64);
+    }
+    let total = header.len as usize;
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+    // allocate destination buffer once; receive directly into it to avoid intermediate copies
+    let mut out = vec![0u8; total];
+    let mut received = 0usize;
+    while received < total {
+        let remaining = total - received;
+        let recv_len = core::cmp::min(remaining, IPC_MAX_MSG_SIZE);
+        let dst = &mut out[received..received + recv_len];
+        let n = crate::syscall::ipc::recv_blocking_from_sender_for_kernel(fs_tid, dst)
+            .map_err(|e| if e == super::EAGAIN { EIO } else { e })?;
+        if n == 0 {
+            return Err(EIO);
+        }
+        received += n;
+    }
+    if received != total {
+        return Err(EIO);
+    }
+    Ok(out)
+}
+
+pub(crate) fn exec_image_via_fs(path: &str) -> Result<Vec<u8>, u64> {
+    let fs_tid = fs_service_tid().ok_or(ESRCH)?;
+    let req = FsRequest {
+        op: FsRequest::OP_EXEC_STREAM,
+        arg1: 0,
+        arg2: 0,
+        path: encode_fs_path(path)?,
+    };
+    fs_service_request_stream(fs_tid, &req)
+}
+
+pub(crate) fn encode_fs_path(path: &str) -> Result<[u8; FS_PATH_MAX], u64> {
     let mut out = [0u8; FS_PATH_MAX];
     let bytes = path.as_bytes();
     if bytes.is_empty() || bytes.len() >= FS_PATH_MAX {
