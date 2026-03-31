@@ -268,11 +268,20 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     // Phase 2: allocate frames
     let pages = (total + 4095) / 4096;
     let mut frames: Vec<u64> = Vec::new();
+    // extra_frames collects frames allocated during mapping (e.g., for BSS) that are not part of initial frames
+    let mut extra_frames: Vec<u64> = Vec::new();
     for _ in 0..pages {
         match frame::allocate_frame() {
             Ok(f) => frames.push(f.start_address().as_u64()),
             Err(_) => {
+                // deallocate any allocated initial frames
                 for p in frames.iter() {
+                    let fr = PhysAddr::new(*p);
+                    let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
+                    let _ = frame::deallocate_frame(framef);
+                }
+                // deallocate extra frames if any
+                for p in extra_frames.iter() {
                     let fr = PhysAddr::new(*p);
                     let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
                     let _ = frame::deallocate_frame(framef);
@@ -341,14 +350,16 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     // Phase 4: notify fs.service of mapping
     // For large transfers, prefer sending only a map header so the page list is not sent over IPC.
     if !crate::syscall::ipc::send_map_header_from_kernel(fs_tid, map_start, total as u64) {
-        let _ = crate::mem::paging::unmap_range_in_table(
-            crate::task::with_process(fs_pid, |p| p.page_table())
-                .flatten()
-                .unwrap_or(0),
-            map_start,
-            (frames.len() as u64) * 4096,
-        );
+        if let Some(fs_table) = crate::task::with_process(fs_pid, |p| p.page_table()).flatten() {
+            let _ = crate::mem::paging::unmap_range_in_table(fs_table, map_start, (frames.len() as u64) * 4096);
+        }
         for p in frames.iter() {
+            let fr = PhysAddr::new(*p);
+            let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
+            let _ = frame::deallocate_frame(framef);
+        }
+        // free extra_frames as well
+        for p in extra_frames.iter() {
             let fr = PhysAddr::new(*p);
             let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
             let _ = frame::deallocate_frame(framef);
@@ -360,14 +371,15 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     // Note: send_map_header_from_kernel sends only map_start+total; fs should write into mapped range and reply.
     let mut ack = [0u8; 8];
     if crate::syscall::ipc::recv_blocking_from_sender_for_kernel(fs_tid, &mut ack).is_err() {
-        let _ = crate::mem::paging::unmap_range_in_table(
-            crate::task::with_process(fs_pid, |p| p.page_table())
-                .flatten()
-                .unwrap_or(0),
-            map_start,
-            (frames.len() as u64) * 4096,
-        );
+        if let Some(fs_table) = crate::task::with_process(fs_pid, |p| p.page_table()).flatten() {
+            let _ = crate::mem::paging::unmap_range_in_table(fs_table, map_start, (frames.len() as u64) * 4096);
+        }
         for p in frames.iter() {
+            let fr = PhysAddr::new(*p);
+            let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
+            let _ = frame::deallocate_frame(framef);
+        }
+        for p in extra_frames.iter() {
             let fr = PhysAddr::new(*p);
             let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
             let _ = frame::deallocate_frame(framef);
@@ -376,7 +388,10 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     }
 
     // Phase 6: try zero-copy mapping into new process
-    let phys_off = crate::mem::paging::physical_memory_offset().unwrap_or(0);
+    let phys_off = match crate::mem::paging::physical_memory_offset() {
+        Some(v) => v,
+        None => return crate::syscall::types::EINVAL,
+    };
     // Efficiently copy from consecutive physical frames into a buffer using page-wise memcpy.
     fn copy_frames_to_buf(frames: &Vec<u64>, phys_off: u64, dst: &mut [u8]) {
         let mut written = 0usize;
@@ -559,6 +574,8 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
                     match frame::allocate_frame() {
                         Ok(f) => {
                             let p = f.start_address().as_u64();
+                            // record extra frame so it can be released on failure
+                            extra_frames.push(p);
                             unsafe { core::ptr::write_bytes((p + phys_off) as *mut u8, 0, 4096) };
                             p
                         }
@@ -587,7 +604,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
                 // adjust flags for executability/writability
                 if (ph.p_flags & 0x1) != 0 {
                     // executable: clear NX on this page
-                    let phys_off_local = crate::mem::paging::physical_memory_offset().unwrap_or(0);
+                    let phys_off_local = match crate::mem::paging::physical_memory_offset() { Some(v) => v, None => { misaligned = true; 0 } };
                     let l4 = unsafe {
                         &mut *(((new_pt_phys) + phys_off_local)
                             as *mut x86_64::structures::paging::PageTable)
