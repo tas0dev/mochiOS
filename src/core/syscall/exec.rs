@@ -305,11 +305,15 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         };
         for i in 0..frames.len() {
             let va = map_start + (i as u64) * 4096u64;
-            if let Err(_) = crate::mem::paging::map_physical_range_to_user(pt_phys, va, frames[i], 4096) {
+            if let Err(_) =
+                crate::mem::paging::map_physical_range_to_user(pt_phys, va, frames[i], 4096)
+            {
                 return Err(crate::syscall::types::ENOMEM);
             }
         }
-        let new_end = map_start.checked_add((frames.len() as u64) * 4096).unwrap_or(map_start);
+        let new_end = map_start
+            .checked_add((frames.len() as u64) * 4096)
+            .unwrap_or(map_start);
         proc.set_heap_end(new_end);
         Ok(map_start)
     });
@@ -335,9 +339,12 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     };
 
     // Phase 4: notify fs.service of mapping
-    if !crate::syscall::ipc::send_pages_from_kernel(fs_tid, map_start, total as u64, &frames) {
+    // For large transfers, prefer sending only a map header so the page list is not sent over IPC.
+    if !crate::syscall::ipc::send_map_header_from_kernel(fs_tid, map_start, total as u64) {
         let _ = crate::mem::paging::unmap_range_in_table(
-            crate::task::with_process(fs_pid, |p| p.page_table()).flatten().unwrap_or(0),
+            crate::task::with_process(fs_pid, |p| p.page_table())
+                .flatten()
+                .unwrap_or(0),
             map_start,
             (frames.len() as u64) * 4096,
         );
@@ -350,10 +357,13 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     }
 
     // Phase 5: wait for fs.service ack
+    // Note: send_map_header_from_kernel sends only map_start+total; fs should write into mapped range and reply.
     let mut ack = [0u8; 8];
     if crate::syscall::ipc::recv_blocking_from_sender_for_kernel(fs_tid, &mut ack).is_err() {
         let _ = crate::mem::paging::unmap_range_in_table(
-            crate::task::with_process(fs_pid, |p| p.page_table()).flatten().unwrap_or(0),
+            crate::task::with_process(fs_pid, |p| p.page_table())
+                .flatten()
+                .unwrap_or(0),
             map_start,
             (frames.len() as u64) * 4096,
         );
@@ -387,7 +397,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
 
     // read initial header chunk
     let mut header_read = core::cmp::min(total, 65536);
-    if header_read < 64 { header_read = core::cmp::min(total, 4096); }
+    if header_read < 64 {
+        header_read = core::cmp::min(total, 4096);
+    }
     let mut header_buf: Vec<u8> = vec![0u8; header_read];
     copy_frames_to_buf(&frames, phys_off, &mut header_buf);
 
@@ -398,7 +410,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         let mut image: Vec<u8> = vec![0u8; total];
         copy_frames_to_buf(&frames, phys_off, &mut image);
         let _ = crate::mem::paging::unmap_range_in_table(
-            crate::task::with_process(fs_pid, |p| p.page_table()).flatten().unwrap_or(0),
+            crate::task::with_process(fs_pid, |p| p.page_table())
+                .flatten()
+                .unwrap_or(0),
             map_start,
             (frames.len() as u64) * 4096,
         );
@@ -407,19 +421,31 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
             let _ = frame::deallocate_frame(framef);
         }
-        return exec_with_data(&image, path.as_str(), &path, &extra_args, delegated_parent_pid());
+        return exec_with_data(
+            &image,
+            path.as_str(),
+            &path,
+            &extra_args,
+            delegated_parent_pid(),
+        );
     }
     let eh = eh_opt.unwrap();
     let phoff = eh.e_phoff as usize;
     let phentsz = eh.e_phentsize as usize;
     let phnum = eh.e_phnum as usize;
 
-    if phoff.checked_add(phentsz.checked_mul(phnum).unwrap_or(0)).unwrap_or(usize::MAX) > total {
+    if phoff
+        .checked_add(phentsz.checked_mul(phnum).unwrap_or(0))
+        .unwrap_or(usize::MAX)
+        > total
+    {
         crate::warn!("exec: ELF phdrs exceed total size");
         let mut image: Vec<u8> = vec![0u8; total];
         copy_frames_to_buf(&frames, phys_off, &mut image);
         let _ = crate::mem::paging::unmap_range_in_table(
-            crate::task::with_process(fs_pid, |p| p.page_table()).flatten().unwrap_or(0),
+            crate::task::with_process(fs_pid, |p| p.page_table())
+                .flatten()
+                .unwrap_or(0),
             map_start,
             (frames.len() as u64) * 4096,
         );
@@ -428,7 +454,13 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
             let _ = frame::deallocate_frame(framef);
         }
-        return exec_with_data(&image, path.as_str(), &path, &extra_args, delegated_parent_pid());
+        return exec_with_data(
+            &image,
+            path.as_str(),
+            &path,
+            &extra_args,
+            delegated_parent_pid(),
+        );
     }
 
     // alignment check
@@ -450,7 +482,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         let mut image: Vec<u8> = vec![0u8; total];
         copy_frames_to_buf(&frames, phys_off, &mut image);
         let _ = crate::mem::paging::unmap_range_in_table(
-            crate::task::with_process(fs_pid, |p| p.page_table()).flatten().unwrap_or(0),
+            crate::task::with_process(fs_pid, |p| p.page_table())
+                .flatten()
+                .unwrap_or(0),
             map_start,
             (frames.len() as u64) * 4096,
         );
@@ -459,7 +493,13 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
             let _ = frame::deallocate_frame(framef);
         }
-        return exec_with_data(&image, path.as_str(), &path, &extra_args, delegated_parent_pid());
+        return exec_with_data(
+            &image,
+            path.as_str(),
+            &path,
+            &extra_args,
+            delegated_parent_pid(),
+        );
     }
 
     // create new page table for target process
@@ -470,7 +510,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             let mut image: Vec<u8> = vec![0u8; total];
             copy_frames_to_buf(&frames, phys_off, &mut image);
             let _ = crate::mem::paging::unmap_range_in_table(
-                crate::task::with_process(fs_pid, |p| p.page_table()).flatten().unwrap_or(0),
+                crate::task::with_process(fs_pid, |p| p.page_table())
+                    .flatten()
+                    .unwrap_or(0),
                 map_start,
                 (frames.len() as u64) * 4096,
             );
@@ -479,7 +521,13 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
                 let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
                 let _ = frame::deallocate_frame(framef);
             }
-            return exec_with_data(&image, path.as_str(), &path, &extra_args, delegated_parent_pid());
+            return exec_with_data(
+                &image,
+                path.as_str(),
+                &path,
+                &extra_args,
+                delegated_parent_pid(),
+            );
         }
     };
     let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
@@ -488,7 +536,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     for i in 0..phnum {
         let off_hdr = phoff + i * phentsz;
         if let Some(ph) = crate::elf::loader::parse_phdr(&header_buf, off_hdr) {
-            if ph.p_type != crate::elf::loader::PT_LOAD { continue; }
+            if ph.p_type != crate::elf::loader::PT_LOAD {
+                continue;
+            }
             let vaddr = ph.p_vaddr;
             let filesz = ph.p_filesz as usize;
             let memsz = ph.p_memsz as usize;
@@ -512,30 +562,61 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
                             unsafe { core::ptr::write_bytes((p + phys_off) as *mut u8, 0, 4096) };
                             p
                         }
-                        Err(_) => { misaligned = true; break; }
+                        Err(_) => {
+                            misaligned = true;
+                            break;
+                        }
                     }
                 };
 
-                if let Err(_) = crate::mem::paging::map_physical_range_to_user(new_pt_phys, page, phys_frame, 4096) {
-                    crate::warn!("exec: failed to map phys {:#x} to vaddr {:#x}", phys_frame, page);
-                    misaligned = true; break;
+                if let Err(_) = crate::mem::paging::map_physical_range_to_user(
+                    new_pt_phys,
+                    page,
+                    phys_frame,
+                    4096,
+                ) {
+                    crate::warn!(
+                        "exec: failed to map phys {:#x} to vaddr {:#x}",
+                        phys_frame,
+                        page
+                    );
+                    misaligned = true;
+                    break;
                 }
 
                 // adjust flags for executability/writability
                 if (ph.p_flags & 0x1) != 0 {
                     // executable: clear NX on this page
                     let phys_off_local = crate::mem::paging::physical_memory_offset().unwrap_or(0);
-                    let l4 = unsafe { &mut *(((new_pt_phys) + phys_off_local) as *mut x86_64::structures::paging::PageTable) };
-                    let mut pt = unsafe { x86_64::structures::paging::OffsetPageTable::new(l4, x86_64::VirtAddr::new(phys_off_local)) };
+                    let l4 = unsafe {
+                        &mut *(((new_pt_phys) + phys_off_local)
+                            as *mut x86_64::structures::paging::PageTable)
+                    };
+                    let mut pt = unsafe {
+                        x86_64::structures::paging::OffsetPageTable::new(
+                            l4,
+                            x86_64::VirtAddr::new(phys_off_local),
+                        )
+                    };
                     let pg = x86_64::structures::paging::Page::<x86_64::structures::paging::Size4KiB>::containing_address(x86_64::VirtAddr::new(page));
-                    let mut flags = x86_64::structures::paging::PageTableFlags::PRESENT | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE;
-                    if (ph.p_flags & 0x2) != 0 { flags |= x86_64::structures::paging::PageTableFlags::WRITABLE; }
-                    unsafe { let _ = pt.update_flags(pg, flags).map(|f| f.flush()); }
+                    let mut flags = x86_64::structures::paging::PageTableFlags::PRESENT
+                        | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE;
+                    if (ph.p_flags & 0x2) != 0 {
+                        flags |= x86_64::structures::paging::PageTableFlags::WRITABLE;
+                    }
+                    unsafe {
+                        let _ = pt.update_flags(pg, flags).map(|f| f.flush());
+                    }
                 }
 
-                page = match page.checked_add(4096) { Some(v) => v, None => break };
+                page = match page.checked_add(4096) {
+                    Some(v) => v,
+                    None => break,
+                };
             }
-            if misaligned { break; }
+            if misaligned {
+                break;
+            }
         }
     }
 
@@ -545,7 +626,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         let mut image: Vec<u8> = vec![0u8; total];
         copy_frames_to_buf(&frames, phys_off, &mut image);
         let _ = crate::mem::paging::unmap_range_in_table(
-            crate::task::with_process(fs_pid, |p| p.page_table()).flatten().unwrap_or(0),
+            crate::task::with_process(fs_pid, |p| p.page_table())
+                .flatten()
+                .unwrap_or(0),
             map_start,
             (frames.len() as u64) * 4096,
         );
@@ -554,12 +637,24 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
             let framef = x86_64::structures::paging::PhysFrame::containing_address(fr);
             let _ = frame::deallocate_frame(framef);
         }
-        return exec_with_data(&image, path.as_str(), &path, &extra_args, delegated_parent_pid());
+        return exec_with_data(
+            &image,
+            path.as_str(),
+            &path,
+            &extra_args,
+            delegated_parent_pid(),
+        );
     }
 
     // unmap from fs but preserve frames (ownership transferred)
-    let fs_table_phys = crate::task::with_process(fs_pid, |p| p.page_table()).flatten().unwrap_or(0);
-    let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(fs_table_phys, map_start, (frames.len() as u64) * 4096);
+    let fs_table_phys = crate::task::with_process(fs_pid, |p| p.page_table())
+        .flatten()
+        .unwrap_or(0);
+    let _ = crate::mem::paging::unmap_range_in_table_preserve_frames(
+        fs_table_phys,
+        map_start,
+        (frames.len() as u64) * 4096,
+    );
 
     // Finalize exec: compute phdr_vaddr and build stack/tls, create process/thread
     let mut load_base: u64 = 0;
@@ -581,7 +676,9 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     let argv0 = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
     let mut all_args: Vec<&str> = Vec::new();
     all_args.push(argv0);
-    for a in &extra_args { all_args.push(a); }
+    for a in &extra_args {
+        all_args.push(a);
+    }
     let envs: [&str; 0] = [];
     let auxv_entries = [
         (3u64, phdr_vaddr),
@@ -602,18 +699,76 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         (31u64, 0u64),
         (0u64, 0u64),
     ];
-    let InitialUserStack { stack_base_vaddr, stack_end_vaddr, initial_rsp, page_data } = match build_initial_user_stack(next_aslr_seed(path.as_str()), &all_args, &envs, path.as_str(), &auxv_entries) { Ok(s) => s, Err(e) => return e };
+    let InitialUserStack {
+        stack_base_vaddr,
+        stack_end_vaddr,
+        initial_rsp,
+        page_data,
+    } = match build_initial_user_stack(
+        next_aslr_seed(path.as_str()),
+        &all_args,
+        &envs,
+        path.as_str(),
+        &auxv_entries,
+    ) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
 
     // map stack and heap/tls
-    if crate::mem::paging::map_and_copy_segment_to(new_pt_phys, stack_base_vaddr, 0, (USER_STACK_SIZE_PAGES - 1) as u64 * 4096, &[], true, false).is_err() { return crate::syscall::types::EINVAL; }
+    if crate::mem::paging::map_and_copy_segment_to(
+        new_pt_phys,
+        stack_base_vaddr,
+        0,
+        (USER_STACK_SIZE_PAGES - 1) as u64 * 4096,
+        &[],
+        true,
+        false,
+    )
+    .is_err()
+    {
+        return crate::syscall::types::EINVAL;
+    }
     let top_page_vaddr = stack_end_vaddr - 4096;
-    if crate::mem::paging::map_and_copy_segment_to(new_pt_phys, top_page_vaddr, 4096, 4096, &page_data, true, false).is_err() { return crate::syscall::types::EINVAL; }
+    if crate::mem::paging::map_and_copy_segment_to(
+        new_pt_phys,
+        top_page_vaddr,
+        4096,
+        4096,
+        &page_data,
+        true,
+        false,
+    )
+    .is_err()
+    {
+        return crate::syscall::types::EINVAL;
+    }
     const HEAP_BASE_MIN: u64 = 0x4000_0000;
     const HEAP_ASLR_MAX_PAGES: u64 = 0x8000;
-    let default_heap_base = HEAP_BASE_MIN.saturating_add(aslr_offset_pages(next_aslr_seed(path.as_str()) ^ 0x4a11_6b5c, HEAP_ASLR_MAX_PAGES) * 4096);
+    let default_heap_base = HEAP_BASE_MIN.saturating_add(
+        aslr_offset_pages(
+            next_aslr_seed(path.as_str()) ^ 0x4a11_6b5c,
+            HEAP_ASLR_MAX_PAGES,
+        ) * 4096,
+    );
     let heap_map_size: u64 = 4096 * 2;
-    if crate::mem::paging::map_and_copy_segment_to(new_pt_phys, default_heap_base, 0, heap_map_size, &[], true, false).is_err() { return crate::syscall::types::EINVAL; }
-    let initial_fs_base = match map_initial_tls(new_pt_phys, next_aslr_seed(path.as_str())) { Ok(b) => b, Err(e) => return e };
+    if crate::mem::paging::map_and_copy_segment_to(
+        new_pt_phys,
+        default_heap_base,
+        0,
+        heap_map_size,
+        &[],
+        true,
+        false,
+    )
+    .is_err()
+    {
+        return crate::syscall::types::EINVAL;
+    }
+    let initial_fs_base = match map_initial_tls(new_pt_phys, next_aslr_seed(path.as_str())) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
 
     // create process and thread
     let parent_pid = delegated_parent_pid();
@@ -629,9 +784,25 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     new_pt_guard.disarm();
 
     const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
-    let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) { Some(a) => a, None => { let _ = crate::task::remove_process(crate::task::ProcessId::from_u64(0)); return crate::syscall::types::ENOMEM; } };
-    let mut thread = crate::task::Thread::new_usermode(crate::task::ProcessId::from_u64(0), path.as_str(), eh.e_entry, initial_rsp, kstack, KERNEL_THREAD_STACK_SIZE);
-    if crate::task::add_thread(thread).is_none() { let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys); return crate::syscall::types::EINVAL; }
+    let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
+        Some(a) => a,
+        None => {
+            let _ = crate::task::remove_process(crate::task::ProcessId::from_u64(0));
+            return crate::syscall::types::ENOMEM;
+        }
+    };
+    let mut thread = crate::task::Thread::new_usermode(
+        crate::task::ProcessId::from_u64(0),
+        path.as_str(),
+        eh.e_entry,
+        initial_rsp,
+        kstack,
+        KERNEL_THREAD_STACK_SIZE,
+    );
+    if crate::task::add_thread(thread).is_none() {
+        let _ = crate::mem::paging::destroy_user_page_table(new_pt_phys);
+        return crate::syscall::types::EINVAL;
+    }
 
     crate::syscall::types::SUCCESS
 }

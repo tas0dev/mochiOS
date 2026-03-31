@@ -507,7 +507,14 @@ fn decode_path(raw: &[u8; 128]) -> Result<&str, i64> {
 
 fn exec_from_image(path: &str, image: &[u8], args: &[String], requester_tid: u64) -> Result<u64, i64> {
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    process::exec_from_buffer_named_with_args_and_requester(path, image, &arg_refs, requester_tid)
+    // Prefer mapped, zero-copy streaming path via kernel (exec_from_fs_stream).
+    match process::exec_via_fs_stream(path, &arg_refs) {
+        Ok(pid) => Ok(pid),
+        Err(_e) => {
+            // Fallback to older copy-into-kernel path
+            process::exec_from_buffer_named_with_args_and_requester(path, image, &arg_refs, requester_tid)
+        }
+    }
 }
 
 //noinspection ALL
@@ -1024,7 +1031,25 @@ fn main() {
                             continue;
                         }
 
-                        // read file directly into mapped region in chunks — parallelized
+                        // Single-threaded fast path: if required_end is small, do single copy
+                        if required_end <= 65536 {
+                            unsafe {
+                                let dst = core::slice::from_raw_parts_mut(map_start as *mut u8, required_end);
+                                let mut buf = vec![0u8; required_end];
+                                if let Err(e) = read_exact_at(fs.as_ref().unwrap(), inode, 0, &mut buf) {
+                                    let mut err_resp = FsResponse { status: vfs_error_to_errno(e) as i64, len: 0, data: [0; FS_DATA_MAX] };
+                                    let err_slice = unsafe { core::slice::from_raw_parts(&err_resp as *const _ as *const u8, size_of::<FsResponse>()) };
+                                    let _ = ipc::ipc_send(sender, err_slice);
+                                    continue;
+                                }
+                                dst.copy_from_slice(&buf);
+                            }
+                            let ack = [0u8; 8];
+                            let _ = ipc::ipc_send(sender, &ack);
+                            continue;
+                        }
+
+                        // read file directly into mapped region in chunks — parallelized with larger chunk tuning
                         {
                             let page_size = 4096usize;
                             let pages = (required_end + page_size - 1) / page_size;
@@ -1048,7 +1073,8 @@ fn main() {
                             } else {
                                 let fs_ptr = fs_ptr.unwrap();
                                 let mut handles = Vec::new();
-                                let pages_per_worker = (pages + workers - 1) / workers;
+                                // increase pages per worker to reduce syscall/read overhead
+                                let pages_per_worker = core::cmp::max(1, (pages + workers - 1) / workers);
                                 for w in 0..workers {
                                     let start_page = w * pages_per_worker;
                                     if start_page >= pages { break; }
@@ -1061,18 +1087,18 @@ fn main() {
                                     // fs_ptr is a raw pointer copy
                                     let fs_ptr = fs_ptr;
                                     let handle = std::thread::spawn(move || {
-                                        for p in start_page..end_page {
+                                        // read larger contiguous chunks per worker
+                                        let mut off = start_page * page_size;
+                                        while off < end_page * page_size && off < required_end_local {
                                             if err_flag.load(Ordering::SeqCst) { return; }
-                                            let off = p * page_size;
-                                            let chunk = core::cmp::min(page_size, required_end_local.saturating_sub(off));
-                                            if chunk == 0 { continue; }
+                                            let chunk = core::cmp::min((end_page * page_size) - off, 64 * 1024); // up to 64KB per read
                                             unsafe {
                                                 let dst = core::slice::from_raw_parts_mut((map_start_local + off as u64) as *mut u8, chunk);
                                                 let fs_ref: &dyn common::vfs::FileSystem = &*fs_ptr;
                                                 match fs_ref.read(inode_local, off as u64, dst) {
                                                     Ok(nread) => {
                                                         if nread == 0 { break; }
-                                                        // short reads tolerated
+                                                        off += nread;
                                                     }
                                                     Err(e) => {
                                                         let mut guard = err_code.lock().unwrap();
@@ -1139,7 +1165,7 @@ fn main() {
                             let mut pages: Vec<u64> = Vec::new();
                             if n > 16 {
                                 let mut off = 16usize;
-                                while off + 8 <= n {
+                                while off + 8 <= n as usize {
                                     let pa = u64::from_ne_bytes(map_buf[off..off + 8].try_into().unwrap());
                                     pages.push(pa);
                                     off += 8;
@@ -1177,9 +1203,46 @@ fn main() {
                     }
                 }
             }
+
+            // Debug: print concise request/response info for failing operations
+            match req.op {
+                FsRequest::OP_OPEN | FsRequest::OP_STAT => {
+                    let path_s = match decode_path(&req.path) {
+                        Ok(s) => s,
+                        Err(_) => "<invalid>"
+                    };
+                    println!("[FS-DBG] REQ op={} sender={} path='{}' -> status={} len={}", req.op, sender, path_s, resp.status, resp.len);
+                }
+                FsRequest::OP_EXEC => {
+                    let path_s = match decode_exec_path_and_args(&req.path) {
+                        Ok((p, _)) => p.as_str(),
+                        Err(_) => "<invalid>"
+                    };
+                    println!("[FS-DBG] REQ OP_EXEC sender={} path='{}' -> status={} len={}", sender, path_s, resp.status, resp.len);
+                }
+                FsRequest::OP_READ => {
+                    println!("[FS-DBG] REQ OP_READ sender={} fd={} req_len={} -> status={} len={}", sender, req.arg1, req.arg2, resp.status, resp.len);
+                }
+                FsRequest::OP_READDIR => {
+                    let start = (req.arg2 >> 32) as usize;
+                    let max_len = (req.arg2 & 0xFFFF_FFFF) as usize;
+                    println!("[FS-DBG] REQ OP_READDIR sender={} fd={} start={} max_len={} -> status={} len={}", sender, req.arg1, start, max_len, resp.status, resp.len);
+                }
+                _ => {
+                    println!("[FS-DBG] REQ op={} sender={} -> status={} len={}", req.op, sender, resp.status, resp.len);
+                }
+            }
+
+            let resp_slice = unsafe {
+                core::slice::from_raw_parts(&resp as *const _ as *const u8, size_of::<FsResponse>())
+            };
+
+            let send_ret = ipc::ipc_send(sender, resp_slice);
+            if send_ret != 0 {
+                println!("[FS] WARN: failed to send response to {} (ret={})", sender, send_ret);
+            }
         }
 
-        // Debug: print concise request/response info for failing operations
         match req.op {
             FsRequest::OP_OPEN | FsRequest::OP_STAT => {
                 let path_s = match decode_path(&req.path) {

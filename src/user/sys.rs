@@ -124,6 +124,8 @@ pub enum SyscallNumber {
     ExecFromBufferNamedArgs = 543,
     /// メモリ上の ELF バッファと実行パス名＋引数＋要求元スレッドIDから新プロセスを起動
     ExecFromBufferNamedArgsWithRequester = 544,
+    /// FS 経由のストリーム exec（マップ書き込みを試行）
+    ExecFromFsStream = 545,
 }
 
 /// 操作が許可されていない

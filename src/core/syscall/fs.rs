@@ -1,7 +1,7 @@
 //! ファイルシステム関連のシステムコール
 
-use crate::syscall::process::sleep;
 use super::types::{EBADF, EFAULT, EINVAL, EIO, ENOENT, ENOSYS, ESRCH, SUCCESS};
+use crate::syscall::process::sleep;
 use crate::task::fd_table::{FdTable, FileHandle, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS};
 use alloc::string::String;
 use alloc::string::ToString;
@@ -81,7 +81,10 @@ pub(crate) fn fs_service_tid() -> Option<u64> {
 
 pub(crate) fn fs_service_request(fs_tid: u64, req: &FsRequest) -> Result<FsResponse, u64> {
     let req_slice = unsafe {
-        core::slice::from_raw_parts(req as *const _ as *const u8, core::mem::size_of::<FsRequest>())
+        core::slice::from_raw_parts(
+            req as *const _ as *const u8,
+            core::mem::size_of::<FsRequest>(),
+        )
     };
     if crate::syscall::ipc::send_from_kernel(fs_tid, req_slice) {
         let mut resp_buf = [0u8; core::mem::size_of::<FsResponse>()];
@@ -90,9 +93,8 @@ pub(crate) fn fs_service_request(fs_tid: u64, req: &FsRequest) -> Result<FsRespo
         if n < core::mem::size_of::<FsResponse>() {
             return Err(EIO);
         }
-        let resp: FsResponse = unsafe {
-            core::ptr::read_unaligned(resp_buf.as_ptr() as *const FsResponse)
-        };
+        let resp: FsResponse =
+            unsafe { core::ptr::read_unaligned(resp_buf.as_ptr() as *const FsResponse) };
         Ok(resp)
     } else {
         Err(EIO)
@@ -105,7 +107,10 @@ pub(crate) fn fs_service_request(fs_tid: u64, req: &FsRequest) -> Result<FsRespo
 // 3) receive raw data chunks (no per-chunk header) until total bytes received == initial len
 fn fs_service_request_stream(fs_tid: u64, req: &FsRequest) -> Result<Vec<u8>, u64> {
     let req_slice = unsafe {
-        core::slice::from_raw_parts(req as *const _ as *const u8, core::mem::size_of::<FsRequest>())
+        core::slice::from_raw_parts(
+            req as *const _ as *const u8,
+            core::mem::size_of::<FsRequest>(),
+        )
     };
     if !crate::syscall::ipc::send_from_kernel(fs_tid, req_slice) {
         return Err(EIO);
@@ -117,7 +122,8 @@ fn fs_service_request_stream(fs_tid: u64, req: &FsRequest) -> Result<Vec<u8>, u6
     if n < core::mem::size_of::<FsResponse>() {
         return Err(EIO);
     }
-    let header: FsResponse = unsafe { core::ptr::read_unaligned(header_buf.as_ptr() as *const FsResponse) };
+    let header: FsResponse =
+        unsafe { core::ptr::read_unaligned(header_buf.as_ptr() as *const FsResponse) };
     if header.status < 0 {
         return Err(header.status as u64);
     }
@@ -361,7 +367,10 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     let mut opened = None;
     for _ in 0..FS_SERVICE_RETRY_COUNT {
         match open_via_fs_service(path, flags) {
-            Ok(remote_fd) => { opened = Some(remote_fd); break; }
+            Ok(remote_fd) => {
+                opened = Some(remote_fd);
+                break;
+            }
             Err(e) => {
                 last_err = e;
                 if e == EIO {
@@ -382,7 +391,10 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
             let mut fstat_ok: Option<(u16, u64)> = None;
             for _ in 0..FS_SERVICE_RETRY_COUNT {
                 match fstat_via_fs_service(remote_fd) {
-                    Ok(v) => { fstat_ok = Some(v); break; }
+                    Ok(v) => {
+                        fstat_ok = Some(v);
+                        break;
+                    }
                     Err(e) => {
                         last_fstat_err = e;
                         if e == EIO {
@@ -399,7 +411,11 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
                 Some(v) => v,
                 None => {
                     let _ = close_via_fs_service(remote_fd);
-                    return if last_fstat_err != 0 { last_fstat_err } else { EIO };
+                    return if last_fstat_err != 0 {
+                        last_fstat_err
+                    } else {
+                        EIO
+                    };
                 }
             };
             (
@@ -420,10 +436,10 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
                     (Vec::new(), Some(path.to_string()), false, 0)
                 } else {
                     match crate::init::fs::read(path) {
-                    Some(d) => (d, None, false, 0),
-                    None => return ENOENT,
+                        Some(d) => (d, None, false, 0),
+                        None => return ENOENT,
+                    }
                 }
-            }
             } else {
                 return errno;
             }
@@ -647,13 +663,15 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
             write_stat_buf(stat_ptr, mode_for_stat(mode), size);
             SUCCESS
         }
-        Err(errno) if should_fallback_to_initfs(errno) => match crate::init::fs::file_metadata(&resolved) {
-            Some((inode_mode, size)) => {
-                write_stat_buf(stat_ptr, mode_for_stat(inode_mode), size);
-                SUCCESS
+        Err(errno) if should_fallback_to_initfs(errno) => {
+            match crate::init::fs::file_metadata(&resolved) {
+                Some((inode_mode, size)) => {
+                    write_stat_buf(stat_ptr, mode_for_stat(inode_mode), size);
+                    SUCCESS
+                }
+                None => ENOENT,
             }
-            None => ENOENT,
-        },
+        }
         Err(errno) => errno,
     }
 }
@@ -1105,7 +1123,11 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
     let full = if path.starts_with('/') {
         normalize_path(&path)
     } else {
-        normalize_path(&alloc::format!("{}/{}", dir_path.trim_end_matches('/'), path))
+        normalize_path(&alloc::format!(
+            "{}/{}",
+            dir_path.trim_end_matches('/'),
+            path
+        ))
     };
     match stat_path_via_fs_service(&full) {
         Ok((mode, size)) => {
@@ -1116,17 +1138,19 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
             write_stat_buf(stat_ptr, mode_for_stat(mode), size);
             SUCCESS
         }
-        Err(errno) if should_fallback_to_initfs(errno) => match crate::init::fs::file_metadata(&full) {
-            Some((inode_mode, size)) => {
-                const STAT_SIZE: u64 = 144;
-                if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
-                    return EFAULT;
+        Err(errno) if should_fallback_to_initfs(errno) => {
+            match crate::init::fs::file_metadata(&full) {
+                Some((inode_mode, size)) => {
+                    const STAT_SIZE: u64 = 144;
+                    if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
+                        return EFAULT;
+                    }
+                    write_stat_buf(stat_ptr, mode_for_stat(inode_mode), size);
+                    SUCCESS
                 }
-                write_stat_buf(stat_ptr, mode_for_stat(inode_mode), size);
-                SUCCESS
+                None => ENOENT,
             }
-            None => ENOENT,
-        },
+        }
         Err(errno) => errno,
     }
 }
@@ -1157,7 +1181,9 @@ pub fn faccessat(dirfd: i64, path_ptr: u64, _mode: u64, _flags: u64) -> u64 {
             t.get_raw(idx)
                 .and_then(|ptr| unsafe { (*ptr).dir_path.clone() })
         }) {
-            Some(Some(d)) => normalize_path(&alloc::format!("{}/{}", d.trim_end_matches('/'), path)),
+            Some(Some(d)) => {
+                normalize_path(&alloc::format!("{}/{}", d.trim_end_matches('/'), path))
+            }
             _ => return EBADF,
         }
     };
@@ -1215,11 +1241,10 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         let mut next = 0usize;
         let mut chunk = [0u8; FS_DATA_MAX];
         loop {
-            let (n, next_index) =
-                match readdir_chunk_via_fs_service(fd_remote, next, &mut chunk) {
-                    Ok(v) => v,
-                    Err(e) => return e,
-                };
+            let (n, next_index) = match readdir_chunk_via_fs_service(fd_remote, next, &mut chunk) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
             if n == 0 {
                 break;
             }
@@ -1249,7 +1274,11 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
             .collect();
         for name in &entries {
             // ディレクトリかファイルかを判定
-            let child_path = normalize_path(&alloc::format!("{}/{}", dir_path.trim_end_matches('/'), name));
+            let child_path = normalize_path(&alloc::format!(
+                "{}/{}",
+                dir_path.trim_end_matches('/'),
+                name
+            ));
             let dtype = if is_remote {
                 // hot path: remote readdir で各エントリの stat を行うと非常に遅くなるため
                 // ここでは一律 file として返す（多くのユーザーランド ls は d_type 不明を許容する）。

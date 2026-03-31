@@ -226,7 +226,9 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
     if idx >= MAX_THREADS {
         return false;
     }
-    let sender = crate::task::current_thread_id().map(|t| t.as_u64()).unwrap_or(0);
+    let sender = crate::task::current_thread_id()
+        .map(|t| t.as_u64())
+        .unwrap_or(0);
     MAILBOXES.lock().get_mut(idx).map_or(false, |mb| {
         if mb
             .push_message(sender, dest_thread_id, idx as u16, dest_generation, data)
@@ -244,8 +246,16 @@ pub fn send_from_kernel(dest_thread_id: u64, data: &[u8]) -> bool {
 }
 
 /// Kernel -> recipient: send a message that carries physical page frame addresses
-/// Pages are explicit physical frame addresses (one per 4KiB page). Up to 32 entries supported.
-pub fn send_pages_from_kernel(dest_thread_id: u64, map_start: u64, total: u64, pages: &[u64]) -> bool {
+/// Pages are explicit physical frame addresses (one per 4KiB page). Up to 128 entries supported.
+pub fn send_pages_from_kernel(
+    dest_thread_id: u64,
+    map_start: u64,
+    total: u64,
+    pages: &[u64],
+) -> bool {
+    // Keep original behaviour as fallback: send explicit page list when provided.
+    // This function will continue to work for up to 128 pages.
+
     if pages.len() > 128 {
         return false;
     }
@@ -257,7 +267,9 @@ pub fn send_pages_from_kernel(dest_thread_id: u64, map_start: u64, total: u64, p
     if idx >= MAX_THREADS {
         return false;
     }
-    let sender = crate::task::current_thread_id().map(|t| t.as_u64()).unwrap_or(0);
+    let sender = crate::task::current_thread_id()
+        .map(|t| t.as_u64())
+        .unwrap_or(0);
     let mut boxes = MAILBOXES.lock();
     boxes.get_mut(idx).map_or(false, |mb| {
         if let Some(slot_idx) = mb.alloc_slot() {
@@ -285,6 +297,55 @@ pub fn send_pages_from_kernel(dest_thread_id: u64, map_start: u64, total: u64, p
             for i in 0..pages.len() {
                 msg.ext_pages[i] = pages[i];
             }
+            // enqueue
+            if mb.enqueue_slot(slot_idx).is_err() {
+                mb.free_slot(slot_idx);
+                return false;
+            }
+            let waiter = mb.take_waiter();
+            if waiter != 0 {
+                crate::task::wake_thread(crate::task::ThreadId::from_u64(waiter));
+            }
+            true
+        } else {
+            false
+        }
+    })
+}
+
+// New: Kernel -> recipient: send a map header only (map_start + total) without page list
+pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u64) -> bool {
+    let (idx, dest_generation) =
+        match crate::task::thread_slot_index_and_generation_by_u64(dest_thread_id) {
+            Some(v) => v,
+            None => return false,
+        };
+    if idx >= MAX_THREADS {
+        return false;
+    }
+    let sender = crate::task::current_thread_id()
+        .map(|t| t.as_u64())
+        .unwrap_or(0);
+    let mut boxes = MAILBOXES.lock();
+    boxes.get_mut(idx).map_or(false, |mb| {
+        if let Some(slot_idx) = mb.alloc_slot() {
+            let msg = &mut mb.slots[slot_idx];
+            msg.from = sender;
+            msg.to = dest_thread_id;
+            msg.to_slot = idx as u16;
+            msg.to_generation = dest_generation;
+            // serialize map_start, total into data
+            let mut off = 0usize;
+            if 16 > MAX_MSG_SIZE {
+                mb.free_slot(slot_idx);
+                return false;
+            }
+            msg.data[off..off + 8].copy_from_slice(&map_start.to_ne_bytes());
+            off += 8;
+            msg.data[off..off + 8].copy_from_slice(&(total as u64).to_ne_bytes());
+            off += 8;
+            msg.len = off;
+            msg.ext_pages_count = 0;
             // enqueue
             if mb.enqueue_slot(slot_idx).is_err() {
                 mb.free_slot(slot_idx);
@@ -348,7 +409,13 @@ pub fn send(dest_thread_id: u64, buf_ptr: u64, len: u64) -> u64 {
 
     let mut boxes = MAILBOXES.lock();
     if boxes[idx]
-        .push_message(sender, dest_thread_id, idx as u16, dest_generation, &data[..len])
+        .push_message(
+            sender,
+            dest_thread_id,
+            idx as u16,
+            dest_generation,
+            &data[..len],
+        )
         .is_err()
     {
         return EAGAIN;

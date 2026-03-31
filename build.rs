@@ -167,6 +167,24 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
+    // Ensure build is re-run when files under shared/ change
+    let shared_dir = manifest_dir.join("shared");
+    if shared_dir.exists() {
+        fn visit_dir(dir: &std::path::Path) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_file() {
+                        println!("cargo:rerun-if-changed={}", p.display());
+                    } else if p.is_dir() {
+                        visit_dir(&p);
+                    }
+                }
+            }
+        }
+        visit_dir(&shared_dir);
+    }
+
     // カーネルビルドの再帰呼び出しの場合はプレースホルダーだけ作成して終了する
     // (initfs は埋め込まず、ブートローダーが実行時にロードして BootInfo で渡す)
     if env::var("MOCHIOS_BUILDING_KERNEL").is_ok() {
@@ -357,7 +375,10 @@ fn main() {
         }
     }
     let services_autostart_path = fs_dir.join("Config").join("services.list");
-    match fs::write(&services_autostart_path, services_autostart_entries.join("\n")) {
+    match fs::write(
+        &services_autostart_path,
+        services_autostart_entries.join("\n"),
+    ) {
         Ok(_) => println!("Generated {}", services_autostart_path.display()),
         Err(e) => println!(
             "cargo:warning=Failed to write {}: {}",

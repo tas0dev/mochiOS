@@ -357,7 +357,7 @@ impl AtaDrive {
     }
 
     /// perform a blocking coalesced read covering total_sectors starting at start_lba
-    fn perform_blocking_read_coalesced(&mut self, start_lba: u64, total_sectors: usize, buffer: &mut [u8]) -> AtaResult<()> {
+    fn perform_blocking_read_coalesced(&self, start_lba: u64, total_sectors: usize, buffer: &mut [u8]) -> AtaResult<()> {
         if total_sectors == 0 || total_sectors > 255 { return Err(AtaError::InvalidArgument); }
         let total_bytes = total_sectors.checked_mul(512).ok_or(AtaError::InvalidArgument)?;
         if buffer.len() < total_bytes { return Err(AtaError::InvalidArgument); }
