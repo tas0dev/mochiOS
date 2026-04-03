@@ -184,6 +184,16 @@ pub enum SyscallNumber {
     ExecFromBufferNamedArgsWithRequester = 544,
     /// Execute by streaming ELF image from fs.service into kernel (path_ptr, args_ptr)
     ExecFromFsStream = 545,
+    /// 物理ページ配列をターゲットプロセスのアドレス空間にマップ（Service権限専用）
+    MapPhysicalPages = 546,
+    /// 仮想アドレスから物理アドレスを取得（Service権限専用）
+    GetPhysicalAddr = 547,
+    /// 共有用物理ページを割り当て、自プロセスにマップして物理アドレスを返す（Service権限専用）
+    AllocSharedPages = 548,
+    /// 物理ページをアンマップして解放（Service権限専用）
+    UnmapPages = 549,
+    /// IPC経由で物理ページをターゲットプロセスへ送信（Service権限専用）
+    IpcSendPages = 550,
 }
 
 /// 成功

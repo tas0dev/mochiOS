@@ -100,7 +100,7 @@ pub enum SyscallNumber {
     SetConsoleCursor = 531,
     /// コンソールカーソルのピクセルY位置を取得
     GetConsoleCursor = 532,
-    /// IPC受信（ブロッキング版）
+    /// IPC受信（ブロッキング版）：メッセージが届くまでスリープして待機
     IpcRecvWait = 533,
     /// キーボード入力の監視用タップ（通常入力を消費しない）
     KeyboardReadTap = 534,
@@ -126,6 +126,16 @@ pub enum SyscallNumber {
     ExecFromBufferNamedArgsWithRequester = 544,
     /// FS 経由のストリーム exec（マップ書き込みを試行）
     ExecFromFsStream = 545,
+    /// 物理ページ配列をターゲットプロセスのアドレス空間にマップ（Service権限専用）
+    MapPhysicalPages = 546,
+    /// 仮想アドレスから物理アドレスを取得（Service権限専用）
+    GetPhysicalAddr = 547,
+    /// 共有用物理ページを割り当て、自プロセスにマップして物理アドレスを返す（Service権限専用）
+    AllocSharedPages = 548,
+    /// 物理ページをアンマップして解放（Service権限専用）
+    UnmapPages = 549,
+    /// IPC経由で物理ページをターゲットプロセスへ送信（Service権限専用）
+    IpcSendPages = 550,
 }
 
 /// 操作が許可されていない

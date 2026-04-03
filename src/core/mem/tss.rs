@@ -25,7 +25,7 @@ pub fn init() -> &'static TaskStateSegment {
 
         // ダブルフォルト用の専用スタックを設定
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5;
+            const STACK_SIZE: usize = 4096 * 16; // 64KB (増量: 20KB→64KB)
             static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
             let stack_start = VirtAddr::from_ptr(unsafe { &raw const STACK });
@@ -40,7 +40,7 @@ pub fn init() -> &'static TaskStateSegment {
 
         // ユーザーモードからカーネルモードへの遷移用のRing0スタックを設定
         tss.privilege_stack_table[0] = {
-            const RING0_STACK_SIZE: usize = 4096 * 4;
+            const RING0_STACK_SIZE: usize = 4096 * 32; // 128KB (増量: 16KB→128KB、fs.service大容量バッファ対応)
             static mut RING0_STACK: [u8; RING0_STACK_SIZE] = [0; RING0_STACK_SIZE];
 
             let stack_start = VirtAddr::from_ptr(unsafe { &raw const RING0_STACK });
@@ -74,7 +74,11 @@ pub fn set_rsp0(rsp: u64) {
         // 内部可変性を持つか、ポインタ経由で変更する
         let ptr = tss as *const TaskStateSegment as *mut TaskStateSegment;
         unsafe {
-            (*ptr).privilege_stack_table[0] = VirtAddr::new(rsp);
+            // RSP0更新中の割り込み/コンテキストスイッチを防ぐため、
+            // 割り込みを一時的に無効化してアトミックに更新
+            x86_64::instructions::interrupts::without_interrupts(|| {
+                (*ptr).privilege_stack_table[0] = VirtAddr::new(rsp);
+            });
         }
     }
 }

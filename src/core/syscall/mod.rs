@@ -10,6 +10,7 @@ pub mod mmio;
 pub mod mouse;
 pub mod pgroup;
 pub mod pipe;
+pub mod privileged;
 pub mod process;
 pub mod signal;
 pub mod syscall_entry;
@@ -273,6 +274,21 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Newfstatat as u64 => fs::newfstatat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Faccessat as u64 => fs::faccessat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Readlinkat as u64 => types::EINVAL,
+        x if x == SyscallNumber::MapPhysicalPages as u64 => {
+            privileged::map_physical_pages(arg0, arg1, arg2, arg3)
+        }
+        x if x == SyscallNumber::GetPhysicalAddr as u64 => {
+            privileged::get_physical_addr(arg0, arg1)
+        }
+        x if x == SyscallNumber::AllocSharedPages as u64 => {
+            privileged::alloc_shared_pages(arg0, arg1, arg2)
+        }
+        x if x == SyscallNumber::UnmapPages as u64 => {
+            privileged::unmap_pages(arg0, arg1, arg2)
+        }
+        x if x == SyscallNumber::IpcSendPages as u64 => {
+            privileged::ipc_send_pages(arg0, arg1, arg2, arg3)
+        }
         _ => ENOSYS,
     }
 }

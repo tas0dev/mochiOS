@@ -60,7 +60,7 @@ pub struct Thread {
 }
 
 // Simple kernel stack pool for creating kernel stacks for threads
-const KSTACK_POOL_SIZE: usize = 4096 * 64; // 256 KiB（最大約12スレッド分、フリーリストで再利用）
+const KSTACK_POOL_SIZE: usize = 4096 * 512; // 2 MiB（128KB/スレッドで約15スレッド分、フリーリストで再利用）
 const KSTACK_PAGE_BYTES: usize = 4096;
 const KSTACK_GUARD_BYTES: usize = KSTACK_PAGE_BYTES;
 
@@ -902,3 +902,4 @@ pub fn set_current_thread(id: Option<ThreadId>) {
         crate::percpu::set_current_thread_raw_id(raw);
     });
 }
+

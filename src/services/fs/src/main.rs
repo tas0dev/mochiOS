@@ -16,7 +16,7 @@ use ext2::Ext2Fs;
 use initfs::InitFs;
 
 const MAX_HANDLES: usize = 16;
-include!("../../../../shared/fs_consts.rs");
+use swiftlib::fs_consts::{FS_DATA_MAX, FS_PATH_MAX, IPC_MAX_MSG_SIZE};
 const READ_CACHE_SIZE: usize = 65536;
 const ELF_HEADER_SIZE: usize = 64;
 const ELF_PHDR_SIZE: usize = 56;

@@ -34,7 +34,10 @@ where
     crate::task::with_process_mut(pid, |p| f(p.fd_table_mut()))
 }
 
-include!("../../../shared/fs_consts.rs");
+// ファイルシステムIPC定数（swiftlib::fs_constsと同一の値を維持）
+const FS_PATH_MAX: usize = 128;
+const FS_DATA_MAX: usize = 2048;
+const IPC_MAX_MSG_SIZE: usize = 65536;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

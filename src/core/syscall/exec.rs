@@ -13,7 +13,7 @@ const EM_X86_64: u16 = 0x3E;
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 const STACK_TOP_BASE: u64 = 0x0000_7FFF_FFF0_0000;
 const STACK_ASLR_MAX_PAGES: u64 = 4096; // 16MiB
-const USER_STACK_SIZE_PAGES: usize = 8; // 32KiB stack
+const USER_STACK_SIZE_PAGES: usize = 32; // 128KiB stack (増量: fs.service大容量バッファ対応)
 const TLS_BASE_MIN: u64 = 0x3000_0000;
 const TLS_ASLR_MAX_PAGES: u64 = 0x4000; // 64MiB
 const INITIAL_TLS_SIZE: u64 = 4096;
@@ -800,7 +800,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     }
     new_pt_guard.disarm();
 
-    const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
+    const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 32; // 128KB (増量: fs.service大容量バッファ対応)
     let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
         Some(a) => a,
         None => {
@@ -1458,7 +1458,7 @@ fn exec_with_data(
         }
         new_pt_guard.disarm();
         // allocate kernel stack for the new thread
-        const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 4;
+        const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 32; // 128KB (増量: fs.service大容量バッファ対応)
         let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
             Some(a) => a,
             None => {

@@ -65,7 +65,7 @@ impl FsRequest {
 struct FsResponse {
     status: i64,
     len: u64,
-    data: [u8; fs::FS_DATA_MAX],
+    data: [u8; swiftlib::fs_consts::FS_DATA_MAX],
 }
 
 #[derive(Clone, Copy)]
@@ -199,10 +199,10 @@ fn fs_request(fs_tid: u64, req: &FsRequest) -> Result<FsResponse, ()> {
         return Err(());
     }
 
-    let mut resp_buf = [0u8; size_of::<FsResponse>()];
+    let mut resp_buf = Box::new([0u8; size_of::<FsResponse>()]);
     let start_tick = time::get_ticks();
     loop {
-        let (sender, len) = ipc::ipc_recv(&mut resp_buf);
+        let (sender, len) = ipc::ipc_recv(&mut *resp_buf);
         if sender == 0 && len == 0 {
             if time::get_ticks().saturating_sub(start_tick) > FS_REQ_TIMEOUT_MS {
                 return Err(());
@@ -256,7 +256,7 @@ fn read_file_via_fs_service(path: &str, max_size: usize) -> Option<Vec<u8>> {
 
     let mut out = Vec::new();
     while out.len() < max_size {
-        let req_len = core::cmp::min(fs::FS_DATA_MAX, max_size - out.len());
+        let req_len = core::cmp::min(swiftlib::fs_consts::FS_DATA_MAX, max_size - out.len());
         if req_len == 0 {
             break;
         }
@@ -279,7 +279,7 @@ fn read_file_via_fs_service(path: &str, max_size: usize) -> Option<Vec<u8>> {
             return None;
         }
 
-        let n = core::cmp::min(resp.len as usize, fs::FS_DATA_MAX);
+        let n = core::cmp::min(resp.len as usize, swiftlib::fs_consts::FS_DATA_MAX);
         if n == 0 {
             break;
         }
@@ -839,14 +839,14 @@ impl Terminal {
 
     /// 子プロセスのIPC出力を受け取りながら終了を待つ
     fn drain_child_output(&mut self, pid: u64) {
-        let mut buf = [0u8; IPC_MSG_MAX];
+        let mut buf = Box::new([0u8; IPC_MSG_MAX]);
         loop {
             let mut wrote = false;
-            if self.drain_pending_ipc_messages(&mut buf) {
+            if self.drain_pending_ipc_messages(&mut *buf) {
                 wrote = true;
             }
             loop {
-                let (_, len2) = ipc::ipc_recv(&mut buf);
+                let (_, len2) = ipc::ipc_recv(&mut *buf);
                 if len2 == 0 || len2 as usize > buf.len() {
                     break;
                 }
@@ -869,14 +869,14 @@ impl Terminal {
             }
 
             // メッセージが届くまでスリープして待機（ビジーウェイトしない）
-            let (_, len) = ipc::ipc_recv_wait(&mut buf);
+            let (_, len) = ipc::ipc_recv_wait(&mut *buf);
             if len > 0 && len as usize <= buf.len() {
                 if let Ok(s) = core::str::from_utf8(&buf[..len as usize]) {
                     self.write_str(s);
                 }
                 // 続きのメッセージをノンブロッキングで掃き出す
                 loop {
-                    let (_, len2) = ipc::ipc_recv(&mut buf);
+                    let (_, len2) = ipc::ipc_recv(&mut *buf);
                     if len2 == 0 || len2 as usize > buf.len() {
                         break;
                     }
@@ -900,11 +900,11 @@ impl Terminal {
         }
         // 終了後に残ったメッセージを念のため掃き出す
         let mut wrote = false;
-        if self.drain_pending_ipc_messages(&mut buf) {
+        if self.drain_pending_ipc_messages(&mut *buf) {
             wrote = true;
         }
         loop {
-            let (_, len) = ipc::ipc_recv(&mut buf);
+            let (_, len) = ipc::ipc_recv(&mut *buf);
             if len == 0 || len as usize > buf.len() {
                 break;
             }

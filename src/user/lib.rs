@@ -49,6 +49,12 @@ pub mod input;
 /// MMIO/物理メモリマップ
 pub mod mmio;
 
+/// ファイルシステムIPC定数
+pub mod fs_consts;
+
+/// 特権システムコール（Service権限専用）
+pub mod privileged;
+
 #[cfg(not(feature = "std-support"))]
 use core::panic::PanicInfo;
 #[cfg(not(feature = "std-support"))]

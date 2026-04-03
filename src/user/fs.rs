@@ -55,7 +55,7 @@ use crate::task;
 use crate::time;
 use core::mem::size_of;
 
-include!("../../shared/fs_consts.rs");
+use crate::fs_consts::{FS_DATA_MAX, FS_PATH_MAX, IPC_MAX_MSG_SIZE};
 const FS_REQ_TIMEOUT_MS: u64 = 2000;
 
 #[repr(C)]
