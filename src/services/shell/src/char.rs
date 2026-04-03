@@ -444,6 +444,8 @@ pub struct Terminal {
     ansi_csi_mode: bool,
     ansi_seq: [u8; ANSI_MAX_SEQ_LEN],
     ansi_seq_len: usize,
+    // コマンドパスキャッシュ（最大16エントリ）
+    cmd_cache: Vec<(String, String)>, // (cmd_name, full_path)
 }
 
 #[allow(unused)]
@@ -492,19 +494,13 @@ impl Terminal {
     }
 
     fn command_exists(&self, path: &str) -> bool {
-        if let Some(fs_tid) = task::find_process_by_name("fs.service") {
-            if let Ok(fd) = open_via_fs_service(fs_tid, path) {
-                close_via_fs_service(fs_tid, fd);
-                return true;
-            }
-        }
-
+        // stat syscall 未実装のため open/close で存在確認
+        // 1回のopen試行で十分（fs.service経由を優先）
         let fd = swiftlib::io::open(path, io::O_RDONLY);
         if fd >= 0 {
             swiftlib::io::close(fd as u64);
             return true;
         }
-
         false
     }
 
@@ -512,7 +508,13 @@ impl Terminal {
         matches!(cmd, "ls" | "cat")
     }
 
-    fn busybox_fallback_in_path(&self) -> Option<String> {
+    fn busybox_fallback_in_path(&mut self) -> Option<String> {
+        // busybox専用キャッシュキー
+        let cache_key = "__busybox__";
+        if let Some(cached) = self.cmd_cache.iter().find(|(c, _)| c == cache_key) {
+            return Some(cached.1.clone());
+        }
+
         let path_val = self.get_env("PATH").unwrap_or_default();
         for dir in path_val.split(':') {
             let dir = dir.trim();
@@ -521,6 +523,11 @@ impl Terminal {
             }
             let candidate = format!("{}/busybox.elf", dir);
             if self.command_exists(&candidate) {
+                // キャッシュに追加
+                if self.cmd_cache.len() >= 16 {
+                    self.cmd_cache.remove(0);
+                }
+                self.cmd_cache.push((cache_key.to_string(), candidate.clone()));
                 return Some(candidate);
             }
         }
@@ -551,6 +558,7 @@ impl Terminal {
             ansi_csi_mode: false,
             ansi_seq: [0; ANSI_MAX_SEQ_LEN],
             ansi_seq_len: 0,
+            cmd_cache: Vec::new(),
         };
         term.load_env_file();
         term
@@ -570,7 +578,12 @@ impl Terminal {
 
     /// PATH の各ディレクトリでコマンドを探す
     /// `cmd` が `.elf` で終わる場合はそのまま、そうでなければ `.elf` を付けて検索する
-    fn find_in_path(&self, cmd: &str) -> Option<String> {
+    fn find_in_path(&mut self, cmd: &str) -> Option<String> {
+        // キャッシュを確認
+        if let Some(cached) = self.cmd_cache.iter().find(|(c, _)| c == cmd) {
+            return Some(cached.1.clone());
+        }
+
         let path_val = self.get_env("PATH").unwrap_or_default();
         let filename = if cmd.ends_with(".elf") {
             cmd.to_string()
@@ -585,6 +598,11 @@ impl Terminal {
             let candidate = format!("{}/{}", dir, filename);
             // stat syscall 未実装のため open/close で存在確認
             if self.command_exists(&candidate) {
+                // キャッシュに追加（最大16エントリ）
+                if self.cmd_cache.len() >= 16 {
+                    self.cmd_cache.remove(0);
+                }
+                self.cmd_cache.push((cmd.to_string(), candidate.clone()));
                 return Some(candidate);
             }
         }

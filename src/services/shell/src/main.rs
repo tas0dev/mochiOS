@@ -43,7 +43,6 @@ fn main() {
     term.clear_screen(); // clear_screen 内で flush 済み
     term.fg = 0x00FF_FF00; // 黄色
     term.write_str("mochiOS Shell\n");
-    term.write_str("Type 'help' for commands.\n\n");
     term.fg = 0x00FF_FFFF;
     term.prompt();
     term.flush();

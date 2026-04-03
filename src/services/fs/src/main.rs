@@ -37,6 +37,8 @@ struct OpenFile {
     cache_start: u64,
     cache_len: usize,
     cache_data: [u8; READ_CACHE_SIZE],
+    dir_entries_cached: bool,        // ディレクトリエントリがキャッシュ済みか
+    dir_entry_count: usize,          // キャッシュされたエントリ数
 }
 
 impl OpenFile {
@@ -52,11 +54,59 @@ impl OpenFile {
             cache_start: 0,
             cache_len: 0,
             cache_data: [0; READ_CACHE_SIZE],
+            dir_entries_cached: false,
+            dir_entry_count: 0,
         }
     }
 }
 
 static mut HANDLES: [OpenFile; MAX_HANDLES] = [OpenFile::new(); MAX_HANDLES];
+
+/// ディレクトリエントリキャッシュ（ハンドル単位で最大16エントリまでキャッシュ）
+const MAX_DIR_CACHE_ENTRIES: usize = 512;
+struct DirEntryCache {
+    handle_id: usize,
+    inode: u64,
+    entries: [([u8; 256], usize); MAX_DIR_CACHE_ENTRIES], // (name_bytes, len)
+    count: usize,
+}
+
+impl DirEntryCache {
+    const fn new() -> Self {
+        Self {
+            handle_id: usize::MAX,
+            inode: 0,
+            entries: [([0; 256], 0); MAX_DIR_CACHE_ENTRIES],
+            count: 0,
+        }
+    }
+
+    fn cache_for_handle(&mut self, handle_id: usize, inode: u64, entries: &[common::vfs::DirEntry]) {
+        self.handle_id = handle_id;
+        self.inode = inode;
+        self.count = core::cmp::min(entries.len(), MAX_DIR_CACHE_ENTRIES);
+        for (i, entry) in entries.iter().take(self.count).enumerate() {
+            let name_bytes = entry.name.as_bytes();
+            let len = core::cmp::min(name_bytes.len(), 255);
+            self.entries[i].0[..len].copy_from_slice(&name_bytes[..len]);
+            self.entries[i].1 = len;
+        }
+    }
+
+    fn get_entry(&self, index: usize) -> Option<&[u8]> {
+        if index < self.count {
+            Some(&self.entries[index].0[..self.entries[index].1])
+        } else {
+            None
+        }
+    }
+
+    fn matches(&self, handle_id: usize, inode: u64) -> bool {
+        self.handle_id == handle_id && self.inode == inode
+    }
+}
+
+static mut DIR_CACHE: DirEntryCache = DirEntryCache::new();
 
 /// マウントされたファイルシステム（ext2 優先、InitFs フォールバック）
 static mut MOUNTED_FS: Option<Box<dyn FileSystem>> = None;
@@ -783,6 +833,13 @@ fn main() {
                             HANDLES[fd].used = false;
                             HANDLES[fd].cache_start = 0;
                             HANDLES[fd].cache_len = 0;
+                            HANDLES[fd].dir_entries_cached = false;
+                            HANDLES[fd].dir_entry_count = 0;
+                            // このハンドルのディレクトリキャッシュを無効化
+                            if DIR_CACHE.handle_id == fd {
+                                DIR_CACHE.handle_id = usize::MAX;
+                                DIR_CACHE.count = 0;
+                            }
                         }
                         resp.status = 0;
                     } else {
@@ -863,34 +920,50 @@ fn main() {
                     unsafe {
                         if let Some(ref fs) = MOUNTED_FS {
                             let inode = HANDLES[fd].handle.inode;
-                            match fs.readdir(inode) {
-                                Ok(entries) => {
-                                    let mut offset = 0usize;
-                                    let mut next_index = start;
-                                    for entry in entries.iter().skip(start) {
-                                        if entry.name == "." || entry.name == ".." {
-                                            next_index += 1;
-                                            continue;
-                                        }
-                                        let name_bytes = entry.name.as_bytes();
-                                        let need = name_bytes.len() + 1; // '\n'
-                                        if need > max_len.saturating_sub(offset) {
-                                            break;
-                                        }
-                                        resp.data[offset..offset + name_bytes.len()]
-                                            .copy_from_slice(name_bytes);
-                                        offset += name_bytes.len();
-                                        resp.data[offset] = b'\n';
-                                        offset += 1;
-                                        next_index += 1;
+                            
+                            // キャッシュがない、または異なるハンドル/inodeの場合は読み直し
+                            if !DIR_CACHE.matches(fd, inode) {
+                                match fs.readdir(inode) {
+                                    Ok(entries) => {
+                                        DIR_CACHE.cache_for_handle(fd, inode, &entries);
+                                        HANDLES[fd].dir_entries_cached = true;
+                                        HANDLES[fd].dir_entry_count = DIR_CACHE.count;
                                     }
-                                    resp.status = next_index as i64;
-                                    resp.len = offset as u64;
-                                }
-                                Err(e) => {
-                                    resp.status = vfs_error_to_errno(e);
+                                    Err(e) => {
+                                        resp.status = vfs_error_to_errno(e);
+                                        continue;
+                                    }
                                 }
                             }
+
+                            // キャッシュからエントリを返す
+                            let mut offset = 0usize;
+                            let mut next_index = start;
+                            let cached_count = HANDLES[fd].dir_entry_count;
+                            
+                            for idx in start..cached_count {
+                                if let Some(name_bytes) = DIR_CACHE.get_entry(idx) {
+                                    // "." と ".." はスキップ
+                                    if name_bytes == b"." || name_bytes == b".." {
+                                        next_index += 1;
+                                        continue;
+                                    }
+                                    let need = name_bytes.len() + 1; // '\n'
+                                    if need > max_len.saturating_sub(offset) {
+                                        break;
+                                    }
+                                    resp.data[offset..offset + name_bytes.len()]
+                                        .copy_from_slice(name_bytes);
+                                    offset += name_bytes.len();
+                                    resp.data[offset] = b'\n';
+                                    offset += 1;
+                                    next_index += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            resp.status = next_index as i64;
+                            resp.len = offset as u64;
                         } else {
                             resp.status = -5; // EIO
                         }

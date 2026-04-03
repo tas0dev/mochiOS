@@ -138,6 +138,66 @@ struct Ext2GroupDesc {
 
 /// EXT2ファイルシステム
 #[allow(dead_code)]
+/// ブロックキャッシュエントリ
+struct BlockCacheEntry {
+    block_num: u32,
+    data: Vec<u8>,
+    last_used: u64,
+}
+
+/// ブロックキャッシュ（LRU、最大64ブロック）
+struct BlockCache {
+    entries: Vec<BlockCacheEntry>,
+    max_entries: usize,
+    use_counter: u64,
+}
+
+impl BlockCache {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_entries,
+            use_counter: 0,
+        }
+    }
+
+    fn get(&mut self, block_num: u32, block_size: usize) -> Option<&[u8]> {
+        if let Some(idx) = self.entries.iter().position(|e| e.block_num == block_num) {
+            self.use_counter = self.use_counter.wrapping_add(1);
+            self.entries[idx].last_used = self.use_counter;
+            return Some(&self.entries[idx].data[..block_size]);
+        }
+        None
+    }
+
+    fn insert(&mut self, block_num: u32, data: &[u8]) {
+        // 既存エントリを更新
+        if let Some(idx) = self.entries.iter().position(|e| e.block_num == block_num) {
+            self.use_counter = self.use_counter.wrapping_add(1);
+            self.entries[idx].data.clear();
+            self.entries[idx].data.extend_from_slice(data);
+            self.entries[idx].last_used = self.use_counter;
+            return;
+        }
+
+        // キャッシュが満杯ならLRUを削除
+        if self.entries.len() >= self.max_entries {
+            if let Some((lru_idx, _)) = self.entries.iter().enumerate()
+                .min_by_key(|(_, e)| e.last_used) {
+                self.entries.swap_remove(lru_idx);
+            }
+        }
+
+        // 新規エントリを追加
+        self.use_counter = self.use_counter.wrapping_add(1);
+        self.entries.push(BlockCacheEntry {
+            block_num,
+            data: data.to_vec(),
+            last_used: self.use_counter,
+        });
+    }
+}
+
 pub struct Ext2Fs {
     device: Box<dyn BlockDevice>,
     superblock: Ext2Superblock,
@@ -146,6 +206,7 @@ pub struct Ext2Fs {
     blocks_per_group: u32,
     inode_size: usize,
     group_desc_table: Vec<Ext2GroupDesc>,
+    block_cache: BlockCache,
 }
 
 impl Ext2Fs {
@@ -225,6 +286,7 @@ impl Ext2Fs {
             blocks_per_group: superblock.s_blocks_per_group,
             inode_size,
             group_desc_table,
+            block_cache: BlockCache::new(64), // 64ブロック（64KB〜256KB）のキャッシュ
         })
     }
 
