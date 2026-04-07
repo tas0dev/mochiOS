@@ -6,7 +6,7 @@ SECTIONS
 {
     . = 0x800000;
 
-    .text : {
+    .text : ALIGN(4K) {
         *(.text._start)
         *(.text .text.*)
     }
