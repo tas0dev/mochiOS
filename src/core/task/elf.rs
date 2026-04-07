@@ -246,46 +246,53 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     let at_phnum = header.e_phnum as u64;
 
     // push auxv (key,val) ... AT_NULL
-    let mut push_u64 = |val: u64| {
-        sp = sp.saturating_sub(8);
+    let mut push_u64 = |val: u64| -> Result<()> {
+        let new_sp = sp
+            .checked_sub(8)
+            .ok_or(Kernel::Memory(Memory::InvalidAddress))?;
+        if new_sp < loaded.stack_bottom {
+            return Err(Kernel::Memory(Memory::InvalidAddress));
+        }
+        sp = new_sp;
         unsafe {
             *(sp as *mut u64) = val;
         }
+        Ok(())
     };
 
     // AT_NULL
-    push_u64(0);
-    push_u64(AT_NULL);
+    push_u64(0)?;
+    push_u64(AT_NULL)?;
 
     // AT_ENTRY
-    push_u64(loaded.entry);
-    push_u64(AT_ENTRY);
+    push_u64(loaded.entry)?;
+    push_u64(AT_ENTRY)?;
 
     // AT_PAGESZ
-    push_u64(4096);
-    push_u64(AT_PAGESZ);
+    push_u64(4096)?;
+    push_u64(AT_PAGESZ)?;
 
     // AT_PHNUM
-    push_u64(at_phnum);
-    push_u64(AT_PHNUM);
+    push_u64(at_phnum)?;
+    push_u64(AT_PHNUM)?;
 
     // AT_PHENT
-    push_u64(at_phent);
-    push_u64(AT_PHENT);
+    push_u64(at_phent)?;
+    push_u64(AT_PHENT)?;
 
     // AT_PHDR
-    push_u64(at_phdr);
-    push_u64(AT_PHDR);
+    push_u64(at_phdr)?;
+    push_u64(AT_PHDR)?;
 
     // envp NULL terminator (no env)
-    push_u64(0);
+    push_u64(0)?;
 
     // argv pointers (argv[0], NULL)
-    push_u64(0); // argv NULL
-    push_u64(argv0_addr);
+    push_u64(0)?; // argv NULL
+    push_u64(argv0_addr)?;
 
     // argc
-    push_u64(1);
+    push_u64(1)?;
 
     // final alignment: ensure %16 == 0
     sp &= !0xF;

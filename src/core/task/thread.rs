@@ -907,4 +907,3 @@ pub fn set_current_thread(id: Option<ThreadId>) {
 pub fn thread_to_process_id(thread_id: u64) -> Option<ProcessId> {
     with_thread(ThreadId::from_u64(thread_id), |t| t.process_id())
 }
-

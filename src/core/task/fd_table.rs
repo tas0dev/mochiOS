@@ -2,6 +2,8 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// stdin / stdout / stderr の予約 FD 番号
 pub const FD_BASE: usize = 3;
@@ -27,10 +29,40 @@ pub struct FileHandle {
     pub is_remote: bool,
     /// fs.service 側のファイルディスクリプタ（is_remote=true のとき有効）
     pub fd_remote: u64,
+    /// is_remote=true の場合の参照カウント（close時の二重クローズ防止）
+    pub remote_refs: Option<Arc<AtomicUsize>>,
     /// Some(id) であればパイプ fd（グローバル PIPE_TABLE のインデックス）
     pub pipe_id: Option<usize>,
     /// パイプの書き込み端の場合 true
     pub pipe_write: bool,
+}
+
+impl FileHandle {
+    #[inline]
+    pub fn clone_remote_refs(&self) -> Option<Arc<AtomicUsize>> {
+        if !self.is_remote {
+            return None;
+        }
+        self.remote_refs.as_ref().map(|refs| {
+            refs.fetch_add(1, Ordering::AcqRel);
+            refs.clone()
+        })
+    }
+}
+
+impl Drop for FileHandle {
+    fn drop(&mut self) {
+        if !self.is_remote {
+            return;
+        }
+        if let Some(refs) = self.remote_refs.as_ref() {
+            if refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+                crate::syscall::fs::close_remote_fd_from_kernel(self.fd_remote);
+            }
+        } else {
+            crate::syscall::fs::close_remote_fd_from_kernel(self.fd_remote);
+        }
+    }
 }
 
 /// プロセスごとのファイルディスクリプタテーブル
@@ -90,6 +122,16 @@ impl FdTable {
         } else {
             Some(ptr as *mut FileHandle)
         }
+    }
+
+    /// FD に対応する FileHandle の参照を返す。
+    pub fn get(&self, fd: usize) -> Option<&FileHandle> {
+        self.get_raw(fd).map(|ptr| unsafe { &*ptr })
+    }
+
+    /// FD に対応する FileHandle の可変参照を返す。
+    pub fn get_mut(&mut self, fd: usize) -> Option<&mut FileHandle> {
+        self.get_raw(fd).map(|ptr| unsafe { &mut *ptr })
     }
 
     /// FD の所有権を取り出す（close に相当）。
@@ -155,6 +197,7 @@ impl FdTable {
                 dir_path: fh.dir_path.clone(),
                 is_remote: fh.is_remote,
                 fd_remote: fh.fd_remote,
+                remote_refs: fh.clone_remote_refs(),
                 pipe_id: fh.pipe_id,
                 pipe_write: fh.pipe_write,
             });
