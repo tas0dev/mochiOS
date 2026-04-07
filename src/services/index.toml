@@ -4,7 +4,7 @@
 # [service.サービス名]
 # description = サービスの説明
 # dir = サービスのディレクトリ
-# fs_type = サービスをどのファイルシステムに配置するか（initfs または ata）
+# fs = サービスをどのファイルシステムに配置するか（initfs または ata）
 # autostart = カーネル起動時に自動起動するか（initfsに含まれている奴は勝手に起動するやつだけにしようね）
 # order = 起動順序（数値が小さいほど先に起動、core.serviceが他を起動）
 
