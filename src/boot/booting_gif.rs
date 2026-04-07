@@ -29,6 +29,7 @@ impl Default for GraphicControl {
 
 pub struct BootingGifPlayer {
     fb: *mut u32,
+    fb_len: usize,
     screen_w: usize,
     screen_h: usize,
     stride: usize,
@@ -53,10 +54,14 @@ impl BootingGifPlayer {
         if frames.is_empty() {
             return Err("no frames");
         }
+        let fb_len = screen_h
+            .checked_mul(stride)
+            .ok_or("framebuffer size overflow")?;
         let pos_x = screen_w.saturating_sub(frame_w + MARGIN_PX);
         let pos_y = screen_h.saturating_sub(frame_h + MARGIN_PX);
         Ok(Self {
             fb,
+            fb_len,
             screen_w,
             screen_h,
             stride,
@@ -104,13 +109,39 @@ impl BootingGifPlayer {
         let draw_w = min(self.frame_w, self.screen_w.saturating_sub(self.pos_x));
         let draw_h = min(self.frame_h, self.screen_h.saturating_sub(self.pos_y));
         for y in 0..draw_h {
-            let src_row_start = y * self.frame_w;
-            let dst_row_start = (self.pos_y + y) * self.stride + self.pos_x;
+            let src_row_start = match y.checked_mul(self.frame_w) {
+                Some(v) => v,
+                None => return,
+            };
+            if src_row_start >= frame.pixels.len() {
+                continue;
+            }
+            let src_available = frame.pixels.len() - src_row_start;
+            let row_draw_w = min(draw_w, src_available);
+            if row_draw_w == 0 {
+                continue;
+            }
+            let dst_row_start = match self
+                .pos_y
+                .checked_add(y)
+                .and_then(|row| row.checked_mul(self.stride))
+                .and_then(|base| base.checked_add(self.pos_x))
+            {
+                Some(v) => v,
+                None => return,
+            };
+            let dst_row_end = match dst_row_start.checked_add(row_draw_w) {
+                Some(v) => v,
+                None => return,
+            };
+            if dst_row_end > self.fb_len {
+                return;
+            }
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     frame.pixels.as_ptr().add(src_row_start),
                     self.fb.add(dst_row_start),
-                    draw_w,
+                    row_draw_w,
                 );
             }
         }
@@ -156,7 +187,10 @@ fn decode_gif(data: &[u8]) -> Result<(usize, usize, Vec<GifFrame>), &'static str
         pos += need;
     }
     let background_color = global_palette.get(bg_index).copied().unwrap_or(0);
-    let mut canvas = vec![background_color; screen_w * screen_h];
+    let pixel_count = screen_w
+        .checked_mul(screen_h)
+        .ok_or("gif canvas too large")?;
+    let mut canvas = vec![background_color; pixel_count];
 
     let mut frames = Vec::new();
     let mut control = GraphicControl::default();

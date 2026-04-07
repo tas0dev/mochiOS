@@ -208,6 +208,7 @@ unsafe fn try_load_raw(
     }
     if read_total != size {
         vga_println!("[WARN] {}: read {} / {} bytes", label, read_total, size);
+        return None;
     }
     tick_booting_gif(&mut anim);
     Some((addr, size))
@@ -453,12 +454,43 @@ unsafe fn try_load_from(
     // 各 PT_LOAD セグメントのデータをコピー
     for i in 0..hdr.e_phnum as usize {
         let phdr_offset = hdr.e_phoff as usize + i * hdr.e_phentsize as usize;
+        if phdr_offset + size_of::<Elf64Phdr>() > buf.len() {
+            vga_println!("phdr OOB: offset={:#x}", phdr_offset);
+            return None;
+        }
         let phdr = &*(buf.as_ptr().add(phdr_offset) as *const Elf64Phdr);
         if phdr.p_type != PT_LOAD || phdr.p_filesz == 0 {
             continue;
         }
+        if phdr.p_filesz > phdr.p_memsz {
+            vga_println!("segment filesz>memsz: idx={}", i);
+            return None;
+        }
+        let dst_end = match phdr.p_paddr.checked_add(phdr.p_memsz) {
+            Some(v) => v,
+            None => {
+                vga_println!("segment paddr overflow: idx={}", i);
+                return None;
+            }
+        };
+        if phdr.p_paddr < load_min || dst_end > load_max {
+            vga_println!("segment outside load range: idx={}", i);
+            return None;
+        }
+        let src_start = phdr.p_offset as usize;
+        let src_end = match src_start.checked_add(phdr.p_filesz as usize) {
+            Some(v) => v,
+            None => {
+                vga_println!("segment offset overflow: idx={}", i);
+                return None;
+            }
+        };
+        if src_end > buf.len() {
+            vga_println!("segment exceeds file: idx={} end={:#x}", i, src_end);
+            return None;
+        }
         let dst = core::slice::from_raw_parts_mut(phdr.p_paddr as *mut u8, phdr.p_filesz as usize);
-        let src = &buf[phdr.p_offset as usize..phdr.p_offset as usize + phdr.p_filesz as usize];
+        let src = &buf[src_start..src_end];
         dst.copy_from_slice(src);
     }
 
