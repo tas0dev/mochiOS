@@ -26,6 +26,10 @@ fn main() {
             }
         }
     };
+    println!(
+        "[SHELL] fb info: width={} height={} stride={} fb_ptr={:p}",
+        info.width, info.height, info.stride, fb_ptr
+    );
 
     let font = match Font::load() {
         Some(f) => f,
