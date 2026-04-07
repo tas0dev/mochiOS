@@ -193,25 +193,9 @@ fn parse_hid_mouse_report(_slot: u8, _ep: u8, report: &[u8], state: &mut HidPars
     true
 }
 
-pub fn parse_hid_report(
-    slot: u8,
-    ep: u8,
-    report: &[u8],
-    state: &mut HidParserState,
-    interface_protocol: u8,
-) {
-    match interface_protocol {
-        1 => {
-            let _ = parse_hid_keyboard_report(slot, ep, report, state);
-        }
-        2 => {
-            let _ = parse_hid_mouse_report(slot, ep, report, state);
-        }
-        _ => {
-            if parse_hid_keyboard_report(slot, ep, report, state) {
-                return;
-            }
-            let _ = parse_hid_mouse_report(slot, ep, report, state);
-        }
+pub fn parse_hid_report(slot: u8, ep: u8, report: &[u8], state: &mut HidParserState) {
+    if parse_hid_keyboard_report(slot, ep, report, state) {
+        return;
     }
+    let _ = parse_hid_mouse_report(slot, ep, report, state);
 }
