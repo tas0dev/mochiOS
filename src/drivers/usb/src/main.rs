@@ -7,7 +7,7 @@ use swiftlib::{mmio, port, time};
 mod define;
 mod hid;
 use define::*;
-use hid::{parse_hid_report, HidParserState};
+use hid::{parse_hid_report, HidParserState, HidReportKind};
 
 const CC_SUCCESS: u8 = 1;
 const CC_STALL_ERROR: u8 = 6;
@@ -521,6 +521,7 @@ struct HidEndpointConfig {
     ep_type: u8,
     max_packet: u16,
     interval: u8,
+    kind: HidReportKind,
 }
 
 struct HidEndpointState {
@@ -1087,6 +1088,7 @@ fn submit_set_configuration(runtime: &mut XhciRuntime, slot_id: u8, config_value
 fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
     let mut idx = 0usize;
     let mut in_hid_interface = false;
+    let mut report_kind = HidReportKind::Unknown;
 
     while idx + 2 <= config.len() {
         let len = config[idx] as usize;
@@ -1099,9 +1101,20 @@ fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
             0x04 => {
                 if len >= 9 {
                     let class = config[idx + 5];
+                    let protocol = config[idx + 7];
                     in_hid_interface = class == 0x03;
+                    report_kind = if in_hid_interface {
+                        match protocol {
+                            1 => HidReportKind::Keyboard,
+                            2 => HidReportKind::Mouse,
+                            _ => HidReportKind::Unknown,
+                        }
+                    } else {
+                        HidReportKind::Unknown
+                    };
                 } else {
                     in_hid_interface = false;
+                    report_kind = HidReportKind::Unknown;
                 }
             }
             0x05 if in_hid_interface && len >= 7 => {
@@ -1124,6 +1137,7 @@ fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
                     ep_type,
                     max_packet,
                     interval,
+                    kind: report_kind,
                 });
             }
             _ => {}
@@ -1412,7 +1426,13 @@ fn handle_transfer_event(
                     if let Some(hid) = runtime.devices[dev_idx].hid_ep.as_ref() {
                         let report = hid.report_buf.read_bytes(0, hid.report_len);
                         if !report.is_empty() {
-                            parse_hid_report(slot_id, dci, &report, &mut runtime.hid);
+                            parse_hid_report(
+                                slot_id,
+                                dci,
+                                &report,
+                                hid.config.kind,
+                                &mut runtime.hid,
+                            );
                         }
                     }
                 }

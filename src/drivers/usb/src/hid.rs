@@ -2,6 +2,19 @@ use swiftlib::input;
 
 use crate::define::SC_RELEASE;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HidReportKind {
+    Keyboard,
+    Mouse,
+    Unknown,
+}
+
+impl Default for HidReportKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 #[derive(Default)]
 pub struct HidParserState {
     prev_keys: [u8; 6],
@@ -193,9 +206,25 @@ fn parse_hid_mouse_report(_slot: u8, _ep: u8, report: &[u8], state: &mut HidPars
     true
 }
 
-pub fn parse_hid_report(slot: u8, ep: u8, report: &[u8], state: &mut HidParserState) {
-    if parse_hid_keyboard_report(slot, ep, report, state) {
-        return;
+pub fn parse_hid_report(
+    slot: u8,
+    ep: u8,
+    report: &[u8],
+    kind: HidReportKind,
+    state: &mut HidParserState,
+) {
+    match kind {
+        HidReportKind::Keyboard => {
+            let _ = parse_hid_keyboard_report(slot, ep, report, state);
+        }
+        HidReportKind::Mouse => {
+            let _ = parse_hid_mouse_report(slot, ep, report, state);
+        }
+        HidReportKind::Unknown => {
+            if parse_hid_keyboard_report(slot, ep, report, state) {
+                return;
+            }
+            let _ = parse_hid_mouse_report(slot, ep, report, state);
+        }
     }
-    let _ = parse_hid_mouse_report(slot, ep, report, state);
 }
