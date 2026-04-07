@@ -11,6 +11,7 @@ pub static MOUSE_PACKET_BUF: Fifo<u32, 256> = Fifo::new();
 
 /// read で待機しているスレッド（0 = 待機なし）
 static MOUSE_WAITER: AtomicU64 = AtomicU64::new(0);
+static MOUSE_PACKET_DROPS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 struct PacketAssembler {
@@ -178,12 +179,23 @@ pub fn push_byte(byte: u8) {
     }
 
     let packet = u32::from(b0) | (u32::from(b1) << 8) | (u32::from(b2) << 16);
-    let _ = MOUSE_PACKET_BUF.push(packet);
+    push_packet(packet);
+}
+
+/// 完成済みパケットを直接キューへ積む（ユーザー空間注入用）
+pub fn push_packet(packet: u32) {
+    if MOUSE_PACKET_BUF.push(packet).is_err() {
+        MOUSE_PACKET_DROPS.fetch_add(1, Ordering::Relaxed);
+    }
 
     let waiter = MOUSE_WAITER.swap(0, Ordering::AcqRel);
     if waiter != 0 {
         crate::task::wake_thread(crate::task::ThreadId::from_u64(waiter));
     }
+}
+
+pub fn packet_drop_count() -> u64 {
+    MOUSE_PACKET_DROPS.load(Ordering::Relaxed)
 }
 
 /// 完成済みパケットを 1 つ取り出す
@@ -192,8 +204,10 @@ pub fn pop_packet() -> Option<u32> {
 }
 
 /// ブロッキング read 用に待機スレッドを登録する
-pub fn register_waiter(tid: u64) {
-    MOUSE_WAITER.store(tid, Ordering::Release);
+pub fn register_waiter(tid: u64) -> bool {
+    MOUSE_WAITER
+        .compare_exchange(0, tid, Ordering::Release, Ordering::Acquire)
+        .is_ok()
 }
 
 /// 待機登録をキャンセルする
