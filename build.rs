@@ -378,7 +378,7 @@ fn main() {
         }
     }
 
-    // fs / ramfs の標準ディレクトリレイアウトを作成
+    // fs と ramfs の標準ディレクトリレイアウトを作成
     let resources_src = manifest_dir.join("src/resources");
     setup_fs_layout(&fs_dir, &resources_src)
         .unwrap_or_else(|e| println!("cargo:warning=setup_fs_layout failed: {}", e));

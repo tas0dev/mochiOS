@@ -15,7 +15,7 @@ struct ServiceDef {
 const CRITICAL_SERVICES: &[ServiceDef] = &[];
 
 const BACKGROUND_SERVICES: &[ServiceDef] = &[
-    ServiceDef { name: "driver.service", path: "driver.service" },
+    ServiceDef { name: "driver.service", path: "/Services/driver.service" },
 ];
 
 #[cfg(feature = "run_tests")]
@@ -98,8 +98,13 @@ fn wait_for_ready(expected_pids: &[u64]) -> bool {
 }
 
 fn exec_file_via_fs_service(path: &str) -> Result<u64, i64> {
-    let fallback = path.rsplit('/').next().unwrap_or(path);
-    process::exec(fallback).map_err(|_| -2)
+    match process::exec(path) {
+        Ok(pid) => Ok(pid),
+        Err(_) => {
+            let fallback = path.rsplit('/').next().unwrap_or(path);
+            process::exec(fallback).map_err(|_| -2)
+        }
+    }
 }
 
 fn service_name_from_path(path: &str) -> &str {
