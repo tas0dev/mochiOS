@@ -73,26 +73,8 @@ static CACHED_FS_SERVICE_TID: core::sync::atomic::AtomicU64 = core::sync::atomic
 
 #[inline]
 pub(crate) fn fs_service_tid() -> Option<u64> {
-    let cached = CACHED_FS_SERVICE_TID.load(core::sync::atomic::Ordering::Relaxed);
-    if cached != 0 {
-        return Some(cached);
-    }
-    let tid = crate::task::find_process_id_by_name("fs.service").and_then(|pid| {
-        let mut tid = None;
-        crate::task::for_each_thread(|thread| {
-            if tid.is_none()
-                && thread.process_id() == pid
-                && thread.state() != crate::task::ThreadState::Terminated
-            {
-                tid = Some(thread.id().as_u64());
-            }
-        });
-        tid
-    });
-    if let Some(t) = tid {
-        CACHED_FS_SERVICE_TID.store(t, core::sync::atomic::Ordering::Relaxed);
-    }
-    tid
+    let _ = &CACHED_FS_SERVICE_TID;
+    None
 }
 
 fn recv_from_fs_with_timeout(fs_tid: u64, buf: &mut [u8]) -> Result<usize, u64> {
@@ -135,7 +117,7 @@ pub(crate) fn fs_service_request(fs_tid: u64, req: &FsRequest) -> Result<FsRespo
     }
 }
 
-// Internal: send request then receive a streamed image from fs.service. Protocol:
+// Internal: send request then receive a streamed image from stream backend. Protocol:
 // 1) send FsRequest with OP_EXEC_STREAM
 // 2) receive initial FsResponse (status,len) where len == total image size
 // 3) receive raw data chunks (no per-chunk header) until total bytes received == initial len
@@ -352,7 +334,7 @@ fn mode_for_stat(mode: u16) -> u32 {
 
 #[inline]
 fn should_fallback_to_initfs(errno: u64) -> bool {
-    // Only fallback to initfs if fs.service is missing. Prefer ATA rootfs when fs.service exists.
+    // Prefer ATA rootfs and fallback to initfs only when rootfs path is unavailable.
     errno == ESRCH
 }
 

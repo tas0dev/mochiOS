@@ -13,7 +13,7 @@ const EM_X86_64: u16 = 0x3E;
 static EXEC_ASLR_COUNTER: AtomicU64 = AtomicU64::new(0);
 const STACK_TOP_BASE: u64 = 0x0000_7FFF_FFF0_0000;
 const STACK_ASLR_MAX_PAGES: u64 = 4096; // 16MiB
-const USER_STACK_SIZE_PAGES: usize = 32; // 128KiB stack (増量: fs.service大容量バッファ対応)
+const USER_STACK_SIZE_PAGES: usize = 32; // 128KiB stack
 const TLS_BASE_MIN: u64 = 0x3000_0000;
 const TLS_ASLR_MAX_PAGES: u64 = 0x4000; // 64MiB
 const INITIAL_TLS_SIZE: u64 = 4096;
@@ -101,15 +101,6 @@ fn caller_can_launch_service() -> bool {
 
     if crate::task::with_process(caller_pid, |p| {
         p.privilege() == crate::task::PrivilegeLevel::Core
-    })
-    .unwrap_or(false)
-    {
-        return true;
-    }
-
-    // fs.service からの実行要求は、core.service から委譲された起動経路として許可する。
-    if crate::task::with_process(caller_pid, |p| {
-        p.privilege() == crate::task::PrivilegeLevel::Service && p.name() == "fs.service"
     })
     .unwrap_or(false)
     {
@@ -216,7 +207,7 @@ fn exec_internal(path: &str, name_override: Option<&str>, args: &[&str]) -> u64 
     }
 }
 
-/// Exec by streaming image via fs.service with zero-copy frame transfer when possible.
+/// Exec by streaming image with zero-copy frame transfer when possible.
 pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     use crate::mem::frame;
     use crate::mem::paging;
@@ -237,7 +228,13 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     };
     let extra_args: Vec<&str> = extra_args_owned.iter().map(|s| s.as_str()).collect();
 
-    // fs.service が存在しない構成では、カーネル内FSモジュール経由で直接実行する。
+    let data = match crate::kmod::fs::read_all(&path) {
+        Some(d) => d,
+        None => return crate::syscall::types::ENOENT,
+    };
+    return exec_with_data(&data, &path, &path, &extra_args, None);
+
+    // 互換経路（現在の構成では未使用）
     let fs_tid = match crate::syscall::fs::fs_service_tid() {
         Some(t) => t,
         None => {
@@ -297,8 +294,8 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         }
     }
 
-    // Phase 3: map frames into fs.service address space
-    let fs_pid = match crate::task::find_process_id_by_name("fs.service") {
+    // Phase 3: map frames into legacy service address space
+    let fs_pid = match crate::task::find_process_id_by_name("fs_legacy.service") {
         Some(p) => p,
         None => return crate::syscall::types::ESRCH,
     };
@@ -369,7 +366,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         }
     };
 
-    // Phase 4: notify fs.service of mapping
+    // Phase 4: notify legacy stream backend of mapping
     // For large transfers, prefer sending only a map header so the page list is not sent over IPC.
     if !crate::syscall::ipc::send_map_header_from_kernel(fs_tid, map_start, total as u64) {
         if let Some(fs_table) = crate::task::with_process(fs_pid, |p| p.page_table()).flatten() {
@@ -393,7 +390,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
         return crate::syscall::types::EIO;
     }
 
-    // Phase 5: wait for fs.service ack
+    // Phase 5: wait for legacy stream backend ack
     // Note: send_map_header_from_kernel sends only map_start+total; fs should write into mapped range and reply.
     let mut ack = [0u8; 8];
     let ack_wait_result = {
@@ -860,7 +857,7 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
     }
     new_pt_guard.disarm();
 
-    const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 32; // 128KB (増量: fs.service大容量バッファ対応)
+    const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 32; // 128KB
     let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
         Some(a) => a,
         None => {
@@ -1033,14 +1030,7 @@ fn build_initial_user_stack(
 
 /// メモリ上の ELF バッファからプロセスを生成する（内部共通実装）
 fn delegated_parent_pid() -> Option<crate::task::ProcessId> {
-    let caller_tid = crate::task::current_thread_id()?;
-    let caller_pid = crate::task::with_thread(caller_tid, |t| t.process_id())?;
-    let is_fs_service =
-        crate::task::with_process(caller_pid, |p| p.name() == "fs.service").unwrap_or(false);
-    if !is_fs_service {
-        return None;
-    }
-    crate::task::with_process(caller_pid, |p| p.parent_id()).flatten()
+    None
 }
 
 fn exec_with_data(
@@ -1527,7 +1517,7 @@ fn exec_with_data(
         }
         new_pt_guard.disarm();
         // allocate kernel stack for the new thread
-        const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 32; // 128KB (増量: fs.service大容量バッファ対応)
+        const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 32; // 128KB
         let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
             Some(a) => a,
             None => {
@@ -2074,18 +2064,13 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
         };
         match crate::task::with_thread(requester, |t| t.process_id()) {
             Some(pid) => {
-                let (caller_is_core, caller_is_fs_service) =
+                let caller_is_core =
                     crate::task::with_process(caller_pid, |p| {
-                        (
-                            p.privilege() == crate::task::PrivilegeLevel::Core,
-                            p.name() == "fs.service",
-                        )
+                        p.privilege() == crate::task::PrivilegeLevel::Core
                     })
-                    .unwrap_or((false, false));
+                    .unwrap_or(false);
 
-                // fs.service is trusted to exec on behalf of any requester that
-                // routed an OP_EXEC request through it.
-                if pid != caller_pid && !caller_is_core && !caller_is_fs_service {
+                if pid != caller_pid && !caller_is_core {
                     return EPERM;
                 }
                 Some(pid)

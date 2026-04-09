@@ -182,7 +182,7 @@ pub enum SyscallNumber {
     ExecFromBufferNamedArgs = 543,
     /// メモリ上の ELF バッファと実行パス名＋引数＋要求元スレッドIDから新プロセスを起動
     ExecFromBufferNamedArgsWithRequester = 544,
-    /// Execute by streaming ELF image from fs.service into kernel (path_ptr, args_ptr)
+    /// Execute by streaming ELF image into kernel (path_ptr, args_ptr)
     ExecFromFsStream = 545,
     /// 物理ページ配列をターゲットプロセスのアドレス空間にマップ（Service権限専用）
     MapPhysicalPages = 546,

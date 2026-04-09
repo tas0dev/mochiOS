@@ -25,9 +25,9 @@ pub struct FileHandle {
     pub pos: usize,
     /// Some(path) であればディレクトリ fd
     pub dir_path: Option<String>,
-    /// true の場合、データは fs.service で管理されるリモート FD（fd_remote 値を参照）
+    /// true の場合、データはリモート FD バックエンドで管理される（fd_remote 値を参照）
     pub is_remote: bool,
-    /// fs.service 側のファイルディスクリプタ（is_remote=true のとき有効）
+    /// リモートバックエンド側のファイルディスクリプタ（is_remote=true のとき有効）
     pub fd_remote: u64,
     /// is_remote=true の場合の参照カウント（close時の二重クローズ防止）
     pub remote_refs: Option<Arc<AtomicUsize>>,

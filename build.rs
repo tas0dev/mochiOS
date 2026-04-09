@@ -378,10 +378,12 @@ fn main() {
         }
     }
 
-    // fsの標準ディレクトリレイアウトを作成
+    // fs / ramfs の標準ディレクトリレイアウトを作成
     let resources_src = manifest_dir.join("src/resources");
     setup_fs_layout(&fs_dir, &resources_src)
         .unwrap_or_else(|e| println!("cargo:warning=setup_fs_layout failed: {}", e));
+    setup_fs_layout(&ramfs_dir, &resources_src)
+        .unwrap_or_else(|e| println!("cargo:warning=setup_ramfs_layout failed: {}", e));
 
     // newlibのインストールディレクトリを取得
     let target = env::var("TARGET").unwrap_or("x86_64-unknown-uefi".to_string());
@@ -489,12 +491,7 @@ fn main() {
     let index_path = manifest_dir.join("src/services/index.toml");
     println!("cargo:rerun-if-changed={}", index_path.display());
 
-    let mut services = parse_service_index(&index_path).expect("Failed to parse index.toml");
-    let before = services.len();
-    services.retain(|s| s.name != "fs" && s.name != "disk");
-    if services.len() != before {
-        println!("cargo:warning=fs.service / disk.service are replaced by kernel modules (.cext)");
-    }
+    let services = parse_service_index(&index_path).expect("Failed to parse index.toml");
 
     prune_stale_service_artifacts(&services, &ramfs_dir, &fs_dir)
         .expect("Failed to prune stale service artifacts");

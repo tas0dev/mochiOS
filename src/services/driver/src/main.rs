@@ -1,50 +1,32 @@
 use std::vec::Vec;
 
+use swiftlib::process;
 use swiftlib::time;
 use swiftlib::task;
-use swiftlib::fs;
 use swiftlib::ipc;
+use swiftlib::io;
 
 const OP_NOTIFY_READY: u64 = 0xFF;
-const DRIVER_CONFIG_PATH: &str = "Config/drivers.list";
-const DEFAULT_DRIVERS: &[&str] = &["Binaries/drivers/usb.elf"];
+const DRIVER_CONFIG_PATH: &str = "/Config/drivers.list";
+const DEFAULT_DRIVERS: &[&str] = &["/Binaries/drivers/usb.elf"];
 
-fn load_driver_list(_fs_tid: u64) -> Vec<String> {
+fn load_driver_list() -> Vec<String> {
     let mut drivers = Vec::new();
 
-    match swiftlib::fs::read_file_via_fs(DRIVER_CONFIG_PATH, 4096) {
-        Ok(Some(bytes)) => {
-            match core::str::from_utf8(&bytes) {
-                Ok(text) => {
-                    for line in text.lines() {
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-                        drivers.push(line.to_string());
-                    }
+    match std::fs::read_to_string(DRIVER_CONFIG_PATH) {
+        Ok(text) => {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
                 }
-                Err(e) => {
-                    println!(
-                        "[DRIVER] Invalid UTF-8 in {} (len={}): {}. Using defaults.",
-                        DRIVER_CONFIG_PATH,
-                        bytes.len(),
-                        e
-                    );
-                }
+                drivers.push(line.to_string());
             }
         }
-        Ok(None) => {
+        Err(_) => {
             println!(
-                "[DRIVER] Failed to open {} via fs.service (using defaults)",
+                "[DRIVER] Failed to open {} (using defaults)",
                 DRIVER_CONFIG_PATH
-            );
-        }
-        Err(errno) => {
-            println!(
-                "[DRIVER] Failed to read {} via fs.service: errno={} (using defaults)",
-                DRIVER_CONFIG_PATH,
-                errno
             );
         }
     }
@@ -58,12 +40,17 @@ fn load_driver_list(_fs_tid: u64) -> Vec<String> {
     drivers
 }
 
-fn start_driver(fs_tid: u64, path: &str) {
+fn start_driver(path: &str) {
+    let probe_fd = io::open(path, io::O_RDONLY);
+    if probe_fd < 0 {
+        println!("[DRIVER] Skipping missing driver binary {}", path);
+        return;
+    }
+    let _ = io::close(probe_fd as u64);
     println!("[DRIVER] Starting {}", path);
-    let _ = fs_tid;
-    match fs::exec_via_fs(path) {
+    match process::exec(path) {
         Ok(pid) => println!("[DRIVER] Started {} (PID={})", path, pid),
-        Err(errno) => println!("[DRIVER] Failed to start {} (errno={})", path, errno),
+        Err(_) => println!("[DRIVER] Failed to start {}", path),
     }
 }
 
@@ -87,34 +74,9 @@ fn notify_ready_to_core() {
 fn main() {
     println!("[DRIVER] Driver service started");
 
-    const MAX_ATTEMPTS: usize = 30;
-    const RETRY_MS: u64 = 500;
-    let mut fs_tid = None;
-    for attempt in 1..=MAX_ATTEMPTS {
-        fs_tid = task::find_process_by_name("fs.service");
-        if fs_tid.is_some() {
-            break;
-        }
-        println!(
-            "[DRIVER] fs.service not found (attempt {}/{}), retrying in {}ms",
-            attempt, MAX_ATTEMPTS, RETRY_MS
-        );
-        time::sleep_ms(RETRY_MS);
-    }
-    let fs_tid = match fs_tid {
-        Some(pid) => pid,
-        None => {
-            println!(
-                "[DRIVER] ERROR: fs.service not found after {} attempts, exiting",
-                MAX_ATTEMPTS
-            );
-            std::process::exit(1);
-        }
-    };
-
-    let drivers = load_driver_list(fs_tid);
+    let drivers = load_driver_list();
     for path in &drivers {
-        start_driver(fs_tid, path);
+        start_driver(path);
     }
 
     notify_ready_to_core();

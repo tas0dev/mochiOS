@@ -15,30 +15,16 @@ fs = "initfs"
 autostart = false
 order = 0
 
-[core.service.disk]
-description = "Disk I/O driver - ATA/IDE support"
-dir = "disk"
-fs = "initfs"
-autostart = false
-order = 5
-
-[core.service.fs]
-description = "Filesystem manager - handles VFS, initfs, ext2"
-dir = "fs"
-fs = "initfs"
-autostart = false
-order = 10
-
 [core.service.driver]
 description = "Driver manager - launches hardware drivers"
 dir = "driver"
-fs = "ata"
+fs = "initfs"
 autostart = true
-order = 12
+order = 5
 
 [core.service.shell]
 description = "Draw video output and shell interface"
 dir = "shell"
-fs = "ata"
+fs = "initfs"
 autostart = true
-order = 15
+order = 10

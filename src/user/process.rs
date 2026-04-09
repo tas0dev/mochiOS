@@ -199,7 +199,7 @@ pub fn exec_from_buffer_named_with_args_and_requester(
     }
 }
 
-/// Request kernel to exec via fs.service streaming path (mapped-write zero-copy preferred)
+/// Request kernel to exec via streamed image path (mapped-write zero-copy preferred)
 pub fn exec_via_fs_stream(path: &str, args: &[&str]) -> Result<u64, i64> {
     use super::sys::syscall2;
 

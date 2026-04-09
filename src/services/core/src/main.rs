@@ -12,10 +12,7 @@ struct ServiceDef {
     path: &'static str,
 }
 
-const CRITICAL_SERVICES: &[ServiceDef] = &[
-    ServiceDef { name: "disk.service",   path: "disk.service"   },
-    ServiceDef { name: "fs.service",     path: "fs.service"     },
-];
+const CRITICAL_SERVICES: &[ServiceDef] = &[];
 
 const BACKGROUND_SERVICES: &[ServiceDef] = &[
     ServiceDef { name: "driver.service", path: "driver.service" },
@@ -42,11 +39,11 @@ fn start_background_service(service: &ServiceDef) -> Option<u64> {
     println!("[CORE] Starting background service: {}", service.name);
     match exec_file_via_fs_service(service.path) {
         Ok(pid) => {
-            println!("[CORE] {} started via fs.service (PID={})", service.name, pid);
+            println!("[CORE] {} started (PID={})", service.name, pid);
             Some(pid)
         }
         Err(errno) => {
-            println!("[CORE] exec via fs.service failed for {}: errno={}, falling back", service.name, errno);
+            println!("[CORE] exec failed for {}: errno={}, falling back", service.name, errno);
             start_service(service)
         }
     }
@@ -101,7 +98,8 @@ fn wait_for_ready(expected_pids: &[u64]) -> bool {
 }
 
 fn exec_file_via_fs_service(path: &str) -> Result<u64, i64> {
-    swiftlib::fs::exec_via_fs(path)
+    let fallback = path.rsplit('/').next().unwrap_or(path);
+    process::exec(fallback).map_err(|_| -2)
 }
 
 fn service_name_from_path(path: &str) -> &str {
@@ -112,7 +110,10 @@ fn is_allowed_service_path(path: &str) -> bool {
     if path.is_empty() || path.contains("..") {
         return false;
     }
-    path.starts_with("Services/") || path.starts_with("Binaries/")
+    path.starts_with("/Services/")
+        || path.starts_with("/Binaries/")
+        || path.starts_with("Services/")
+        || path.starts_with("Binaries/")
 }
 
 fn service_already_running(path: &str) -> bool {
@@ -125,15 +126,11 @@ fn start_shell_service() {
         return;
     }
 
-    // rootfs は fs.service がマウントするため、fs.service に実行を依頼する
-    println!("[CORE] Loading shell.service via fs.service...");
-    match exec_file_via_fs_service("Services/shell.service") {
+    println!("[CORE] Loading shell.service...");
+    match exec_file_via_fs_service("/Services/shell.service") {
         Ok(pid) => println!("[CORE] shell.service started (PID={})", pid),
         Err(errno) => {
-            println!(
-                "[CORE] Failed to exec shell.service via fs.service: errno={}",
-                errno
-            );
+            println!("[CORE] Failed to exec shell.service: errno={}", errno);
             println!("[CORE] Fallback: launching shell.service from initfs...");
             match process::exec("shell.service") {
                 Ok(pid) => println!("[CORE] shell.service started (PID={})", pid),
@@ -144,22 +141,19 @@ fn start_shell_service() {
 }
 
 fn fs_open_read_lines(path: &str) -> Result<Vec<String>, i64> {
-    match swiftlib::fs::read_file_via_fs(path, 4096) {
-        Ok(Some(bytes)) => {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
             let mut lines = Vec::new();
-            if let Ok(text) = core::str::from_utf8(&bytes) {
-                for line in text.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    lines.push(line.to_string());
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
                 }
+                lines.push(line.to_string());
             }
             Ok(lines)
         }
-        Ok(None) => Err(-5),
-        Err(errno) => Err(errno),
+        Err(_) => Err(-2),
     }
 }
 
@@ -185,8 +179,8 @@ fn main() {
 
     start_shell_service();
 
-    // Try to read fs/Config/services.list via fs.service and start listed services from ATA rootfs.
-    match fs_open_read_lines("Config/services.list") {
+    // Try to read /Config/services.list and start listed services from rootfs.
+    match fs_open_read_lines("/Config/services.list") {
         Ok(lines) => {
             println!("[CORE] Found services.list with {} entries", lines.len());
             for p in lines {
@@ -205,12 +199,12 @@ fn main() {
                 println!("[CORE] Requesting exec for {}", p);
                 match exec_file_via_fs_service(&p) {
                     Ok(pid) => println!("[CORE] {} started (PID={})", p, pid),
-                    Err(errno) => println!("[CORE] Failed to exec {} via fs.service: errno={}", p, errno),
+                    Err(errno) => println!("[CORE] Failed to exec {}: errno={}", p, errno),
                 }
             }
         }
         Err(errno) => {
-            println!("[CORE] No services.list via fs.service (errno={}), falling back to background list", errno);
+            println!("[CORE] No services.list (errno={}), falling back to background list", errno);
             for service in BACKGROUND_SERVICES {
                 let _ = start_background_service(service);
             }

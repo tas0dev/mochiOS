@@ -1,5 +1,4 @@
-use core::mem::size_of;
-use swiftlib::{fs, io, ipc, task, time, vga};
+use swiftlib::{fs, io, ipc, process, task, vga};
 
 // 色の編集がだるっちいったらありゃしないのでgeminiに作ってもらったエディタを使ってください。
 // https://gemini.google.com/share/02481dc7584f
@@ -169,8 +168,7 @@ fn read_file(path: &str, max_size: usize) -> Option<Vec<u8>> {
 }
 
 fn read_file_from_fs(path: &str, max_size: usize) -> Option<Vec<u8>> {
-    // Prefer ATA rootfs via fs.service; fall back to local initfs via syscall
-    read_file_via_fs_service(path, max_size).or_else(|| read_file(path, max_size))
+    read_file(path, max_size)
 }
 
 fn encode_exec_path_and_args(path: &str, args: &[&str]) -> Option<[u8; FS_PATH_MAX]> {
@@ -198,187 +196,63 @@ fn encode_exec_path_and_args(path: &str, args: &[&str]) -> Option<[u8; FS_PATH_M
     Some(out)
 }
 
-fn fs_request(fs_tid: u64, req: &FsRequest) -> Result<FsResponse, ()> {
-    let req_slice = unsafe {
-        core::slice::from_raw_parts(req as *const _ as *const u8, size_of::<FsRequest>())
-    };
-    if ipc::ipc_send(fs_tid, req_slice) != 0 {
-        return Err(());
-    }
-
-    let mut resp_buf = Box::new([0u8; IPC_MSG_MAX]);
-    let start_tick = time::get_ticks();
-    loop {
-        let (sender, len) = ipc::ipc_recv(&mut *resp_buf);
-        if sender == 0 && len == 0 {
-            if time::get_ticks().saturating_sub(start_tick) > FS_REQ_TIMEOUT_MS {
-                return Err(());
-            }
-            time::sleep_ms(0); // yield のみ（1ms スリープ不要）
-            continue;
-        }
-        if sender != fs_tid || (len as usize) < size_of::<FsResponse>() {
-            let msg_len = core::cmp::min(len as usize, resp_buf.len());
-            let _ = enqueue_pending_message(sender, &resp_buf[..msg_len], msg_len);
-            time::sleep_ms(0);
-            continue;
-        }
-        let resp: FsResponse = unsafe {
-            core::ptr::read_unaligned(resp_buf.as_ptr() as *const FsResponse)
-        };
-        return Ok(resp);
-    }
-}
-
-fn open_via_fs_service(fs_tid: u64, path: &str) -> Result<u64, ()> {
-    let path_field = encode_exec_path_and_args(path, &[]).ok_or(())?;
-    let req = FsRequest {
-        op: FsRequest::OP_OPEN,
-        arg1: 0,
-        arg2: 0,
-        path: path_field,
-    };
-    let resp = fs_request(fs_tid, &req)?;
-    if resp.status < 0 {
-        return Err(());
-    }
-    Ok(resp.status as u64)
-}
-
-fn close_via_fs_service(fs_tid: u64, fd: u64) {
-    let req = FsRequest {
-        op: FsRequest::OP_CLOSE,
-        arg1: fd,
-        arg2: 0,
-        path: [0; FS_PATH_MAX],
-    };
-    let _ = fs_request(fs_tid, &req);
-}
-
-fn read_file_via_fs_service(path: &str, max_size: usize) -> Option<Vec<u8>> {
-    let fs_tid = task::find_process_by_name("fs.service")?;
-    let fd = match open_via_fs_service(fs_tid, path) {
-        Ok(fd) => fd,
-        Err(()) => return None,
-    };
-
-    let mut out = Vec::new();
-    while out.len() < max_size {
-        let req_len = core::cmp::min(swiftlib::fs_consts::FS_DATA_MAX, max_size - out.len());
-        if req_len == 0 {
-            break;
-        }
-
-        let req = FsRequest {
-            op: FsRequest::OP_READ,
-            arg1: fd,
-            arg2: req_len as u64,
-            path: [0; FS_PATH_MAX],
-        };
-        let resp = match fs_request(fs_tid, &req) {
-            Ok(r) => r,
-            Err(()) => {
-                close_via_fs_service(fs_tid, fd);
-                return None;
-            }
-        };
-        if resp.status < 0 {
-            close_via_fs_service(fs_tid, fd);
-            return None;
-        }
-
-        let n = core::cmp::min(resp.len as usize, swiftlib::fs_consts::FS_DATA_MAX);
-        if n == 0 {
-            break;
-        }
-        out.extend_from_slice(&resp.data[..n]);
-    }
-    close_via_fs_service(fs_tid, fd);
-    Some(out)
-}
-
 fn exec_via_fs_service(path: &str, args: &[&str]) -> Result<u64, i64> {
-    let fs_tid = task::find_process_by_name("fs.service").ok_or(-5)?;
-    let path_field = encode_exec_path_and_args(path, args).ok_or(-22)?;
-    let req = FsRequest {
-        op: FsRequest::OP_EXEC,
-        arg1: 0,
-        arg2: 0,
-        path: path_field,
-    };
-    let resp = fs_request(fs_tid, &req).map_err(|_| -5)?;
-    if resp.status < 0 {
-        return Err(resp.status);
-    }
-    Ok(resp.status as u64)
+    let _ = args;
+    process::exec(path).map_err(|_| -2)
 }
 
 /// OP_STAT 経由でファイルの (mode, size) を取得
 fn stat_via_fs_service(path: &str) -> Option<(u64, u64)> {
-    let fs_tid = task::find_process_by_name("fs.service")?;
-    let mut path_buf = [0u8; FS_PATH_MAX];
-    let bytes = path.as_bytes();
-    if bytes.is_empty() || bytes.len() >= FS_PATH_MAX {
+    let fd = io::open(path, io::O_RDONLY);
+    if fd < 0 {
         return None;
     }
-    path_buf[..bytes.len()].copy_from_slice(bytes);
-    let req = FsRequest {
-        op: FsRequest::OP_STAT,
-        arg1: 0,
-        arg2: 0,
-        path: path_buf,
-    };
-    let resp = fs_request(fs_tid, &req).ok()?;
-    if resp.status < 0 {
-        return None;
+
+    let mut dirbuf = [0u8; 4096];
+    let n = fs::readdir(fd as u64, &mut dirbuf);
+    if (n as i64) > 0 {
+        let _ = io::close(fd as u64);
+        return Some((0x4000 | 0o755, 0));
     }
-    Some((resp.status as u64, resp.len))
+
+    let mut size = 0u64;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = io::read(fd as u64, &mut buf);
+        if (n as i64) < 0 {
+            let _ = io::close(fd as u64);
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        size = size.saturating_add(n);
+    }
+    let _ = io::close(fd as u64);
+    Some((0x8000 | 0o755, size))
 }
 
 /// OP_READDIR をページネーションしながら全エントリ名を取得
 fn readdir_all_via_fs_service(path: &str) -> Option<Vec<String>> {
-    let fs_tid = task::find_process_by_name("fs.service")?;
-    let fd = open_via_fs_service(fs_tid, path).ok()?;
+    let fd = io::open(path, io::O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
     let mut entries: Vec<String> = Vec::new();
-    let max_len = swiftlib::fs_consts::FS_DATA_MAX as u64;
-    let mut start: u64 = 0;
-    loop {
-        let req = FsRequest {
-            op: FsRequest::OP_READDIR,
-            arg1: fd,
-            arg2: (start << 32) | max_len,
-            path: [0; FS_PATH_MAX],
-        };
-        let resp = match fs_request(fs_tid, &req) {
-            Ok(r) => r,
-            Err(()) => {
-                close_via_fs_service(fs_tid, fd);
-                return None;
-            }
-        };
-        if resp.status < 0 {
-            close_via_fs_service(fs_tid, fd);
-            return None;
-        }
-        if resp.len == 0 {
-            break;
-        }
-        let data = &resp.data[..resp.len as usize];
-        for chunk in data.split(|&b| b == b'\n') {
+    let mut buf = [0u8; 4096];
+    let n = fs::readdir(fd as u64, &mut buf);
+    let _ = io::close(fd as u64);
+    if (n as i64) <= 0 {
+        return None;
+    }
+    for chunk in buf[..n as usize].split(|&b| b == b'\n') {
             if chunk.is_empty() {
                 continue;
             }
             if let Ok(s) = core::str::from_utf8(chunk) {
                 entries.push(s.to_string());
             }
-        }
-        let next_start = resp.status as u64;
-        if next_start <= start {
-            break;
-        }
-        start = next_start;
     }
-    close_via_fs_service(fs_tid, fd);
     Some(entries)
 }
 
@@ -583,7 +457,6 @@ impl Terminal {
 
     fn load_env_file(&mut self) {
         let data = match read_file(ENV_FILE_PATH, ENV_FILE_MAX_SIZE)
-            .or_else(|| read_file_via_fs_service(ENV_FILE_PATH, ENV_FILE_MAX_SIZE))
         {
             Some(d) => d,
             None => return,
@@ -610,7 +483,7 @@ impl Terminal {
 
     fn command_exists(&self, path: &str) -> bool {
         // stat syscall 未実装のため open/close で存在確認
-        // 1回のopen試行で十分（fs.service経由を優先）
+        // 1回のopen試行で十分
         let fd = swiftlib::io::open(path, io::O_RDONLY);
         if fd >= 0 {
             swiftlib::io::close(fd as u64);
@@ -1061,7 +934,7 @@ impl Terminal {
     // オーバーヘッドを回避する。
     // ================================================================
 
-    /// 共通: ファイル内容を取得（fs.service 経由、フォールバックで直接 syscall）
+    /// 共通: ファイル内容を取得
     fn load_file_bytes(&self, path: &str, limit: usize) -> Option<Vec<u8>> {
         let abs = resolve_path(path);
         read_file_from_fs(&abs, limit)

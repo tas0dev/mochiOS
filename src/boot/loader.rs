@@ -600,7 +600,7 @@ unsafe fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Sta
         unsafe { load_initfs(bt, image_handle, booting_anim.as_mut()) }
     };
 
-    // rootfs は起動後に fs.service がマウントして利用するため、
+    // rootfs は起動後にFS層がマウントして利用するため、
     // ブートローダーではプリロードしない（起動時間短縮）
     let (rootfs_addr, rootfs_size) = (0u64, 0usize);
 

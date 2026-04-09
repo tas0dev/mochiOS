@@ -40,7 +40,7 @@ pub fn init() -> &'static TaskStateSegment {
 
         // ユーザーモードからカーネルモードへの遷移用のRing0スタックを設定
         tss.privilege_stack_table[0] = {
-            const RING0_STACK_SIZE: usize = 4096 * 32; // 128KB (増量: 16KB→128KB、fs.service大容量バッファ対応)
+            const RING0_STACK_SIZE: usize = 4096 * 32; // 128KB (増量: 16KB→128KB)
             static mut RING0_STACK: [u8; RING0_STACK_SIZE] = [0; RING0_STACK_SIZE];
 
             let stack_start = VirtAddr::from_ptr(unsafe { &raw const RING0_STACK });
