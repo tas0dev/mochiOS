@@ -197,8 +197,7 @@ fn encode_exec_path_and_args(path: &str, args: &[&str]) -> Option<[u8; FS_PATH_M
 }
 
 fn exec_via_fs_service(path: &str, args: &[&str]) -> Result<u64, i64> {
-    let _ = args;
-    process::exec(path).map_err(|_| -2)
+    process::exec_with_args(path, args).map_err(|_| -2)
 }
 
 /// OP_STAT 経由でファイルの (mode, size) を取得
