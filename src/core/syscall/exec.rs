@@ -125,6 +125,18 @@ fn caller_can_launch_service() -> bool {
     .unwrap_or(false)
 }
 
+fn caller_is_service_or_core() -> bool {
+    crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+        .and_then(|pid| crate::task::with_process(pid, |p| p.privilege()))
+        .is_some_and(|lvl| {
+            matches!(
+                lvl,
+                crate::task::PrivilegeLevel::Core | crate::task::PrivilegeLevel::Service
+            )
+        })
+}
+
 fn read_nul_args_from_user(
     args_ptr: u64,
     max_total_bytes: usize,
@@ -887,10 +899,10 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
 #[inline]
 fn resolve_exec_privilege(process_name: &str, exec_path: &str) -> crate::task::PrivilegeLevel {
     // .service は従来通り Service 権限で実行。
-    // Binaries/drivers 配下は特権呼び出し元からの起動時のみ Service 権限を付与する。
+    // Binaries/drivers 配下は Service/Core 呼び出し元からの起動時に Service 権限を付与する。
     let is_driver_path =
         exec_path.starts_with("Binaries/drivers/") || exec_path.starts_with("/Binaries/drivers/");
-    if process_name.ends_with(".service") || (is_driver_path && caller_can_launch_service()) {
+    if process_name.ends_with(".service") || (is_driver_path && caller_is_service_or_core()) {
         crate::task::PrivilegeLevel::Service
     } else {
         crate::task::PrivilegeLevel::User
