@@ -338,6 +338,33 @@ fn should_fallback_to_initfs(errno: u64) -> bool {
     errno == ESRCH
 }
 
+#[inline]
+fn fallback_file_metadata(path: &str) -> Option<(u16, u64)> {
+    if crate::kmod::fs::is_mounted() {
+        crate::kmod::fs::file_metadata(path)
+    } else {
+        crate::kmod::fs::file_metadata(path).or_else(|| crate::init::fs::file_metadata(path))
+    }
+}
+
+#[inline]
+fn fallback_is_directory(path: &str) -> bool {
+    if crate::kmod::fs::is_mounted() {
+        crate::kmod::fs::is_directory(path)
+    } else {
+        crate::kmod::fs::is_directory(path) || crate::init::fs::is_directory(path)
+    }
+}
+
+#[inline]
+fn fallback_readdir(path: &str) -> Option<Vec<String>> {
+    if crate::kmod::fs::is_mounted() {
+        crate::kmod::fs::readdir_path(path)
+    } else {
+        crate::kmod::fs::readdir_path(path).or_else(|| crate::init::fs::readdir_path(path))
+    }
+}
+
 fn parse_readdir_names(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     for raw in bytes.split(|&b| b == b'\n') {
@@ -442,7 +469,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
         None => {
             let errno = if last_err != 0 { last_err } else { EIO };
             if should_fallback_to_initfs(errno) {
-                if crate::init::fs::is_directory(path) {
+                if fallback_is_directory(path) {
                     (Vec::new(), Some(path.to_string()), false, 0)
                 } else {
                     match crate::kmod::fs::read_all(path) {
@@ -688,7 +715,7 @@ pub fn stat(path_ptr: u64, stat_ptr: u64) -> u64 {
             SUCCESS
         }
         Err(errno) if should_fallback_to_initfs(errno) => {
-            match crate::init::fs::file_metadata(&resolved) {
+            match fallback_file_metadata(&resolved) {
                 Some((inode_mode, size)) => {
                     write_stat_buf(stat_ptr, mode_for_stat(inode_mode), size);
                     SUCCESS
@@ -770,7 +797,7 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         return copied as u64;
     }
 
-    let names = match crate::init::fs::readdir_path(&dir_path) {
+    let names = match fallback_readdir(&dir_path) {
         Some(n) => n,
         None => return EINVAL,
     };
@@ -805,7 +832,7 @@ pub fn chdir(path_ptr: u64) -> u64 {
             }
         }
         Err(errno) if should_fallback_to_initfs(errno) => {
-            if !crate::init::fs::is_directory(&resolved) {
+            if !fallback_is_directory(&resolved) {
                 return ENOTDIR;
             }
         }
@@ -1165,7 +1192,7 @@ pub fn newfstatat(dirfd: i64, path_ptr: u64, stat_ptr: u64, flags: u64) -> u64 {
             SUCCESS
         }
         Err(errno) if should_fallback_to_initfs(errno) => {
-            match crate::init::fs::file_metadata(&full) {
+            match fallback_file_metadata(&full) {
                 Some((inode_mode, size)) => {
                     const STAT_SIZE: u64 = 144;
                     if !crate::syscall::validate_user_ptr(stat_ptr, STAT_SIZE) {
@@ -1215,7 +1242,7 @@ pub fn faccessat(dirfd: i64, path_ptr: u64, _mode: u64, _flags: u64) -> u64 {
     match stat_path_via_fs_service(&resolved) {
         Ok(_) => SUCCESS,
         Err(errno) if should_fallback_to_initfs(errno) => {
-            if crate::init::fs::file_metadata(&resolved).is_some() {
+            if fallback_file_metadata(&resolved).is_some() {
                 SUCCESS
             } else {
                 ENOENT
@@ -1290,7 +1317,7 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         }
         all
     } else {
-        match crate::init::fs::readdir_path(&dir_path) {
+        match fallback_readdir(&dir_path) {
             Some(e) => e
                 .into_iter()
                 .map(|name| {
@@ -1299,7 +1326,7 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
                         dir_path.trim_end_matches('/'),
                         name
                     ));
-                    let dtype = if crate::init::fs::is_directory(&child_path) {
+                    let dtype = if fallback_is_directory(&child_path) {
                         4u8
                     } else {
                         8u8

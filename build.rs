@@ -344,7 +344,7 @@ fn main() {
     for dir in &[
         "src/user",
         "src/services",
-        "modules",
+        "src/modules",
         "src/apps",
         "src/drivers",
         "src/resources",
@@ -512,7 +512,7 @@ fn main() {
     }
 
     // カーネルモジュールをビルド（initfs/Modules/*.cext）
-    let modules_base_dir = manifest_dir.join("modules");
+    let modules_base_dir = manifest_dir.join("src/modules");
     for module in &modules {
         build_module(module, &modules_base_dir, &ramfs_dir)
             .unwrap_or_else(|e| panic!("Failed to build module {}: {}", module.name, e));

@@ -1,3 +1,552 @@
-fn main() {
-    println!("Hello, world!");
+#![no_std]
+#![no_main]
+
+use core::arch::asm;
+use core::cmp::min;
+
+const ATA_DATA: u16 = 0x1F0;
+const ATA_SECTOR_COUNT: u16 = 0x1F2;
+const ATA_LBA_LOW: u16 = 0x1F3;
+const ATA_LBA_MID: u16 = 0x1F4;
+const ATA_LBA_HIGH: u16 = 0x1F5;
+const ATA_DRIVE_HEAD: u16 = 0x1F6;
+const ATA_STATUS_CMD: u16 = 0x1F7;
+const ATA_ALT_STATUS: u16 = 0x3F6;
+
+const ATA_CMD_READ_SECTORS: u8 = 0x20;
+const ATA_STATUS_ERR: u8 = 1 << 0;
+const ATA_STATUS_DRQ: u8 = 1 << 3;
+const ATA_STATUS_DF: u8 = 1 << 5;
+const ATA_STATUS_BSY: u8 = 1 << 7;
+
+const EXT2_MAGIC: u16 = 0xEF53;
+
+#[repr(C)]
+pub struct McxBuffer {
+    pub ptr: *mut u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+pub struct McxPath {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+pub struct McxFsOps {
+    pub mount: extern "C" fn(device_id: u32) -> i32,
+    pub read: extern "C" fn(path: McxPath, offset: u64, buf: McxBuffer, out_read: *mut usize) -> i32,
+    pub stat: extern "C" fn(path: McxPath, out_mode: *mut u16, out_size: *mut u64) -> i32,
+    pub readdir: extern "C" fn(path: McxPath, buf: McxBuffer, out_len: *mut usize) -> i32,
+}
+
+#[derive(Clone, Copy)]
+struct FsMount {
+    drive: u8, // 0=master, 1=slave
+    block_size: u32,
+    sectors_per_block: u32,
+    inode_size: u16,
+    inodes_per_group: u32,
+    gdt_block: u32,
+}
+
+static mut MOUNT: Option<FsMount> = None;
+
+#[inline]
+unsafe fn inb(port: u16) -> u8 {
+    let mut value: u8;
+    asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags));
+    value
+}
+
+#[inline]
+unsafe fn outb(port: u16, value: u8) {
+    asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+}
+
+#[inline]
+unsafe fn inw(port: u16) -> u16 {
+    let mut value: u16;
+    asm!("in ax, dx", in("dx") port, out("ax") value, options(nomem, nostack, preserves_flags));
+    value
+}
+
+#[inline]
+unsafe fn io_wait_400ns() {
+    let _ = inb(ATA_ALT_STATUS);
+    let _ = inb(ATA_ALT_STATUS);
+    let _ = inb(ATA_ALT_STATUS);
+    let _ = inb(ATA_ALT_STATUS);
+}
+
+#[inline]
+unsafe fn select_drive(drive: u8, lba: u32) {
+    let head = 0xE0 | ((drive & 1) << 4) | (((lba >> 24) & 0x0F) as u8);
+    outb(ATA_DRIVE_HEAD, head);
+    io_wait_400ns();
+}
+
+unsafe fn wait_not_busy(timeout: usize) -> bool {
+    for _ in 0..timeout {
+        let st = inb(ATA_STATUS_CMD);
+        if (st & ATA_STATUS_BSY) == 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+unsafe fn wait_drq(timeout: usize) -> bool {
+    for _ in 0..timeout {
+        let st = inb(ATA_STATUS_CMD);
+        if (st & ATA_STATUS_BSY) != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        if (st & (ATA_STATUS_ERR | ATA_STATUS_DF)) != 0 {
+            return false;
+        }
+        if (st & ATA_STATUS_DRQ) != 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+unsafe fn read_sector_ata(drive: u8, lba: u32, out: &mut [u8; 512]) -> bool {
+    if !wait_not_busy(200_000) {
+        return false;
+    }
+    select_drive(drive, lba);
+    outb(ATA_SECTOR_COUNT, 1);
+    outb(ATA_LBA_LOW, (lba & 0xFF) as u8);
+    outb(ATA_LBA_MID, ((lba >> 8) & 0xFF) as u8);
+    outb(ATA_LBA_HIGH, ((lba >> 16) & 0xFF) as u8);
+    outb(ATA_STATUS_CMD, ATA_CMD_READ_SECTORS);
+    if !wait_drq(200_000) {
+        return false;
+    }
+    for i in 0..256 {
+        let w = inw(ATA_DATA);
+        let b = w.to_le_bytes();
+        out[i * 2] = b[0];
+        out[i * 2 + 1] = b[1];
+    }
+    true
+}
+
+#[inline]
+fn read_u16(buf: &[u8], off: usize) -> Option<u16> {
+    let s = buf.get(off..off + 2)?;
+    Some(u16::from_le_bytes([s[0], s[1]]))
+}
+
+#[inline]
+fn read_u32(buf: &[u8], off: usize) -> Option<u32> {
+    let s = buf.get(off..off + 4)?;
+    Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+unsafe fn read_fs_block(m: &FsMount, block_num: u32, out: &mut [u8]) -> bool {
+    let block_size = m.block_size as usize;
+    if out.len() < block_size {
+        return false;
+    }
+    let spb = m.sectors_per_block as usize;
+    for i in 0..spb {
+        let lba = block_num
+            .saturating_mul(m.sectors_per_block)
+            .saturating_add(i as u32);
+        let mut sec = [0u8; 512];
+        if !read_sector_ata(m.drive, lba, &mut sec) {
+            return false;
+        }
+        let dst = i * 512;
+        out[dst..dst + 512].copy_from_slice(&sec);
+    }
+    true
+}
+
+unsafe fn probe_ext2_drive(drive: u8) -> Option<FsMount> {
+    let mut s2 = [0u8; 512];
+    let mut s3 = [0u8; 512];
+    if !read_sector_ata(drive, 2, &mut s2) || !read_sector_ata(drive, 3, &mut s3) {
+        return None;
+    }
+    let mut sb = [0u8; 1024];
+    sb[..512].copy_from_slice(&s2);
+    sb[512..].copy_from_slice(&s3);
+    if read_u16(&sb, 56)? != EXT2_MAGIC {
+        return None;
+    }
+    let log_block_size = read_u32(&sb, 24)?;
+    if log_block_size > 2 {
+        return None;
+    }
+    let block_size = 1024u32.checked_shl(log_block_size)?;
+    if block_size < 1024 || block_size % 512 != 0 {
+        return None;
+    }
+    let inode_size = read_u16(&sb, 88).unwrap_or(128);
+    let inodes_per_group = read_u32(&sb, 40)?;
+    if inodes_per_group == 0 {
+        return None;
+    }
+    let gdt_block = if block_size == 1024 { 2 } else { 1 };
+    Some(FsMount {
+        drive,
+        block_size,
+        sectors_per_block: block_size / 512,
+        inode_size,
+        inodes_per_group,
+        gdt_block,
+    })
+}
+
+unsafe fn read_inode(m: &FsMount, inode_num: u32, inode_out: &mut [u8; 256]) -> bool {
+    if inode_num == 0 || m.inodes_per_group == 0 {
+        return false;
+    }
+    let group = (inode_num - 1) / m.inodes_per_group;
+    let index = (inode_num - 1) % m.inodes_per_group;
+
+    let gdt_entry_off = (group as usize) * 32;
+    let gdt_block_off = gdt_entry_off / (m.block_size as usize);
+    let gdt_inner = gdt_entry_off % (m.block_size as usize);
+    let mut gdt_blk = [0u8; 4096];
+    if !read_fs_block(m, m.gdt_block + gdt_block_off as u32, &mut gdt_blk) {
+        return false;
+    }
+    let inode_table = match read_u32(&gdt_blk, gdt_inner + 8) {
+        Some(v) => v,
+        None => return false,
+    };
+    let inode_off = (index as usize) * (m.inode_size as usize);
+    let blk = inode_off / (m.block_size as usize);
+    let off = inode_off % (m.block_size as usize);
+    let mut iblk = [0u8; 4096];
+    if !read_fs_block(m, inode_table + blk as u32, &mut iblk) {
+        return false;
+    }
+    let isz = m.inode_size as usize;
+    if off + isz > iblk.len() || isz > inode_out.len() {
+        return false;
+    }
+    inode_out[..isz].copy_from_slice(&iblk[off..off + isz]);
+    true
+}
+
+#[inline]
+fn inode_mode(inode: &[u8]) -> u16 {
+    read_u16(inode, 0).unwrap_or(0)
+}
+
+#[inline]
+fn inode_size(inode: &[u8]) -> u32 {
+    read_u32(inode, 4).unwrap_or(0)
+}
+
+#[inline]
+fn inode_block(inode: &[u8], idx: usize) -> u32 {
+    read_u32(inode, 40 + idx * 4).unwrap_or(0)
+}
+
+#[inline]
+fn is_dir(mode: u16) -> bool {
+    (mode & 0xF000) == 0x4000
+}
+
+unsafe fn read_data_block_num(
+    m: &FsMount,
+    inode: &[u8],
+    block_idx: usize,
+    scratch: &mut [u8; 4096],
+) -> Option<u32> {
+    if block_idx < 12 {
+        let n = inode_block(inode, block_idx);
+        return if n == 0 { None } else { Some(n) };
+    }
+    let idx = block_idx - 12;
+    let per = (m.block_size / 4) as usize;
+    if idx >= per {
+        return None;
+    }
+    let indirect = inode_block(inode, 12);
+    if indirect == 0 {
+        return None;
+    }
+    if !read_fs_block(m, indirect, scratch) {
+        return None;
+    }
+    let n = read_u32(scratch, idx * 4)?;
+    if n == 0 { None } else { Some(n) }
+}
+
+unsafe fn lookup_child(m: &FsMount, dir_inode_num: u32, name: &[u8]) -> Option<u32> {
+    let mut inode = [0u8; 256];
+    if !read_inode(m, dir_inode_num, &mut inode) || !is_dir(inode_mode(&inode)) {
+        return None;
+    }
+    let dir_size = inode_size(&inode) as usize;
+    let block_size = m.block_size as usize;
+    let mut blk = [0u8; 4096];
+    let mut ind = [0u8; 4096];
+    let blocks = dir_size.div_ceil(block_size);
+    for bi in 0..blocks {
+        let bnum = read_data_block_num(m, &inode, bi, &mut ind)?;
+        if !read_fs_block(m, bnum, &mut blk) {
+            return None;
+        }
+        let mut off = 0usize;
+        while off + 8 <= block_size {
+            let ino = read_u32(&blk, off)?;
+            let rec_len = read_u16(&blk, off + 4)? as usize;
+            let nlen = *blk.get(off + 6)? as usize;
+            if rec_len == 0 || off + rec_len > block_size {
+                break;
+            }
+            if ino != 0 && nlen > 0 && off + 8 + nlen <= block_size {
+                let nm = &blk[off + 8..off + 8 + nlen];
+                if nm == name {
+                    return Some(ino);
+                }
+            }
+            off += rec_len;
+        }
+    }
+    None
+}
+
+unsafe fn resolve_path_inode(m: &FsMount, path: &[u8]) -> Option<u32> {
+    let mut cur = 2u32;
+    let mut i = 0usize;
+    while i < path.len() {
+        while i < path.len() && path[i] == b'/' {
+            i += 1;
+        }
+        if i >= path.len() {
+            break;
+        }
+        let start = i;
+        while i < path.len() && path[i] != b'/' {
+            i += 1;
+        }
+        let seg = &path[start..i];
+        if seg.is_empty() || seg == b"." || seg == b".." {
+            continue;
+        }
+        cur = lookup_child(m, cur, seg)?;
+    }
+    Some(cur)
+}
+
+unsafe fn read_inode_range(
+    m: &FsMount,
+    inode_num: u32,
+    offset: u64,
+    dst: &mut [u8],
+) -> Option<usize> {
+    let mut inode = [0u8; 256];
+    if !read_inode(m, inode_num, &mut inode) {
+        return None;
+    }
+    let size = inode_size(&inode) as u64;
+    if offset >= size {
+        return Some(0);
+    }
+    let to_read = min(dst.len() as u64, size - offset) as usize;
+    let block_size = m.block_size as usize;
+    let mut done = 0usize;
+    let mut blk = [0u8; 4096];
+    let mut ind = [0u8; 4096];
+    while done < to_read {
+        let file_off = offset as usize + done;
+        let bi = file_off / block_size;
+        let boff = file_off % block_size;
+        let bnum = read_data_block_num(m, &inode, bi, &mut ind)?;
+        if !read_fs_block(m, bnum, &mut blk) {
+            return None;
+        }
+        let n = min(block_size - boff, to_read - done);
+        dst[done..done + n].copy_from_slice(&blk[boff..boff + n]);
+        done += n;
+    }
+    Some(done)
+}
+
+unsafe fn read_path_inode(path: McxPath) -> Option<(FsMount, u32)> {
+    let m = MOUNT?;
+    let raw = core::slice::from_raw_parts(path.ptr, path.len);
+    let p = if !raw.is_empty() && raw[0] == b'/' {
+        &raw[1..]
+    } else {
+        raw
+    };
+    let inode = resolve_path_inode(&m, p)?;
+    Some((m, inode))
+}
+
+extern "C" fn fs_mount(_device_id: u32) -> i32 {
+    unsafe {
+        // rootfs は qemu-runner の disk0 (IDE index=1, primary slave) を優先
+        if let Some(m) = probe_ext2_drive(1) {
+            MOUNT = Some(m);
+            return 0;
+        }
+        if let Some(m) = probe_ext2_drive(0) {
+            MOUNT = Some(m);
+            return 0;
+        }
+    }
+    -5
+}
+
+extern "C" fn fs_read(path: McxPath, offset: u64, buf: McxBuffer, out_read: *mut usize) -> i32 {
+    if path.ptr.is_null() || buf.ptr.is_null() || out_read.is_null() {
+        return -22;
+    }
+    unsafe {
+        let (m, inode) = match read_path_inode(path) {
+            Some(v) => v,
+            None => {
+                return if MOUNT.is_some() { -2 } else { -5 };
+            }
+        };
+        let dst = core::slice::from_raw_parts_mut(buf.ptr, buf.len);
+        match read_inode_range(&m, inode, offset, dst) {
+            Some(n) => {
+                *out_read = n;
+                0
+            }
+            None => -5,
+        }
+    }
+}
+
+extern "C" fn fs_stat(path: McxPath, out_mode: *mut u16, out_size: *mut u64) -> i32 {
+    if path.ptr.is_null() || out_mode.is_null() || out_size.is_null() {
+        return -22;
+    }
+    unsafe {
+        let (m, inode_num) = match read_path_inode(path) {
+            Some(v) => v,
+            None => {
+                return if MOUNT.is_some() { -2 } else { -5 };
+            }
+        };
+        let mut inode = [0u8; 256];
+        if !read_inode(&m, inode_num, &mut inode) {
+            return -5;
+        }
+        *out_mode = inode_mode(&inode);
+        *out_size = inode_size(&inode) as u64;
+        0
+    }
+}
+
+extern "C" fn fs_readdir(path: McxPath, buf: McxBuffer, out_len: *mut usize) -> i32 {
+    if path.ptr.is_null() || buf.ptr.is_null() || out_len.is_null() {
+        return -22;
+    }
+    unsafe {
+        let (m, inode_num) = match read_path_inode(path) {
+            Some(v) => v,
+            None => {
+                return if MOUNT.is_some() { -2 } else { -5 };
+            }
+        };
+        let mut inode = [0u8; 256];
+        if !read_inode(&m, inode_num, &mut inode) {
+            return -5;
+        }
+        if !is_dir(inode_mode(&inode)) {
+            return -20;
+        }
+
+        let block_size = m.block_size as usize;
+        let dir_size = inode_size(&inode) as usize;
+        let mut data_blk = [0u8; 4096];
+        let mut ind = [0u8; 4096];
+        let mut written = 0usize;
+        let out = core::slice::from_raw_parts_mut(buf.ptr, buf.len);
+        let blocks = dir_size.div_ceil(block_size);
+        for bi in 0..blocks {
+            let bnum = match read_data_block_num(&m, &inode, bi, &mut ind) {
+                Some(v) => v,
+                None => return -5,
+            };
+            if !read_fs_block(&m, bnum, &mut data_blk) {
+                return -5;
+            }
+            let mut off = 0usize;
+            while off + 8 <= block_size {
+                let ino = match read_u32(&data_blk, off) {
+                    Some(v) => v,
+                    None => break,
+                };
+                let rec_len = match read_u16(&data_blk, off + 4) {
+                    Some(v) => v as usize,
+                    None => break,
+                };
+                let nlen = match data_blk.get(off + 6) {
+                    Some(v) => *v as usize,
+                    None => break,
+                };
+                if rec_len == 0 || off + rec_len > block_size {
+                    break;
+                }
+                if ino != 0 && nlen > 0 && off + 8 + nlen <= block_size {
+                    let nm = &data_blk[off + 8..off + 8 + nlen];
+                    if nm != b"." && nm != b".." {
+                        let need = nlen + if written == 0 { 0 } else { 1 };
+                        if written + need > out.len() {
+                            *out_len = written;
+                            return 0;
+                        }
+                        if written != 0 {
+                            out[written] = b'\n';
+                            written += 1;
+                        }
+                        out[written..written + nlen].copy_from_slice(nm);
+                        written += nlen;
+                    }
+                }
+                off += rec_len;
+            }
+        }
+        *out_len = written;
+        0
+    }
+}
+
+static FS_OPS: McxFsOps = McxFsOps {
+    mount: fs_mount,
+    read: fs_read,
+    stat: fs_stat,
+    readdir: fs_readdir,
+};
+
+#[no_mangle]
+pub extern "C" fn mochi_module_init() -> *const McxFsOps {
+    &FS_OPS
+}
+
+#[used]
+static KEEP_INIT_REF: extern "C" fn() -> *const McxFsOps = mochi_module_init;
+
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
 }
