@@ -201,6 +201,8 @@ fn exec_internal(path: &str, name_override: Option<&str>, args: &[&str]) -> u64 
     let process_name = name_override.unwrap_or(path);
     if let Some(data) = crate::init::fs::read(path) {
         exec_with_data(&data, process_name, path, args, None)
+    } else if let Some(data) = crate::kmod::fs::read_all(path) {
+        exec_with_data(&data, process_name, path, args, None)
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT

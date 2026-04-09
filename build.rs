@@ -378,12 +378,10 @@ fn main() {
         }
     }
 
-    // fs と ramfs の標準ディレクトリレイアウトを作成
+    // fsの標準ディレクトリレイアウトを作成
     let resources_src = manifest_dir.join("src/resources");
     setup_fs_layout(&fs_dir, &resources_src)
         .unwrap_or_else(|e| println!("cargo:warning=setup_fs_layout failed: {}", e));
-    setup_fs_layout(&ramfs_dir, &resources_src)
-        .unwrap_or_else(|e| println!("cargo:warning=setup_ramfs_layout failed: {}", e));
 
     // newlibのインストールディレクトリを取得
     let target = env::var("TARGET").unwrap_or("x86_64-unknown-uefi".to_string());
@@ -557,13 +555,12 @@ fn main() {
             e
         ),
     }
-
     // services.index に基づき、initfs 以外の autostart サービス一覧を生成 (Config/services.list)
     let mut services_autostart_entries: Vec<String> = Vec::new();
     for svc in &services {
         if svc.autostart {
             if svc.fs_type != "initfs" {
-                services_autostart_entries.push(format!("Services/{}.service", svc.name));
+                services_autostart_entries.push(format!("/Services/{}.service", svc.name));
             } else {
                 // 場合によっては initfs に autostart=true が設定されていることがある。
                 // 開発者に分かるようにビルド時警告を出す。

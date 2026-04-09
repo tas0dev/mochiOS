@@ -18,13 +18,13 @@ order = 0
 [core.service.driver]
 description = "Driver manager - launches hardware drivers"
 dir = "driver"
-fs = "initfs"
+fs = "ata"
 autostart = true
 order = 5
 
 [core.service.shell]
 description = "Draw video output and shell interface"
 dir = "shell"
-fs = "initfs"
+fs = "ata"
 autostart = true
 order = 10

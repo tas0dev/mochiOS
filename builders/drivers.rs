@@ -161,7 +161,7 @@ pub fn build_drivers(drivers_dir: &Path, output_dir: &Path) -> Vec<String> {
                             output_dir.display(),
                             elf_path.display()
                         );
-                        autostart_entries.push(format!("Binaries/drivers/{}", dest_name));
+                        autostart_entries.push(format!("/Binaries/drivers/{}", dest_name));
                     }
                 } else {
                     panic!("Built driver binary not found for {}", driver_dir_name);
