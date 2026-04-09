@@ -22,6 +22,10 @@ const ATA_STATUS_DF: u8 = 1 << 5;
 const ATA_STATUS_BSY: u8 = 1 << 7;
 
 const EXT2_MAGIC: u16 = 0xEF53;
+const BLOCK_CACHE_SLOTS: usize = 64;
+const INODE_CACHE_SLOTS: usize = 128;
+const PATH_CACHE_SLOTS: usize = 128;
+const PATH_CACHE_MAX: usize = 192;
 
 #[repr(C)]
 pub struct McxBuffer {
@@ -51,6 +55,67 @@ struct FsMount {
     inode_size: u16,
     inodes_per_group: u32,
     gdt_block: u32,
+}
+
+#[derive(Clone, Copy)]
+struct BlockCacheEntry {
+    valid: bool,
+    drive: u8,
+    block_num: u32,
+    data: [u8; 4096],
+}
+
+impl BlockCacheEntry {
+    const fn empty() -> Self {
+        Self {
+            valid: false,
+            drive: 0,
+            block_num: 0,
+            data: [0u8; 4096],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct InodeCacheEntry {
+    valid: bool,
+    drive: u8,
+    inode_num: u32,
+    inode: [u8; 256],
+}
+
+impl InodeCacheEntry {
+    const fn empty() -> Self {
+        Self {
+            valid: false,
+            drive: 0,
+            inode_num: 0,
+            inode: [0u8; 256],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PathCacheEntry {
+    valid: bool,
+    drive: u8,
+    path_len: u16,
+    path_hash: u64,
+    inode_num: u32,
+    path: [u8; PATH_CACHE_MAX],
+}
+
+impl PathCacheEntry {
+    const fn empty() -> Self {
+        Self {
+            valid: false,
+            drive: 0,
+            path_len: 0,
+            path_hash: 0,
+            inode_num: 0,
+            path: [0u8; PATH_CACHE_MAX],
+        }
+    }
 }
 
 static mut MOUNT: Option<FsMount> = None;
@@ -85,6 +150,17 @@ static READ_RANGE_IND: SharedBuf = SharedBuf::new();
 static READDIR_BLK: SharedBuf = SharedBuf::new();
 static READDIR_IND: SharedBuf = SharedBuf::new();
 
+static mut BLOCK_CACHE: [BlockCacheEntry; BLOCK_CACHE_SLOTS] =
+    [BlockCacheEntry::empty(); BLOCK_CACHE_SLOTS];
+static mut BLOCK_CACHE_CURSOR: usize = 0;
+
+static mut INODE_CACHE: [InodeCacheEntry; INODE_CACHE_SLOTS] =
+    [InodeCacheEntry::empty(); INODE_CACHE_SLOTS];
+static mut INODE_CACHE_CURSOR: usize = 0;
+
+static mut PATH_CACHE: [PathCacheEntry; PATH_CACHE_SLOTS] = [PathCacheEntry::empty(); PATH_CACHE_SLOTS];
+static mut PATH_CACHE_CURSOR: usize = 0;
+
 struct OpLockGuard;
 
 impl Drop for OpLockGuard {
@@ -102,6 +178,103 @@ fn lock_ops() -> OpLockGuard {
         core::hint::spin_loop();
     }
     OpLockGuard
+}
+
+#[inline]
+fn path_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+unsafe fn reset_caches() {
+    for e in &mut BLOCK_CACHE {
+        e.valid = false;
+    }
+    BLOCK_CACHE_CURSOR = 0;
+    for e in &mut INODE_CACHE {
+        e.valid = false;
+    }
+    INODE_CACHE_CURSOR = 0;
+    for e in &mut PATH_CACHE {
+        e.valid = false;
+    }
+    PATH_CACHE_CURSOR = 0;
+}
+
+unsafe fn block_cache_lookup(drive: u8, block_num: u32, out: &mut [u8], block_size: usize) -> bool {
+    for e in &BLOCK_CACHE {
+        if e.valid && e.drive == drive && e.block_num == block_num {
+            out[..block_size].copy_from_slice(&e.data[..block_size]);
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn block_cache_insert(drive: u8, block_num: u32, data: &[u8], block_size: usize) {
+    let slot = BLOCK_CACHE_CURSOR % BLOCK_CACHE_SLOTS;
+    BLOCK_CACHE_CURSOR = (BLOCK_CACHE_CURSOR + 1) % BLOCK_CACHE_SLOTS;
+    let ent = &mut BLOCK_CACHE[slot];
+    ent.valid = true;
+    ent.drive = drive;
+    ent.block_num = block_num;
+    ent.data[..block_size].copy_from_slice(&data[..block_size]);
+}
+
+unsafe fn inode_cache_lookup(drive: u8, inode_num: u32, out: &mut [u8; 256], isz: usize) -> bool {
+    for e in &INODE_CACHE {
+        if e.valid && e.drive == drive && e.inode_num == inode_num {
+            out[..isz].copy_from_slice(&e.inode[..isz]);
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn inode_cache_insert(drive: u8, inode_num: u32, inode: &[u8; 256], isz: usize) {
+    let slot = INODE_CACHE_CURSOR % INODE_CACHE_SLOTS;
+    INODE_CACHE_CURSOR = (INODE_CACHE_CURSOR + 1) % INODE_CACHE_SLOTS;
+    let ent = &mut INODE_CACHE[slot];
+    ent.valid = true;
+    ent.drive = drive;
+    ent.inode_num = inode_num;
+    ent.inode[..isz].copy_from_slice(&inode[..isz]);
+}
+
+unsafe fn path_cache_lookup(drive: u8, path: &[u8]) -> Option<u32> {
+    if path.len() > PATH_CACHE_MAX {
+        return None;
+    }
+    let h = path_hash(path);
+    for e in &PATH_CACHE {
+        if !e.valid || e.drive != drive || e.path_hash != h {
+            continue;
+        }
+        let n = e.path_len as usize;
+        if n == path.len() && e.path[..n] == path[..] {
+            return Some(e.inode_num);
+        }
+    }
+    None
+}
+
+unsafe fn path_cache_insert(drive: u8, path: &[u8], inode_num: u32) {
+    if path.len() > PATH_CACHE_MAX {
+        return;
+    }
+    let slot = PATH_CACHE_CURSOR % PATH_CACHE_SLOTS;
+    PATH_CACHE_CURSOR = (PATH_CACHE_CURSOR + 1) % PATH_CACHE_SLOTS;
+    let ent = &mut PATH_CACHE[slot];
+    ent.valid = true;
+    ent.drive = drive;
+    ent.path_len = path.len() as u16;
+    ent.path_hash = path_hash(path);
+    ent.inode_num = inode_num;
+    ent.path[..path.len()].copy_from_slice(path);
 }
 
 #[inline]
@@ -206,6 +379,9 @@ unsafe fn read_fs_block(m: &FsMount, block_num: u32, out: &mut [u8]) -> bool {
     if out.len() < block_size {
         return false;
     }
+    if block_cache_lookup(m.drive, block_num, out, block_size) {
+        return true;
+    }
     let spb = m.sectors_per_block as usize;
     for i in 0..spb {
         let lba = block_num
@@ -218,6 +394,7 @@ unsafe fn read_fs_block(m: &FsMount, block_num: u32, out: &mut [u8]) -> bool {
         let dst = i * 512;
         out[dst..dst + 512].copy_from_slice(&sec);
     }
+    block_cache_insert(m.drive, block_num, out, block_size);
     true
 }
 
@@ -261,6 +438,10 @@ unsafe fn read_inode(m: &FsMount, inode_num: u32, inode_out: &mut [u8; 256]) -> 
     if inode_num == 0 || m.inodes_per_group == 0 {
         return false;
     }
+    let isz = m.inode_size as usize;
+    if inode_cache_lookup(m.drive, inode_num, inode_out, isz) {
+        return true;
+    }
     let group = (inode_num - 1) / m.inodes_per_group;
     let index = (inode_num - 1) % m.inodes_per_group;
 
@@ -284,12 +465,12 @@ unsafe fn read_inode(m: &FsMount, inode_num: u32, inode_out: &mut [u8; 256]) -> 
     if !read_fs_block(m, inode_table + blk as u32, READ_INODE_IBLK.as_mut()) {
         return false;
     }
-    let isz = m.inode_size as usize;
     let iblk = READ_INODE_IBLK.as_ref();
     if off + isz > iblk.len() || isz > inode_out.len() {
         return false;
     }
     inode_out[..isz].copy_from_slice(&iblk[off..off + isz]);
+    inode_cache_insert(m.drive, inode_num, inode_out, isz);
     true
 }
 
@@ -374,6 +555,9 @@ unsafe fn lookup_child(m: &FsMount, dir_inode_num: u32, name: &[u8]) -> Option<u
 }
 
 unsafe fn resolve_path_inode(m: &FsMount, path: &[u8]) -> Option<u32> {
+    if let Some(inode) = path_cache_lookup(m.drive, path) {
+        return Some(inode);
+    }
     let mut cur = 2u32;
     let mut i = 0usize;
     while i < path.len() {
@@ -393,6 +577,7 @@ unsafe fn resolve_path_inode(m: &FsMount, path: &[u8]) -> Option<u32> {
         }
         cur = lookup_child(m, cur, seg)?;
     }
+    path_cache_insert(m.drive, path, cur);
     Some(cur)
 }
 
@@ -447,10 +632,12 @@ extern "C" fn fs_mount(_device_id: u32) -> i32 {
         // 起動直後はデバイス準備に時間がかかるため複数回リトライする。
         for _ in 0..16 {
             if let Some(m) = probe_ext2_drive(1) {
+                reset_caches();
                 MOUNT = Some(m);
                 return 0;
             }
             if let Some(m) = probe_ext2_drive(0) {
+                reset_caches();
                 MOUNT = Some(m);
                 return 0;
             }
