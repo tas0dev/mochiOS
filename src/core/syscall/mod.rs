@@ -251,6 +251,22 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
                 }
             }
         }
+        x if x == SyscallNumber::MouseReadWait as u64 => {
+            if arg0 == 0 {
+                EFAULT
+            } else {
+                match mouse::read_packet_blocking() {
+                    Ok(packet) => {
+                        let packet_bytes = (packet as u32).to_ne_bytes();
+                        match copy_to_user(arg0, &packet_bytes) {
+                            Ok(()) => SUCCESS,
+                            Err(errno) => errno,
+                        }
+                    }
+                    Err(errno) => errno,
+                }
+            }
+        }
         x if x == SyscallNumber::KeyboardInject as u64 => keyboard::inject_scancode(arg0),
         x if x == SyscallNumber::MouseInject as u64 => mouse::inject_packet(arg0),
         x if x == SyscallNumber::MapPhysicalRange as u64 => mmio::map_physical_range(arg0, arg1),

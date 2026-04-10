@@ -50,3 +50,24 @@ pub fn read_packet() -> Result<Option<MousePacket>, u64> {
         dy: b2 as i8,
     }))
 }
+
+/// PS/2 マウスパケットを1件読み取る（ブロッキング）
+pub fn read_packet_wait() -> Result<MousePacket, u64> {
+    let mut raw: u32 = 0;
+    let ret = syscall1(
+        SyscallNumber::MouseReadWait as u64,
+        (&mut raw as *mut u32) as u64,
+    );
+    if (ret as i64) < 0 {
+        return Err(ret);
+    }
+
+    let b0 = (raw & 0xFF) as u8;
+    let b1 = ((raw >> 8) & 0xFF) as u8;
+    let b2 = ((raw >> 16) & 0xFF) as u8;
+    Ok(MousePacket {
+        buttons: b0 & 0x07,
+        dx: b1 as i8,
+        dy: b2 as i8,
+    })
+}

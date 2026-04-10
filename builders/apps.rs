@@ -45,6 +45,10 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, _extension: &str) {
         if src_dir.is_dir() {
             emit_rerun_if_changed(&src_dir);
         }
+        let resources_dir = path.join("resources");
+        if resources_dir.is_dir() {
+            emit_rerun_if_changed(&resources_dir);
+        }
 
         // カスタムターゲットファイルを探す（アプリディレクトリ内の .json を優先）
         let target_spec = find_target_spec(&path);
@@ -169,6 +173,20 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, _extension: &str) {
                                     println!(
                                         "cargo:warning=Failed to copy {} for {}: {}",
                                         icon_file, app_name, e
+                                    );
+                                }
+                                break;
+                            }
+                        }
+
+                        for res_dir_name in ["resources", "resource"] {
+                            let res_src = path.join(res_dir_name);
+                            if res_src.is_dir() {
+                                let res_dest = app_bundle_dir.join("resources");
+                                if let Err(e) = copy_dir_recursive(&res_src, &res_dest) {
+                                    println!(
+                                        "cargo:warning=Failed to copy resources for {}: {}",
+                                        app_name, e
                                     );
                                 }
                                 break;
@@ -350,4 +368,29 @@ fn find_built_binary(target_dir: &Path, target_name: Option<&str>) -> Option<Pat
     }
 
     None
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("Failed to create {}: {}", dst.display(), e))?;
+    for entry in
+        fs::read_dir(src).map_err(|e| format!("Failed to read {}: {}", src.display(), e))?
+    {
+        let entry =
+            entry.map_err(|e| format!("Failed to read entry in {}: {}", src.display(), e))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path).map_err(|e| {
+                format!(
+                    "Failed to copy {} to {}: {}",
+                    src_path.display(),
+                    dst_path.display(),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
 }

@@ -1,9 +1,9 @@
 use crate::syscall::{EINVAL, ENODATA, EPERM, SUCCESS};
 
-/// マウス入力監視 API を呼び出せるか確認する
+/// マウス入力注入 API を呼び出せるか確認する
 ///
 /// Service または Core 権限のみ許可する。
-fn caller_has_mouse_privilege() -> bool {
+fn caller_has_mouse_inject_privilege() -> bool {
     crate::task::current_thread_id()
         .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
         .and_then(|pid| {
@@ -22,12 +22,47 @@ fn caller_has_mouse_privilege() -> bool {
 /// 返り値は `b0 | (b1 << 8) | (b2 << 16)` 形式。
 /// キューが空なら ENODATA。
 pub fn read_packet() -> Result<u64, u64> {
-    if !caller_has_mouse_privilege() {
-        return Err(EPERM);
-    }
     match crate::util::ps2mouse::pop_packet() {
         Some(packet) => Ok(packet as u64),
         None => Err(ENODATA),
+    }
+}
+
+/// PS/2 マウスパケットを 1 つ読み取る（ブロッキング）
+///
+/// データが到着するまで waiter 登録してスレッドをスリープし、
+/// IRQ12 での wake により再開する。
+pub fn read_packet_blocking() -> Result<u64, u64> {
+    if let Some(packet) = crate::util::ps2mouse::pop_packet() {
+        return Ok(packet as u64);
+    }
+
+    let tid = match crate::task::current_thread_id() {
+        Some(id) => id,
+        None => loop {
+            if let Some(packet) = crate::util::ps2mouse::pop_packet() {
+                return Ok(packet as u64);
+            }
+            crate::task::yield_now();
+        },
+    };
+
+    loop {
+        if crate::util::ps2mouse::register_waiter(tid.as_u64()) {
+            if let Some(packet) = crate::util::ps2mouse::pop_packet() {
+                crate::util::ps2mouse::unregister_waiter(tid.as_u64());
+                return Ok(packet as u64);
+            }
+
+            if crate::task::sleep_thread_unless_woken(tid) {
+                crate::task::yield_now();
+            }
+        } else {
+            if let Some(packet) = crate::util::ps2mouse::pop_packet() {
+                return Ok(packet as u64);
+            }
+            crate::task::yield_now();
+        }
     }
 }
 
@@ -35,7 +70,7 @@ pub fn read_packet() -> Result<u64, u64> {
 ///
 /// `packet` は `b0 | (b1 << 8) | (b2 << 16)` 形式。
 pub fn inject_packet(packet: u64) -> u64 {
-    if !caller_has_mouse_privilege() {
+    if !caller_has_mouse_inject_privilege() {
         return EPERM;
     }
     if packet > 0xFF_FFFF {

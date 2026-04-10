@@ -142,6 +142,8 @@ pub enum SyscallNumber {
     UnmapPages = 549,
     /// IPC経由で物理ページをターゲットプロセスへ送信（Service権限専用）
     IpcSendPages = 550,
+    /// PS/2 マウスの3バイトパケットを読み取る（ブロッキング版）
+    MouseReadWait = 551,
 }
 
 /// 操作が許可されていない
