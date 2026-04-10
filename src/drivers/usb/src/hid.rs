@@ -22,6 +22,7 @@ pub struct HidParserState {
     prev_mouse_buttons: u8,
     warned_kbd_inject: bool,
     warned_mouse_inject: bool,
+    mouse_offset: Option<usize>,
 }
 
 #[inline]
@@ -198,15 +199,50 @@ fn parse_hid_mouse_report(_slot: u8, _ep: u8, report: &[u8], state: &mut HidPars
     // TODO: 将来は HID report descriptor を解析して厳密にボタン/X/Y位置を決定する。
     // 現状は Report ID 有無を考慮し、offset=0/1 の双方を試す。
     let mut chosen_offset = None;
+    let mut best_score = i32::MIN;
     for offset in [0usize, 1usize] {
-        if report.len() >= offset + 3 {
+        if report.len() < offset + 3 {
+            continue;
+        }
+        let raw_buttons = report[offset];
+        let dx = report[offset + 1] as i8;
+        let dy = report[offset + 2] as i8;
+        let wheel = if report.len() > offset + 3 {
+            report[offset + 3] as i8
+        } else {
+            0
+        };
+        // ボタン上位ビットがゼロに近い形を優先し、変化量のある候補を優先する。
+        let mut score = 0i32;
+        if (raw_buttons & 0xF8) == 0 {
+            score += 4;
+        }
+        // 直前に有効だったオフセットを優先してブレを防ぐ
+        if state.mouse_offset == Some(offset) {
+            score += 3;
+        }
+        if dx != 0 || dy != 0 {
+            score += 3;
+        }
+        // Report ID誤認時の暴走を避けるため、過大な移動量は減点
+        if (dx as i16).abs() > 64 || (dy as i16).abs() > 64 {
+            score -= 2;
+        }
+        if wheel != 0 {
+            score += 1;
+        }
+        if (raw_buttons & 0x07) != state.prev_mouse_buttons {
+            score += 2;
+        }
+        if score > best_score {
+            best_score = score;
             chosen_offset = Some(offset);
-            break;
         }
     }
     let Some(offset) = chosen_offset else {
         return false;
     };
+    state.mouse_offset = Some(offset);
     let buttons_idx = offset;
     let data_idx = offset + 1;
 
