@@ -12,6 +12,7 @@ use hid::{parse_hid_report, HidParserState, HidReportKind};
 const CC_SUCCESS: u8 = 1;
 const CC_STALL_ERROR: u8 = 6;
 const CC_SHORT_PACKET: u8 = 13;
+const EVENT_DISPATCH_BUDGET: usize = 256;
 const PORTSC_CHANGE_MASK: u32 =
     (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
 
@@ -516,6 +517,11 @@ impl EventRing {
 
 #[derive(Clone, Copy)]
 struct HidEndpointConfig {
+    interface_number: u8,
+    interface_subclass: u8,
+    interface_protocol: u8,
+    report_desc_len: u16,
+    report_id: u8,
     ep_addr: u8,
     dci: u8,
     ep_type: u8,
@@ -559,6 +565,11 @@ enum PendingTransferKind {
     DeviceDescriptor8 { slot_id: u8 },
     ConfigHeader { slot_id: u8 },
     ConfigFull { slot_id: u8 },
+    HidReportDescriptor {
+        slot_id: u8,
+        config_value: u8,
+        hid_cfg: HidEndpointConfig,
+    },
     SetConfiguration { slot_id: u8 },
     InterruptIn { slot_id: u8, dci: u8, retries: u8 },
 }
@@ -1089,6 +1100,10 @@ fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
     let mut idx = 0usize;
     let mut in_hid_interface = false;
     let mut report_kind = HidReportKind::Unknown;
+    let mut interface_number = 0u8;
+    let mut interface_subclass = 0u8;
+    let mut interface_protocol = 0u8;
+    let mut report_desc_len = 0u16;
 
     while idx + 2 <= config.len() {
         let len = config[idx] as usize;
@@ -1100,9 +1115,13 @@ fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
         match desc_type {
             0x04 => {
                 if len >= 9 {
+                    interface_number = config[idx + 2];
+                    interface_subclass = config[idx + 6];
                     let class = config[idx + 5];
                     let protocol = config[idx + 7];
+                    interface_protocol = protocol;
                     in_hid_interface = class == 0x03;
+                    report_desc_len = 0;
                     report_kind = if in_hid_interface {
                         match protocol {
                             1 => HidReportKind::Keyboard,
@@ -1115,7 +1134,11 @@ fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
                 } else {
                     in_hid_interface = false;
                     report_kind = HidReportKind::Unknown;
+                    report_desc_len = 0;
                 }
+            }
+            0x21 if in_hid_interface && len >= 9 => {
+                report_desc_len = u16::from_le_bytes([config[idx + 7], config[idx + 8]]);
             }
             0x05 if in_hid_interface && len >= 7 => {
                 let ep_addr = config[idx + 2];
@@ -1132,6 +1155,11 @@ fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
                 let dci = endpoint_dci_from_address(ep_addr);
                 let ep_type = endpoint_type_from_descriptor(ep_addr, attrs)?;
                 return Some(HidEndpointConfig {
+                    interface_number,
+                    interface_subclass,
+                    interface_protocol,
+                    report_desc_len,
+                    report_id: 0,
                     ep_addr,
                     dci,
                     ep_type,
@@ -1147,6 +1175,154 @@ fn parse_hid_endpoint_from_config(config: &[u8]) -> Option<HidEndpointConfig> {
     }
 
     None
+}
+
+fn classify_hid_from_report_descriptor(report: &[u8]) -> (HidReportKind, u8) {
+    // HID short item を最小限パースし、Application Collection の usage を見る。
+    let mut i = 0usize;
+    let mut usage_page: u16 = 0;
+    let mut last_usage: u16 = 0;
+    let mut current_report_id: u8 = 0;
+
+    while i < report.len() {
+        let b = report[i];
+        i += 1;
+        if b == 0xFE {
+            if i + 1 >= report.len() {
+                break;
+            }
+            let data_len = report[i] as usize;
+            i = i.saturating_add(2 + data_len);
+            continue;
+        }
+        let size_code = (b & 0x03) as usize;
+        let data_len = if size_code == 3 { 4 } else { size_code };
+        let item_type = (b >> 2) & 0x03;
+        let tag = (b >> 4) & 0x0F;
+        if i + data_len > report.len() {
+            break;
+        }
+        let mut v: u32 = 0;
+        for k in 0..data_len {
+            v |= u32::from(report[i + k]) << (k * 8);
+        }
+        i += data_len;
+
+        match (item_type, tag) {
+            (1, 0x0) => usage_page = v as u16,         // Global: Usage Page
+            (1, 0x8) => current_report_id = v as u8,   // Global: Report ID
+            (2, 0x0) => last_usage = v as u16,         // Local: Usage
+            (0, 0xA) => {
+                // Main: Collection
+                let is_application = (v as u8) == 0x01;
+                if is_application && usage_page == 0x01 {
+                    if last_usage == 0x02 {
+                        return (HidReportKind::Mouse, current_report_id);
+                    }
+                    if last_usage == 0x06 {
+                        return (HidReportKind::Keyboard, current_report_id);
+                    }
+                }
+            }
+            (0, _) => {
+                // Main item で local usage をリセット
+                last_usage = 0;
+            }
+            _ => {}
+        }
+    }
+    (HidReportKind::Unknown, 0)
+}
+
+fn submit_get_hid_report_descriptor(
+    runtime: &mut XhciRuntime,
+    slot_id: u8,
+    config_value: u8,
+    hid_cfg: HidEndpointConfig,
+) -> bool {
+    let length = core::cmp::min(hid_cfg.report_desc_len, PAGE_SIZE as u16);
+    if length == 0 {
+        return false;
+    }
+    submit_control_in_transfer(
+        runtime,
+        slot_id,
+        0x06,
+        (0x22u16 << 8),
+        u16::from(hid_cfg.interface_number),
+        length,
+        PendingTransferKind::HidReportDescriptor {
+            slot_id,
+            config_value,
+            hid_cfg,
+        },
+    )
+}
+
+fn setup_hid_endpoint(
+    runtime: &mut XhciRuntime,
+    slot_id: u8,
+    hid_cfg: HidEndpointConfig,
+    config_value: u8,
+) {
+    if hid_cfg.kind == HidReportKind::Unknown {
+        println!(
+            "[xHCI] skip unknown HID endpoint: slot={} if={} subclass={} protocol={} report_len={}",
+            slot_id,
+            hid_cfg.interface_number,
+            hid_cfg.interface_subclass,
+            hid_cfg.interface_protocol,
+            hid_cfg.report_desc_len
+        );
+        return;
+    }
+
+    let Some(dev_idx) = find_device_index(runtime, slot_id) else {
+        return;
+    };
+
+    let ring = match TransferRing::new() {
+        Ok(r) => r,
+        Err(err) => {
+            println!("[xHCI] HID ring alloc failed: {:#x}", err);
+            return;
+        }
+    };
+    let report_buf = match DmaPage::alloc(PAGE_SIZE) {
+        Ok(p) => p,
+        Err(err) => {
+            println!("[xHCI] HID report buffer alloc failed: {:#x}", err);
+            return;
+        }
+    };
+    let report_len = core::cmp::max(8usize, core::cmp::min(usize::from(hid_cfg.max_packet), 64usize));
+    runtime.devices[dev_idx].hid_ep = Some(HidEndpointState {
+        config: hid_cfg,
+        ring,
+        report_buf,
+        report_len,
+    });
+    println!(
+        "[xHCI] HID endpoint selected: slot={} if={} ep=0x{:02x} dci={} max_packet={} interval={} kind={} report_id={}",
+        slot_id,
+        hid_cfg.interface_number,
+        hid_cfg.ep_addr,
+        hid_cfg.dci,
+        hid_cfg.max_packet,
+        hid_cfg.interval,
+        match hid_cfg.kind {
+            HidReportKind::Keyboard => "keyboard",
+            HidReportKind::Mouse => "mouse",
+            HidReportKind::Unknown => "unknown",
+        },
+        hid_cfg.report_id
+    );
+    if !submit_set_configuration(runtime, slot_id, config_value) {
+        println!(
+            "[xHCI] failed to submit SET_CONFIGURATION: slot={} config={}",
+            slot_id, config_value
+        );
+    }
 }
 
 fn submit_configure_endpoint_command(runtime: &mut XhciRuntime, slot_id: u8) -> bool {
@@ -1367,41 +1543,54 @@ fn handle_transfer_event(
                 return;
             };
             let config_value = config_bytes.get(5).copied().unwrap_or(1);
-
-            let ring = match TransferRing::new() {
-                Ok(r) => r,
-                Err(err) => {
-                    println!("[xHCI] HID ring alloc failed: {:#x}", err);
+            if hid_cfg.kind == HidReportKind::Unknown && hid_cfg.report_desc_len > 0 {
+                if submit_get_hid_report_descriptor(runtime, slot_id, config_value, hid_cfg) {
                     return;
                 }
-            };
-            let report_buf = match DmaPage::alloc(PAGE_SIZE) {
-                Ok(p) => p,
-                Err(err) => {
-                    println!("[xHCI] HID report buffer alloc failed: {:#x}", err);
-                    return;
-                }
-            };
-            let report_len = core::cmp::max(
-                8usize,
-                core::cmp::min(usize::from(hid_cfg.max_packet), 64usize),
-            );
-            runtime.devices[dev_idx].hid_ep = Some(HidEndpointState {
-                config: hid_cfg,
-                ring,
-                report_buf,
-                report_len,
-            });
-            println!(
-                "[xHCI] HID endpoint selected: slot={} ep=0x{:02x} dci={} max_packet={} interval={}",
-                slot_id, hid_cfg.ep_addr, hid_cfg.dci, hid_cfg.max_packet, hid_cfg.interval
-            );
-            if !submit_set_configuration(runtime, slot_id, config_value) {
-                println!(
-                    "[xHCI] failed to submit SET_CONFIGURATION: slot={} config={}",
-                    slot_id, config_value
-                );
             }
+            setup_hid_endpoint(runtime, slot_id, hid_cfg, config_value);
+        }
+        PendingTransferKind::HidReportDescriptor {
+            slot_id,
+            config_value,
+            mut hid_cfg,
+        } => {
+            if !success {
+                println!(
+                    "[xHCI] HID report descriptor transfer failed: slot={} code={}",
+                    slot_id, completion_code
+                );
+                return;
+            }
+            let Some(dev_idx) = find_device_index(runtime, slot_id) else {
+                return;
+            };
+            let read_len = if actual_len == 0 {
+                pending.data_len
+            } else {
+                core::cmp::min(actual_len, pending.data_len)
+            };
+            let report_desc = runtime.devices[dev_idx].descriptor_buf.read_bytes(0, read_len);
+            let (classified, report_id) = classify_hid_from_report_descriptor(&report_desc);
+            if hid_cfg.kind == HidReportKind::Unknown {
+                hid_cfg.kind = classified;
+            }
+            if hid_cfg.report_id == 0 {
+                hid_cfg.report_id = report_id;
+            }
+            println!(
+                "[xHCI] HID report descriptor: slot={} if={} len={} classified={} report_id={}",
+                slot_id,
+                hid_cfg.interface_number,
+                read_len,
+                match hid_cfg.kind {
+                    HidReportKind::Keyboard => "keyboard",
+                    HidReportKind::Mouse => "mouse",
+                    HidReportKind::Unknown => "unknown",
+                },
+                hid_cfg.report_id
+            );
+            setup_hid_endpoint(runtime, slot_id, hid_cfg, config_value);
         }
         PendingTransferKind::SetConfiguration { slot_id } => {
             if !success {
@@ -1427,17 +1616,33 @@ fn handle_transfer_event(
             }
             if success {
                 if let Some(dev_idx) = find_device_index(runtime, slot_id) {
-                    if let Some(hid) = runtime.devices[dev_idx].hid_ep.as_ref() {
-                        let read_len = core::cmp::min(actual_len, hid.report_len);
-                        let report = hid.report_buf.read_bytes(0, read_len);
-                        if !report.is_empty() {
-                            parse_hid_report(
-                                slot_id,
-                                dci,
-                                &report,
+                    let (kind, report_id, report) =
+                        if let Some(hid) = runtime.devices[dev_idx].hid_ep.as_ref() {
+                            let read_len = if actual_len == 0 {
+                                hid.report_len
+                            } else {
+                                core::cmp::min(actual_len, hid.report_len)
+                            };
+                            (
                                 hid.config.kind,
-                                &mut runtime.hid,
-                            );
+                                hid.config.report_id,
+                                hid.report_buf.read_bytes(0, read_len),
+                            )
+                        } else {
+                            (HidReportKind::Unknown, 0, Vec::new())
+                        };
+                    if !report.is_empty() {
+                        let payload: &[u8] = if report_id != 0 {
+                            if report[0] != report_id {
+                                &[]
+                            } else {
+                                &report[1..]
+                            }
+                        } else {
+                            &report
+                        };
+                        if !payload.is_empty() {
+                            parse_hid_report(slot_id, dci, payload, kind, &mut runtime.hid);
                         }
                     }
                 }
@@ -1484,7 +1689,7 @@ fn poll_xhci_events(runtime: &mut XhciRuntime) -> bool {
     let mut handled = false;
     let ir_base = runtime.regs.rt_off + RT_IR0_BASE;
 
-    for _ in 0..64 {
+    for _ in 0..EVENT_DISPATCH_BUDGET {
         let Some(event) = runtime.event_ring.pop_event() else {
             break;
         };

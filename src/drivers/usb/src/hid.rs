@@ -19,10 +19,61 @@ impl Default for HidReportKind {
 pub struct HidParserState {
     prev_keys: [u8; 6],
     prev_modifiers: u8,
-    prev_mouse_buttons: u8,
     warned_kbd_inject: bool,
     warned_mouse_inject: bool,
-    mouse_offset: Option<usize>,
+    mouse_entries: [MouseDecodeEntry; 8],
+}
+
+#[derive(Clone, Copy)]
+struct MouseDecodeEntry {
+    used: bool,
+    slot: u8,
+    ep: u8,
+    prev_buttons: u8,
+}
+
+impl MouseDecodeEntry {
+    const fn new() -> Self {
+        Self {
+            used: false,
+            slot: 0,
+            ep: 0,
+            prev_buttons: 0,
+        }
+    }
+}
+
+impl Default for MouseDecodeEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn mouse_entry_mut(state: &mut HidParserState, slot: u8, ep: u8) -> &mut MouseDecodeEntry {
+    if let Some(idx) = state
+        .mouse_entries
+        .iter()
+        .position(|e| e.used && e.slot == slot && e.ep == ep)
+    {
+        return &mut state.mouse_entries[idx];
+    }
+    if let Some(idx) = state.mouse_entries.iter().position(|e| !e.used) {
+        state.mouse_entries[idx] = MouseDecodeEntry {
+            used: true,
+            slot,
+            ep,
+            prev_buttons: 0,
+        };
+        return &mut state.mouse_entries[idx];
+    }
+    // エントリ枯渇時は先頭を上書き
+    state.mouse_entries[0] = MouseDecodeEntry {
+        used: true,
+        slot,
+        ep,
+        prev_buttons: 0,
+    };
+    &mut state.mouse_entries[0]
 }
 
 #[inline]
@@ -190,89 +241,40 @@ fn parse_hid_keyboard_report(
     true
 }
 
-#[allow(E0061)]
-fn parse_hid_mouse_report(_slot: u8, _ep: u8, report: &[u8], state: &mut HidParserState) -> bool {
+fn parse_hid_mouse_report(
+    slot: u8,
+    ep: u8,
+    report: &[u8],
+    state: &mut HidParserState,
+) -> bool {
     if report.len() < 3 {
         return false;
     }
 
-    // TODO: 将来は HID report descriptor を解析して厳密にボタン/X/Y位置を決定する。
-    // 現状は Report ID 有無を考慮し、offset=0/1 の双方を試す。
-    let mut chosen_offset = None;
-    let mut best_score = i32::MIN;
-    let offsets: [usize; 2] = if let Some(prev) = state.mouse_offset {
-        [prev, prev]
-    } else {
-        [0usize, 1usize]
-    };
-    for offset in offsets {
-        if report.len() < offset + 3 {
-            continue;
-        }
-        let raw_buttons = report[offset];
-        let dx = report[offset + 1] as i8;
-        let dy = report[offset + 2] as i8;
-        let wheel = if report.len() > offset + 3 {
-            report[offset + 3] as i8
-        } else {
-            0
-        };
-        // ボタン上位ビットがゼロに近い形を優先し、変化量のある候補を優先する。
-        let mut score = 0i32;
-        if (raw_buttons & 0xF8) == 0 {
-            score += 4;
-        }
-        // 直前に有効だったオフセットを優先してブレを防ぐ
-        if state.mouse_offset == Some(offset) {
-            score += 3;
-        }
-        if dx != 0 || dy != 0 {
-            score += 3;
-        }
-        // Report ID誤認時の暴走を避けるため、過大な移動量は減点
-        if (dx as i16).abs() > 64 || (dy as i16).abs() > 64 {
-            score -= 2;
-        }
-        if wheel != 0 {
-            score += 1;
-        }
-        if (raw_buttons & 0x07) != state.prev_mouse_buttons {
-            score += 2;
-        }
-        if score > best_score {
-            best_score = score;
-            chosen_offset = Some(offset);
-        }
-    }
-    let Some(offset) = chosen_offset else {
-        return false;
-    };
-    state.mouse_offset = Some(offset);
-    let buttons_idx = offset;
-    let data_idx = offset + 1;
-
-    if report.len() <= data_idx + 1 {
+    let mut inject_errno: Option<i64> = None;
+    let raw_buttons = report[0];
+    if (raw_buttons & 0xE0) != 0 {
         return false;
     }
+    let buttons = raw_buttons & 0x07;
+    let dx = report[1] as i8;
+    let dy = report[2] as i8;
+    let wheel = if report.len() > 3 { report[3] as i8 } else { 0 };
 
-    let buttons = report[buttons_idx] & 0x07;
-    let dx = report[data_idx] as i8;
-    let dy = report[data_idx + 1] as i8;
-    let wheel = if report.len() > data_idx + 2 {
-        report[data_idx + 2] as i8
-    } else {
-        0
-    };
-
-    if dx != 0 || dy != 0 || wheel != 0 || buttons != state.prev_mouse_buttons {
+    let prev_buttons = mouse_entry_mut(state, slot, ep).prev_buttons;
+    let has_change = dx != 0 || dy != 0 || wheel != 0 || buttons != prev_buttons;
+    if has_change {
         if let Err(err) = input::inject_mouse_packet(buttons, dx, dy, wheel) {
-            if !state.warned_mouse_inject {
-                println!("[xHCI] mouse inject failed: errno={}", err as i64);
-                state.warned_mouse_inject = true;
-            }
+            inject_errno = Some(err as i64);
         }
     }
-    state.prev_mouse_buttons = buttons;
+    mouse_entry_mut(state, slot, ep).prev_buttons = buttons;
+    if let Some(errno) = inject_errno {
+        if !state.warned_mouse_inject {
+            println!("[xHCI] mouse inject failed: errno={}", errno);
+            state.warned_mouse_inject = true;
+        }
+    }
     true
 }
 
@@ -294,9 +296,8 @@ pub fn parse_hid_report(
             if parse_hid_keyboard_report(slot, ep, report, state, true) {
                 return;
             }
-            // Unknown デバイスはマウスとして扱わない。
-            // ここでマウスにフォールバックすると、非マウスHIDレポートを
-            // 誤って座標入力に変換しカーソルがランダム移動する。
+            // Unknown はここではマウス扱いしない。
+            // 種別確定は列挙時（descriptor 解析）で行う。
         }
     }
 }
