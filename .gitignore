@@ -29,3 +29,7 @@ rustc-ice-*.txt
 # Pull Request diff and patch files
 *.diff
 *.patch
+
+# Applications
+src/apps/Kagami
+src/apps/Binder
