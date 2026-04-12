@@ -4,3 +4,6 @@
 [submodule "src/apps/Kagami"]
 	path = src/apps/Kagami
 	url = https://github.com/tas0dev/Kagami
+[submodule "src/apps/Binder"]
+	path = src/apps/Binder
+	url = https://github.com/tas0dev/Binder
