@@ -45,8 +45,22 @@ cp "$SRC" "$BOOTX64"
 # kernel.elf
 KERNEL_ELF="$ROOT_DIR/fs/System/kernel.elf"
 if [ ! -f "$KERNEL_ELF" ]; then
-    echo "Warning: kernel.elf not found at $KERNEL_ELF" >&2
-    echo "  Run 'cargo build' first to build the kernel." >&2
+    # fs を手動で消した直後など、build.rs が再実行されないケース向けフォールバック
+    PROFILE="debug"
+    case "$SRC" in
+        */release/*) PROFILE="release" ;;
+    esac
+    FALLBACK_KERNEL="$ROOT_DIR/target/kernel/x86_64-unknown-none/$PROFILE/kernel"
+    if [ -f "$FALLBACK_KERNEL" ]; then
+        mkdir -p "$(dirname "$KERNEL_ELF")"
+        cp "$FALLBACK_KERNEL" "$KERNEL_ELF"
+        echo "kernel.elf restored from $FALLBACK_KERNEL"
+    else
+        echo "Error: kernel.elf not found at $KERNEL_ELF" >&2
+        echo "  Also not found at $FALLBACK_KERNEL" >&2
+        echo "  Run 'cargo build' first to build the kernel." >&2
+        exit 1
+    fi
 fi
 
 # initfs.ext2 -> System/initfs.img
