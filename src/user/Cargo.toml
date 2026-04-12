@@ -9,6 +9,7 @@ edition = "2021"
 default = ["library"]
 library = []
 std-support = []  # When used from std-based binaries; disables the custom panic_handler
+hosted-vga = ["std-support"] # Linuxホスト上のソフトウェアフレームバッファ
 
 [lib]
 name = "swiftlib"

@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(feature = "hosted-vga"), no_std)]
 
 extern crate alloc;
 
@@ -39,6 +39,8 @@ pub mod posix_stubs;
 
 /// フレームバッファアクセス
 pub mod vga;
+/// 描画ラッパー（mochiOS / Linux host 共通）
+pub mod gfx;
 
 /// キーボード入力
 pub mod keyboard;
