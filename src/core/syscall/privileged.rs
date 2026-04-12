@@ -40,6 +40,78 @@ fn is_allowed_phys_page(phys_addr: u64) -> bool {
     (phys_addr & 0xfff) == 0 && crate::mem::frame::is_usable_physical_address(phys_addr)
 }
 
+fn shared_page_limit() -> u64 {
+    crate::mem::frame::get_memory_info()
+        .map(|(_, frames)| (frames as u64).max(128))
+        .unwrap_or(128)
+}
+
+fn map_phys_pages_into_target(
+    target_thread_id: u64,
+    phys_pages: &[u64],
+    virt_addr_hint: u64,
+) -> Result<u64, u64> {
+    if phys_pages.is_empty() || phys_pages.len() as u64 > shared_page_limit() {
+        return Err(EINVAL);
+    }
+    for &phys_addr in phys_pages {
+        if !is_allowed_phys_page(phys_addr) {
+            return Err(EINVAL);
+        }
+    }
+
+    let target_pid = crate::task::thread_to_process_id(target_thread_id).ok_or(EINVAL)?;
+    let page_span = (phys_pages.len() as u64).checked_mul(0x1000).ok_or(EINVAL)?;
+    let (virt_addr, page_table, reserved_heap_old, reserved_heap_new) = if virt_addr_hint != 0 {
+        if virt_addr_hint & 0xfff != 0 {
+            return Err(EINVAL);
+        }
+        let pt = crate::task::with_process(target_pid, |p| p.page_table())
+            .flatten()
+            .ok_or(EINVAL)?;
+        (virt_addr_hint, pt, None, None)
+    } else {
+        let (virt_addr, pt, old_end, new_end) = crate::task::with_process_mut(target_pid, |p| {
+            let base = if p.heap_end() == 0 {
+                0x6000_0000_0000u64
+            } else {
+                p.heap_end()
+            };
+            let virt_addr = base
+                .checked_add(0xfff)
+                .map(|v| v & !0xfffu64)
+                .ok_or(EINVAL)?;
+            let new_end = virt_addr.checked_add(page_span).ok_or(EINVAL)?;
+            let pt = p.page_table().ok_or(EINVAL)?;
+            let old_end = p.heap_end();
+            p.set_heap_end(new_end);
+            Ok::<(u64, u64, u64, u64), u64>((virt_addr, pt, old_end, new_end))
+        })
+        .ok_or(EINVAL)??;
+        (virt_addr, pt, Some(old_end), Some(new_end))
+    };
+
+    for (i, &phys_addr) in phys_pages.iter().enumerate() {
+        let target_virt = virt_addr + (i as u64 * 0x1000);
+        if crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, true).is_err() {
+            for j in 0..i {
+                let rollback_virt = virt_addr + (j as u64 * 0x1000);
+                let _ = crate::mem::paging::unmap_page_in_table(page_table, rollback_virt);
+            }
+            if let (Some(old_end), Some(new_end)) = (reserved_heap_old, reserved_heap_new) {
+                let _ = crate::task::with_process_mut(target_pid, |p| {
+                    if p.heap_end() == new_end {
+                        p.set_heap_end(old_end);
+                    }
+                });
+            }
+            return Err(EFAULT);
+        }
+    }
+
+    Ok(virt_addr)
+}
+
 /// 物理ページ配列をターゲットプロセスのアドレス空間にマップ
 ///
 /// # Arguments
@@ -63,7 +135,7 @@ pub fn map_physical_pages(
     }
 
     // パラメータ検証
-    if page_count == 0 || page_count > 128 {
+    if page_count == 0 || page_count > shared_page_limit() {
         return EINVAL;
     }
     if phys_pages_ptr == 0 {
@@ -79,82 +151,10 @@ pub fn map_physical_pages(
         return e;
     }
 
-    for &phys_addr in phys_pages.iter() {
-        if !is_allowed_phys_page(phys_addr) {
-            return EINVAL;
-        }
+    match map_phys_pages_into_target(target_thread_id, &phys_pages, virt_addr_hint) {
+        Ok(v) => v,
+        Err(e) => e,
     }
-
-    // ターゲットプロセスのページテーブルを取得
-    let target_pid = match crate::task::thread_to_process_id(target_thread_id) {
-        Some(pid) => pid,
-        None => return EINVAL,
-    };
-
-    let page_span = match page_count.checked_mul(0x1000) {
-        Some(v) => v,
-        None => return EINVAL,
-    };
-
-    // 仮想アドレス決定（ヒントがあればそれを使用、なければ自動割り当て）
-    let (virt_addr, page_table, reserved_heap_old, reserved_heap_new) = if virt_addr_hint != 0 {
-        // アライメントチェック
-        if virt_addr_hint & 0xfff != 0 {
-            return EINVAL;
-        }
-        let pt = match crate::task::with_process(target_pid, |p| p.page_table()) {
-            Some(Some(v)) => v,
-            _ => return EINVAL,
-        };
-        (virt_addr_hint, pt, None, None)
-    } else {
-        // 自動割り当て: map_physical_pages は「他プロセスへの共有マップ」向けに
-        // 0x6000_0000_0000 帯を使用する。
-        match crate::task::with_process_mut(target_pid, |p| {
-            let base = if p.heap_end() == 0 {
-                0x6000_0000_0000u64
-            } else {
-                p.heap_end()
-            };
-            let virt_addr = base
-                .checked_add(0xfff)
-                .map(|v| v & !0xfffu64)
-                .ok_or(EINVAL)?;
-            let new_end = virt_addr.checked_add(page_span).ok_or(EINVAL)?;
-            let pt = p.page_table().ok_or(EINVAL)?;
-            let old_end = p.heap_end();
-            p.set_heap_end(new_end);
-            Ok((virt_addr, pt, old_end, new_end))
-        }) {
-            Some(Ok(v)) => (v.0, v.1, Some(v.2), Some(v.3)),
-            Some(Err(e)) => return e,
-            None => return EINVAL,
-        }
-    };
-
-    // 各物理ページをマップ
-    for (i, &phys_addr) in phys_pages.iter().enumerate() {
-        let target_virt = virt_addr + (i as u64 * 0x1000);
-        if let Err(_) =
-            crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, true)
-        {
-            // マップ失敗時はロールバック（既にマップしたページをアンマップ）
-            for j in 0..i {
-                let rollback_virt = virt_addr + (j as u64 * 0x1000);
-                let _ = crate::mem::paging::unmap_page_in_table(page_table, rollback_virt);
-            }
-            if let (Some(old_end), Some(new_end)) = (reserved_heap_old, reserved_heap_new) {
-                let _ = crate::task::with_process_mut(target_pid, |p| {
-                    if p.heap_end() == new_end {
-                        p.set_heap_end(old_end);
-                    }
-                });
-            }
-            return EFAULT;
-        }
-    }
-
-    virt_addr
 }
 
 /// 仮想アドレスから物理アドレスを取得（Service権限強化版）
@@ -226,7 +226,7 @@ pub fn alloc_shared_pages(
     }
 
     // パラメータ検証
-    if page_count == 0 || page_count > 128 {
+    if page_count == 0 || page_count > shared_page_limit() {
         return EINVAL;
     }
     if phys_addrs_out != 0 && phys_addrs_len < page_count {
@@ -378,7 +378,7 @@ pub fn unmap_pages(virt_addr: u64, page_count: u64, deallocate: u64) -> u64 {
     }
 
     // パラメータ検証
-    if page_count == 0 || page_count > 128 {
+    if page_count == 0 || page_count > shared_page_limit() {
         return EINVAL;
     }
     if virt_addr & 0xfff != 0 {
@@ -468,7 +468,7 @@ pub fn ipc_send_pages(
     if dest_thread_id == 0 {
         return EINVAL;
     }
-    if page_count == 0 || page_count > 128 {
+    if page_count == 0 || page_count > shared_page_limit() {
         return EINVAL;
     }
     if phys_pages_ptr == 0 {
@@ -484,15 +484,12 @@ pub fn ipc_send_pages(
         return e;
     }
 
-    for &phys in phys_pages.iter() {
-        if !is_allowed_phys_page(phys) {
-            return EINVAL;
-        }
-    }
-
-    // IPC経由で物理ページリストを送信
+    let mapped_addr = match map_phys_pages_into_target(dest_thread_id, &phys_pages, map_start) {
+        Ok(addr) => addr,
+        Err(e) => return e,
+    };
     let total_bytes = page_count * 0x1000;
-    if super::ipc::send_pages_from_kernel(dest_thread_id, map_start, total_bytes, &phys_pages) {
+    if super::ipc::send_map_header_from_kernel(dest_thread_id, mapped_addr, total_bytes) {
         0
     } else {
         super::types::EAGAIN

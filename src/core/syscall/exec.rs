@@ -900,15 +900,17 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
 fn resolve_exec_privilege(process_name: &str, exec_path: &str) -> crate::task::PrivilegeLevel {
     // .service は従来通り Service 権限で実行。
     // Binaries/drivers 配下は Service/Core 呼び出し元からの起動時に Service 権限を付与する。
-    // Kagami / ViewKit は共有サーフェス描画のため Service 権限を付与する。
+    // Kagami / ViewKit / Binder はデスクトップ描画のため Service 権限を付与する。
     let is_driver_path =
         exec_path.starts_with("Binaries/drivers/") || exec_path.starts_with("/Binaries/drivers/");
     let is_kagami_viewkit_path = matches!(
         exec_path,
         "/Applications/Kagami.app/entry.elf"
             | "/Applications/ViewKit.app/entry.elf"
+            | "/Applications/Binder.app/entry.elf"
             | "Applications/Kagami.app/entry.elf"
             | "Applications/ViewKit.app/entry.elf"
+            | "Applications/Binder.app/entry.elf"
     );
     if process_name.ends_with(".service")
         || is_kagami_viewkit_path
