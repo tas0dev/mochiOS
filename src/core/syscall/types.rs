@@ -6,6 +6,8 @@ pub enum SyscallNumber {
     Read = 0,
     /// 書き込み
     Write = 1,
+    /// ベクタ読み込み
+    Readv = 19,
     /// ベクタ書き込み
     Writev = 20,
     /// ファイルを開く
@@ -16,6 +18,8 @@ pub enum SyscallNumber {
     Stat = 4,
     /// ファイル情報取得
     Fstat = 5,
+    /// poll
+    Poll = 7,
     /// ファイルシーク
     Lseek = 8,
     /// メモリマップ
@@ -78,6 +82,8 @@ pub enum SyscallNumber {
     Ioctl = 16,
     /// access
     Access = 21,
+    /// select
+    Select = 23,
     /// getuid
     Getuid = 102,
     /// getgid
@@ -120,6 +126,10 @@ pub enum SyscallNumber {
     Newfstatat = 262,
     /// faccessat
     Faccessat = 269,
+    /// pselect6
+    Pselect6 = 270,
+    /// ppoll
+    Ppoll = 271,
     /// set_robust_list
     SetRobustList = 273,
     /// readlinkat

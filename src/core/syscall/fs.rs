@@ -440,7 +440,29 @@ fn resolve_path(pid_raw: u64, path: &str) -> String {
 const FS_SERVICE_RETRY_COUNT: usize = 3;
 const FS_SERVICE_RETRY_MS: u64 = 10;
 
+fn make_tty_handle() -> alloc::boxed::Box<FileHandle> {
+    alloc::boxed::Box::new(FileHandle {
+        data: alloc::boxed::Box::new([]),
+        pos: 0,
+        dir_path: Some("/dev/tty".to_string()),
+        is_remote: false,
+        fd_remote: 0,
+        remote_refs: None,
+        pipe_id: None,
+        pipe_write: false,
+    })
+}
+
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
+    if path == "/dev/tty" || path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr"
+    {
+        let cloexec = (flags & O_CLOEXEC) != 0;
+        return match with_fd_table_mut(owner_pid, |t| t.alloc(make_tty_handle(), cloexec)) {
+            Some(Some(fd)) => fd as u64,
+            _ => ENOSYS,
+        };
+    }
+
     // カーネル内で管理する FD_CLOEXEC は fs.service へ渡さない。
     let backend_flags = flags & !O_CLOEXEC;
     let mut last_err = 0u64;
@@ -1000,8 +1022,14 @@ pub fn fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
 /// Dup システムコール: FD を複製して最小の空き番号に割り当てる
 pub fn dup(fd: u64) -> u64 {
     if fd < FD_BASE as u64 {
-        // stdin/stdout/stderr の複製は対応しない（スタブ: EBADF）
-        return EBADF;
+        let pid = match current_process_id_raw() {
+            Some(p) => p,
+            None => return EBADF,
+        };
+        return match with_fd_table_mut(pid, |t| t.alloc(make_tty_handle(), false)) {
+            Some(Some(new_fd)) => new_fd as u64,
+            _ => ENOSYS,
+        };
     }
     let idx = fd as usize;
     if idx >= PROCESS_MAX_FDS {
@@ -1058,34 +1086,37 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
         };
     }
 
-    let old_idx = old_fd as usize;
-    if old_idx >= PROCESS_MAX_FDS {
-        return EBADF;
-    }
     let new_idx = new_fd as usize;
     let pid = match current_process_id_raw() {
         Some(p) => p,
         None => return EBADF,
     };
 
-    // old_fd のクローンを作成
-    let cloned = with_fd_table(pid, |t| {
-        t.get(old_idx).map(|fh| {
-            alloc::boxed::Box::new(FileHandle {
-                data: fh.data.clone(),
-                pos: fh.pos,
-                dir_path: fh.dir_path.clone(),
-                is_remote: fh.is_remote,
-                fd_remote: fh.fd_remote,
-                remote_refs: fh.clone_remote_refs(),
-                pipe_id: fh.pipe_id,
-                pipe_write: fh.pipe_write,
+    let new_handle = if old_fd < FD_BASE as u64 {
+        make_tty_handle()
+    } else {
+        let old_idx = old_fd as usize;
+        if old_idx >= PROCESS_MAX_FDS {
+            return EBADF;
+        }
+        let cloned = with_fd_table(pid, |t| {
+            t.get(old_idx).map(|fh| {
+                alloc::boxed::Box::new(FileHandle {
+                    data: fh.data.clone(),
+                    pos: fh.pos,
+                    dir_path: fh.dir_path.clone(),
+                    is_remote: fh.is_remote,
+                    fd_remote: fh.fd_remote,
+                    remote_refs: fh.clone_remote_refs(),
+                    pipe_id: fh.pipe_id,
+                    pipe_write: fh.pipe_write,
+                })
             })
-        })
-    });
-    let new_handle = match cloned {
-        Some(Some(h)) => h,
-        _ => return EBADF,
+        });
+        match cloned {
+            Some(Some(h)) => h,
+            _ => return EBADF,
+        }
     };
 
     // new_fd が使用中なら閉じる

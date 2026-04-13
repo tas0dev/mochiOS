@@ -189,8 +189,10 @@ use x86_64::structures::idt::InterruptStackFrame;
 pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     match num {
         x if x == SyscallNumber::Read as u64 => io::read(arg0, arg1, arg2),
+        x if x == SyscallNumber::Readv as u64 => io::readv(arg0, arg1, arg2),
         x if x == SyscallNumber::Write as u64 => io::write(arg0, arg1, arg2),
         x if x == SyscallNumber::Writev as u64 => io::writev(arg0, arg1, arg2),
+        x if x == SyscallNumber::Poll as u64 => pgroup::poll(arg0, arg1, arg2),
         x if x == SyscallNumber::Open as u64 => fs::open(arg0, arg1),
         x if x == SyscallNumber::Close as u64 => fs::close(arg0),
         x if x == SyscallNumber::Stat as u64 => fs::stat(arg0, arg1),
@@ -314,6 +316,7 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Getsid as u64 => pgroup::getsid(arg0),
         x if x == SyscallNumber::Ioctl as u64 => pgroup::ioctl(arg0, arg1, arg2),
         x if x == SyscallNumber::Access as u64 => pgroup::access(arg0, arg1),
+        x if x == SyscallNumber::Select as u64 => pgroup::pselect6(arg0, arg1, arg2, arg3, arg4, 0),
         x if x == SyscallNumber::Getuid as u64 => pgroup::getuid(),
         x if x == SyscallNumber::Getgid as u64 => pgroup::getgid(),
         x if x == SyscallNumber::Geteuid as u64 => pgroup::geteuid(),
@@ -336,6 +339,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Getdents64 as u64 => fs::getdents64(arg0, arg1, arg2),
         x if x == SyscallNumber::Newfstatat as u64 => fs::newfstatat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Faccessat as u64 => fs::faccessat(arg0 as i64, arg1, arg2, arg3),
+        x if x == SyscallNumber::Pselect6 as u64 => pgroup::pselect6(arg0, arg1, arg2, arg3, arg4, 0),
+        x if x == SyscallNumber::Ppoll as u64 => pgroup::ppoll(arg0, arg1, arg2, arg3, arg4),
         x if x == SyscallNumber::Readlinkat as u64 => fs::readlinkat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Getrandom as u64 => process::getrandom(arg0, arg1, arg2),
         x if x == SyscallNumber::MapPhysicalPages as u64 => {

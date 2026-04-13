@@ -196,6 +196,16 @@ fn feed_from_scancode_queue_nonblocking() {
     }
 }
 
+pub fn has_pending_input() -> bool {
+    feed_from_scancode_queue_nonblocking();
+    !INPUT_QUEUE.is_empty()
+}
+
+pub fn pending_input_len() -> usize {
+    feed_from_scancode_queue_nonblocking();
+    INPUT_QUEUE.len()
+}
+
 fn next_input_byte_blocking() -> u8 {
     loop {
         if let Some(b) = INPUT_QUEUE.pop() {

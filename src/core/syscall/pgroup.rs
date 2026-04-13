@@ -1,6 +1,101 @@
 //! プロセスグループ・セッション関連のシステムコール
 
-use super::types::{EINVAL, EPERM, ESRCH, SUCCESS};
+use super::types::{EFAULT, EINVAL, EPERM, ESRCH, SUCCESS};
+use crate::task::fd_table::FD_BASE;
+
+const POLLIN: u16 = 0x0001;
+const POLLOUT: u16 = 0x0004;
+const POLLRDNORM: u16 = 0x0040;
+const POLLWRNORM: u16 = 0x0100;
+
+fn stdin_ready() -> bool {
+    crate::syscall::tty::has_pending_input()
+}
+
+fn is_tty_fd(fd: i32) -> bool {
+    if fd < 0 {
+        return false;
+    }
+    if fd <= 2 {
+        return true;
+    }
+    if (fd as u64) < FD_BASE as u64 {
+        return false;
+    }
+    let pid = match current_pid() {
+        Some(p) => p,
+        None => return false,
+    };
+    crate::task::with_process(pid, |p| {
+        p.fd_table()
+            .get(fd as usize)
+            .is_some_and(|fh| fh.dir_path.as_deref() == Some("/dev/tty"))
+    })
+    .unwrap_or(false)
+}
+
+fn stdin_ready_for_fd(fd: i32) -> bool {
+    is_tty_fd(fd) && stdin_ready()
+}
+
+fn stdout_ready(fd: i32) -> bool {
+    is_tty_fd(fd)
+}
+
+fn wait_until_ready_or_timeout(mut timeout_ms: i64, mut ready_fn: impl FnMut() -> bool) -> bool {
+    if ready_fn() {
+        return true;
+    }
+    if timeout_ms == 0 {
+        return false;
+    }
+    if timeout_ms < 0 {
+        loop {
+            if ready_fn() {
+                return true;
+            }
+            crate::task::yield_now();
+        }
+    }
+    while timeout_ms > 0 {
+        crate::syscall::process::sleep(1);
+        if ready_fn() {
+            return true;
+        }
+        timeout_ms -= 1;
+    }
+    false
+}
+
+fn fdset_len_bytes(nfds: u64) -> Option<u64> {
+    let words = nfds.checked_add(63)?.checked_div(64)?;
+    words.checked_mul(8)
+}
+
+fn fdset_test(ptr: u64, fd: u64) -> bool {
+    let word_off = (fd / 64) * 8;
+    let bit = (fd % 64) as u32;
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let w = core::ptr::read_unaligned((ptr + word_off) as *const u64);
+        (w & (1u64 << bit)) != 0
+    })
+}
+
+fn fdset_clear_all(ptr: u64, len: u64) {
+    crate::syscall::with_user_memory_access(|| unsafe {
+        core::ptr::write_bytes(ptr as *mut u8, 0, len as usize);
+    });
+}
+
+fn fdset_set(ptr: u64, fd: u64) {
+    let word_off = (fd / 64) * 8;
+    let bit = (fd % 64) as u32;
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let p = (ptr + word_off) as *mut u64;
+        let v = core::ptr::read_unaligned(p as *const u64);
+        core::ptr::write_unaligned(p, v | (1u64 << bit));
+    });
+}
 
 #[inline]
 fn current_pid() -> Option<crate::task::ids::ProcessId> {
@@ -123,6 +218,7 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
     const TCSETSW: u64 = 0x5403;
     const TCSETSF: u64 = 0x5404;
     const TIOCSWINSZ: u64 = 0x5414;
+    const FIONREAD: u64 = 0x541b;
 
     match request {
         TIOCGPGRP => {
@@ -145,8 +241,208 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
         TIOCSWINSZ => crate::syscall::tty::set_winsize(arg),
         TCGETS => crate::syscall::tty::tcgets(arg),
         TCSETS | TCSETSW | TCSETSF => crate::syscall::tty::tcsets(arg),
+        FIONREAD => {
+            if arg == 0 || !crate::syscall::validate_user_ptr(arg, 4) {
+                return EINVAL;
+            }
+            let n = crate::syscall::tty::pending_input_len() as u32;
+            crate::syscall::with_user_memory_access(|| unsafe {
+                core::ptr::write_unaligned(arg as *mut u32, n);
+            });
+            SUCCESS
+        }
         _ => EINVAL,
     }
+}
+
+/// poll システムコール（最小実装）
+///
+/// TTY fd の read/write readiness を返す。
+pub fn poll(fds_ptr: u64, nfds: u64, timeout_arg: u64) -> u64 {
+    const POLLFD_SIZE: u64 = 8; // i32 fd, i16 events, i16 revents
+    if nfds == 0 {
+        return 0;
+    }
+    let total = match nfds.checked_mul(POLLFD_SIZE) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if fds_ptr == 0 || !crate::syscall::validate_user_ptr(fds_ptr, total) {
+        return EFAULT;
+    }
+    let timeout_ms = i64::from_ne_bytes(timeout_arg.to_ne_bytes());
+
+    let mut eval_ready = || -> u64 {
+        let mut ready_count = 0u64;
+        for i in 0..nfds {
+            let base = fds_ptr + i * POLLFD_SIZE;
+            let (fd, events) = crate::syscall::with_user_memory_access(|| unsafe {
+                let fd = core::ptr::read_unaligned(base as *const i32);
+                let events = core::ptr::read_unaligned((base + 4) as *const u16);
+                (fd, events)
+            });
+            let mut revents: u16 = 0;
+            if fd >= 0 {
+                if (events & (POLLIN | POLLRDNORM)) != 0 && stdin_ready_for_fd(fd) {
+                    revents |= POLLIN;
+                }
+                if (events & (POLLOUT | POLLWRNORM)) != 0 && stdout_ready(fd) {
+                    revents |= POLLOUT;
+                }
+            }
+            crate::syscall::with_user_memory_access(|| unsafe {
+                core::ptr::write_unaligned((base + 6) as *mut u16, revents);
+            });
+            if revents != 0 {
+                ready_count += 1;
+            }
+        }
+        ready_count
+    };
+
+    let initial = eval_ready();
+    if initial > 0 {
+        return initial;
+    }
+    let woke = wait_until_ready_or_timeout(timeout_ms, || eval_ready() > 0);
+    if !woke {
+        return 0;
+    }
+    eval_ready()
+}
+
+/// ppoll システムコール（最小実装）
+///
+/// timeout は timespec*。sigmask/sigsetsize は現状未使用。
+pub fn ppoll(fds_ptr: u64, nfds: u64, timeout_ptr: u64, _sigmask_ptr: u64, _sigsetsize: u64) -> u64 {
+    let timeout_ms_u64 = if timeout_ptr == 0 {
+        u64::MAX
+    } else {
+        if !crate::syscall::validate_user_ptr(timeout_ptr, 16) {
+            return EFAULT;
+        }
+        let (sec, nsec) = crate::syscall::with_user_memory_access(|| unsafe {
+            let sec = core::ptr::read_unaligned(timeout_ptr as *const i64);
+            let nsec = core::ptr::read_unaligned((timeout_ptr + 8) as *const i64);
+            (sec, nsec)
+        });
+        if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+            return EINVAL;
+        }
+        (sec as u64)
+            .saturating_mul(1000)
+            .saturating_add((nsec as u64) / 1_000_000)
+    };
+    poll(fds_ptr, nfds, timeout_ms_u64)
+}
+
+/// pselect6/select システムコール（最小実装）
+///
+/// readfds/writefds のうち TTY fd の readiness を判定する。
+pub fn pselect6(
+    nfds: u64,
+    readfds_ptr: u64,
+    writefds_ptr: u64,
+    _exceptfds_ptr: u64,
+    timeout_ptr: u64,
+    _sigmask_ptr: u64,
+) -> u64 {
+    let mut timeout_ms = -1i64;
+    if timeout_ptr != 0 {
+        if !crate::syscall::validate_user_ptr(timeout_ptr, 16) {
+            return EFAULT;
+        }
+        let (sec, nsec) = crate::syscall::with_user_memory_access(|| unsafe {
+            let sec = core::ptr::read_unaligned(timeout_ptr as *const i64);
+            let nsec = core::ptr::read_unaligned((timeout_ptr + 8) as *const i64);
+            (sec, nsec)
+        });
+        if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+            return EINVAL;
+        }
+        timeout_ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
+    }
+
+    let set_len = match fdset_len_bytes(nfds) {
+        Some(v) => v,
+        None => return EINVAL,
+    };
+    if readfds_ptr != 0 && !crate::syscall::validate_user_ptr(readfds_ptr, set_len) {
+        return EFAULT;
+    }
+    if writefds_ptr != 0 && !crate::syscall::validate_user_ptr(writefds_ptr, set_len) {
+        return EFAULT;
+    }
+
+    let read_interest = if readfds_ptr != 0 {
+        let mut v: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        for fd in 0..nfds {
+            if fdset_test(readfds_ptr, fd) {
+                v.push(fd);
+            }
+        }
+        v
+    } else {
+        alloc::vec::Vec::new()
+    };
+    let write_interest = if writefds_ptr != 0 {
+        let mut v: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        for fd in 0..nfds {
+            if fdset_test(writefds_ptr, fd) {
+                v.push(fd);
+            }
+        }
+        v
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    let mut eval_ready = || -> u64 {
+        let mut ready_count = 0u64;
+        if readfds_ptr != 0 {
+            let mut ready_fds: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+            for &fd in &read_interest {
+                if stdin_ready_for_fd(fd as i32) {
+                    ready_fds.push(fd);
+                }
+            }
+            fdset_clear_all(readfds_ptr, set_len);
+            for fd in ready_fds {
+                fdset_set(readfds_ptr, fd);
+                ready_count += 1;
+            }
+        }
+        if writefds_ptr != 0 {
+            let mut ready_fds: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+            for &fd in &write_interest {
+                if stdout_ready(fd as i32) {
+                    ready_fds.push(fd);
+                }
+            }
+            fdset_clear_all(writefds_ptr, set_len);
+            for fd in ready_fds {
+                fdset_set(writefds_ptr, fd);
+                ready_count += 1;
+            }
+        }
+        ready_count
+    };
+
+    let initial = eval_ready();
+    if initial > 0 {
+        return initial;
+    }
+    let woke = wait_until_ready_or_timeout(timeout_ms, || eval_ready() > 0);
+    if !woke {
+        if readfds_ptr != 0 {
+            fdset_clear_all(readfds_ptr, set_len);
+        }
+        if writefds_ptr != 0 {
+            fdset_clear_all(writefds_ptr, set_len);
+        }
+        return 0;
+    }
+    eval_ready()
 }
 
 /// access システムコール（ファイルアクセス可能性チェック）
