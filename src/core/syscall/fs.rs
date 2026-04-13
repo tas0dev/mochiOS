@@ -447,11 +447,25 @@ const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 
-fn make_tty_handle() -> alloc::boxed::Box<FileHandle> {
+pub(crate) fn is_tty_like_path(path: &str) -> bool {
+    path == "/dev/tty"
+        || path == "/dev/console"
+        || path == "/dev/stdin"
+        || path == "/dev/stdout"
+        || path == "/dev/stderr"
+        || path.starts_with("/dev/pts/")
+}
+
+fn make_tty_handle(path: &str) -> alloc::boxed::Box<FileHandle> {
+    let tty_path = if is_tty_like_path(path) {
+        path
+    } else {
+        "/dev/tty"
+    };
     alloc::boxed::Box::new(FileHandle {
         data: alloc::boxed::Box::new([]),
         pos: 0,
-        dir_path: Some("/dev/tty".to_string()),
+        dir_path: Some(tty_path.to_string()),
         is_remote: false,
         fd_remote: 0,
         remote_refs: None,
@@ -467,10 +481,9 @@ fn has_write_intent(flags: u64) -> bool {
 }
 
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
-    if path == "/dev/tty" || path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr"
-    {
+    if is_tty_like_path(path) {
         let cloexec = (flags & O_CLOEXEC) != 0;
-        return match with_fd_table_mut(owner_pid, |t| t.alloc(make_tty_handle(), cloexec)) {
+        return match with_fd_table_mut(owner_pid, |t| t.alloc(make_tty_handle(path), cloexec)) {
             Some(Some(fd)) => fd as u64,
             _ => ENOSYS,
         };
@@ -1211,7 +1224,7 @@ pub fn dup(fd: u64) -> u64 {
             Some(p) => p,
             None => return EBADF,
         };
-        return match with_fd_table_mut(pid, |t| t.alloc(make_tty_handle(), false)) {
+        return match with_fd_table_mut(pid, |t| t.alloc(make_tty_handle("/dev/tty"), false)) {
             Some(Some(new_fd)) => new_fd as u64,
             _ => ENOSYS,
         };
@@ -1279,7 +1292,7 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
     };
 
     let new_handle = if old_fd < FD_BASE as u64 {
-        make_tty_handle()
+        make_tty_handle("/dev/tty")
     } else {
         let old_idx = old_fd as usize;
         if old_idx >= PROCESS_MAX_FDS {

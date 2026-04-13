@@ -29,7 +29,7 @@ fn is_tty_fd(fd: i32) -> bool {
     crate::task::with_process(pid, |p| {
         p.fd_table()
             .get(fd as usize)
-            .is_some_and(|fh| fh.dir_path.as_deref() == Some("/dev/tty"))
+            .is_some_and(|fh| crate::syscall::fs::is_tty_like_path(fh.dir_path.as_deref().unwrap_or("")))
     })
     .unwrap_or(false)
 }

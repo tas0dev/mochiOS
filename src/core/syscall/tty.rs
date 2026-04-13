@@ -9,9 +9,12 @@ const TERMIOS_SIZE: u64 = 36;
 const TERMIO_SIZE: u64 = 18;
 const WIN_SIZE: u64 = 8;
 
+const IFLAG_ICRNL: u32 = 0x0100;
 const LFLAG_ISIG: u32 = 0x0001;
 const LFLAG_ICANON: u32 = 0x0002;
 const LFLAG_ECHO: u32 = 0x0008;
+const CC_VTIME: usize = 5;
+const CC_VMIN: usize = 6;
 
 const SC_LSHIFT: u8 = 0x2A;
 const SC_RSHIFT: u8 = 0x36;
@@ -162,7 +165,7 @@ fn decode_scancode_into_queue(sc: u8) {
             return;
         }
         SC_ENTER => {
-            let _ = INPUT_QUEUE.push(b'\n');
+            let _ = INPUT_QUEUE.push(b'\r');
             return;
         }
         SC_TAB => {
@@ -218,6 +221,41 @@ fn next_input_byte_blocking() -> u8 {
         }
         let sc = crate::syscall::keyboard::read_char_blocking();
         decode_scancode_into_queue(sc);
+    }
+}
+
+fn next_input_byte_nonblocking() -> Option<u8> {
+    if let Some(b) = INPUT_QUEUE.pop() {
+        return Some(b);
+    }
+    feed_from_scancode_queue_nonblocking();
+    INPUT_QUEUE.pop()
+}
+
+fn next_input_byte_timeout(timeout_ms: u64) -> Option<u8> {
+    if let Some(b) = next_input_byte_nonblocking() {
+        return Some(b);
+    }
+    if timeout_ms == 0 {
+        return None;
+    }
+    let mut remain = timeout_ms;
+    while remain > 0 {
+        crate::syscall::process::sleep(1);
+        if let Some(b) = next_input_byte_nonblocking() {
+            return Some(b);
+        }
+        remain -= 1;
+    }
+    None
+}
+
+#[inline]
+fn normalize_input_byte(b: u8, iflag: u32) -> u8 {
+    if b == b'\r' && (iflag & IFLAG_ICRNL) != 0 {
+        b'\n'
+    } else {
+        b
     }
 }
 
@@ -362,24 +400,67 @@ pub fn read_stdin(buf_ptr: u64, len: u64) -> u64 {
         return EFAULT;
     }
 
-    let canonical = (TTY_STATE.lock().lflag & LFLAG_ICANON) != 0;
+    let state = *TTY_STATE.lock();
+    let canonical = (state.lflag & LFLAG_ICANON) != 0;
+    let iflag = state.iflag;
+    let vmin = state.cc[CC_VMIN] as usize;
+    let vtime_ds = state.cc[CC_VTIME] as u64;
+    let vtime_ms = vtime_ds.saturating_mul(100);
     let mut out = alloc::vec::Vec::with_capacity(len as usize);
-    let first = next_input_byte_blocking();
-    out.push(first);
-
     if canonical {
+        let first = normalize_input_byte(next_input_byte_blocking(), iflag);
+        out.push(first);
         while (out.len() as u64) < len {
             if out.last().copied() == Some(b'\n') {
                 break;
             }
-            out.push(next_input_byte_blocking());
+            let b = normalize_input_byte(next_input_byte_blocking(), iflag);
+            out.push(b);
         }
     } else {
-        feed_from_scancode_queue_nonblocking();
-        while (out.len() as u64) < len {
-            match INPUT_QUEUE.pop() {
-                Some(b) => out.push(b),
-                None => break,
+        // 対話アプリで ESC が次キー待ちになるのを避けるため、
+        // 非canonical時の最小読み取りは 1 バイトを上限に扱う。
+        let eff_vmin = if vmin == 0 { 0 } else { 1 };
+        let target_min = core::cmp::min(eff_vmin, len as usize);
+        if vmin == 0 && vtime_ds == 0 {
+            while (out.len() as u64) < len {
+                match next_input_byte_nonblocking() {
+                    Some(b) => out.push(normalize_input_byte(b, iflag)),
+                    None => break,
+                }
+            }
+        } else if eff_vmin == 0 {
+            if let Some(first) = next_input_byte_timeout(vtime_ms) {
+                out.push(normalize_input_byte(first, iflag));
+                while (out.len() as u64) < len {
+                    match next_input_byte_nonblocking() {
+                        Some(b) => out.push(normalize_input_byte(b, iflag)),
+                        None => break,
+                    }
+                }
+            } else {
+                return 0;
+            }
+        } else if vtime_ds == 0 {
+            while out.len() < target_min {
+                out.push(normalize_input_byte(next_input_byte_blocking(), iflag));
+            }
+            while (out.len() as u64) < len {
+                match next_input_byte_nonblocking() {
+                    Some(b) => out.push(normalize_input_byte(b, iflag)),
+                    None => break,
+                }
+            }
+        } else {
+            out.push(normalize_input_byte(next_input_byte_blocking(), iflag));
+            while (out.len() as u64) < len {
+                if out.len() >= target_min {
+                    break;
+                }
+                match next_input_byte_timeout(vtime_ms) {
+                    Some(b) => out.push(normalize_input_byte(b, iflag)),
+                    None => break,
+                }
             }
         }
     }

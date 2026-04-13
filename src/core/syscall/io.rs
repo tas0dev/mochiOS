@@ -11,6 +11,14 @@ const STDERR_FD: u64 = 2;
 const IOVEC_SIZE: u64 = 16;
 const IOV_MAX: u64 = 1024;
 
+#[inline]
+fn is_tty_path(path: Option<&str>) -> bool {
+    match path {
+        Some(p) => crate::syscall::fs::is_tty_like_path(p),
+        None => false,
+    }
+}
+
 /// 現在のプロセスの親プロセスのメインスレッドIDを返す
 fn get_parent_thread_id() -> Option<u64> {
     let tid = crate::task::current_thread_id()?;
@@ -252,7 +260,7 @@ fn write_fd(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             (
                 fh.pipe_id,
                 fh.pipe_write,
-                fh.dir_path.as_deref() == Some("/dev/tty"),
+                is_tty_path(fh.dir_path.as_deref()),
             )
         })
     })
@@ -320,7 +328,7 @@ fn read_fd(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             (
                 fh.pipe_id,
                 fh.pipe_write,
-                fh.dir_path.as_deref() == Some("/dev/tty"),
+                is_tty_path(fh.dir_path.as_deref()),
             )
         })
     })
