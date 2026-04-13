@@ -441,10 +441,12 @@ const FS_SERVICE_RETRY_COUNT: usize = 3;
 const FS_SERVICE_RETRY_MS: u64 = 10;
 
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
+    // カーネル内で管理する FD_CLOEXEC は fs.service へ渡さない。
+    let backend_flags = flags & !O_CLOEXEC;
     let mut last_err = 0u64;
     let mut opened = None;
     for _ in 0..FS_SERVICE_RETRY_COUNT {
-        match open_via_fs_service(path, flags) {
+        match open_via_fs_service(path, backend_flags) {
             Ok(remote_fd) => {
                 opened = Some(remote_fd);
                 break;
@@ -1250,6 +1252,95 @@ pub fn faccessat(dirfd: i64, path_ptr: u64, _mode: u64, _flags: u64) -> u64 {
         }
         Err(errno) => errno,
     }
+}
+
+/// statfs システムコール（最小実装）
+///
+/// Linux x86_64 の `struct statfs` (120 bytes) を埋めて返す。
+pub fn statfs(path_ptr: u64, buf_ptr: u64) -> u64 {
+    const STATFS_SIZE: u64 = 120;
+    if path_ptr == 0 || buf_ptr == 0 {
+        return EINVAL;
+    }
+    if !crate::syscall::validate_user_ptr(buf_ptr, STATFS_SIZE) {
+        return EFAULT;
+    }
+
+    let pid = match current_process_id_raw() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+    let path = match read_cstring(path_ptr) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let resolved = resolve_path(pid, &path);
+    if stat_path_via_fs_service(&resolved).is_err() && fallback_file_metadata(&resolved).is_none() {
+        return ENOENT;
+    }
+
+    // struct statfs {
+    //   long f_type, f_bsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree;
+    //   fsid_t f_fsid; long f_namelen, f_frsize, f_flags, f_spare[4];
+    // }
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let p = buf_ptr as *mut u64;
+        core::ptr::write_bytes(buf_ptr as *mut u8, 0, STATFS_SIZE as usize);
+        core::ptr::write_unaligned(p.add(0), 0xEF53); // ext2 magic
+        core::ptr::write_unaligned(p.add(1), 4096); // f_bsize
+        core::ptr::write_unaligned(p.add(8), 255); // f_namelen
+        core::ptr::write_unaligned(p.add(9), 4096); // f_frsize
+    });
+    SUCCESS
+}
+
+/// readlinkat システムコール（最小実装）
+///
+/// `/proc/self/exe` と `/proc/self/cwd` のみをサポートする。
+pub fn readlinkat(dirfd: i64, path_ptr: u64, buf_ptr: u64, buf_len: u64) -> u64 {
+    const AT_FDCWD: i64 = -100;
+    if path_ptr == 0 || buf_ptr == 0 || buf_len == 0 {
+        return EINVAL;
+    }
+    if !crate::syscall::validate_user_ptr(buf_ptr, buf_len) {
+        return EFAULT;
+    }
+    let raw = match read_cstring(path_ptr) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let path = if raw.starts_with('/') || dirfd == AT_FDCWD {
+        normalize_path(&raw)
+    } else {
+        // 最小実装: dirfd 相対は未対応
+        return EBADF;
+    };
+
+    let pid = match current_process_id_raw() {
+        Some(p) => crate::task::ids::ProcessId::from_u64(p),
+        None => return EBADF,
+    };
+    let target = if path == "/proc/self/exe" {
+        match crate::task::with_process(pid, |p| String::from(p.name())) {
+            Some(name) if name.starts_with('/') => name,
+            Some(name) => alloc::format!("/{}", name),
+            None => return ESRCH,
+        }
+    } else if path == "/proc/self/cwd" {
+        match crate::task::with_process(pid, |p| String::from(p.cwd())) {
+            Some(cwd) => cwd,
+            None => return ESRCH,
+        }
+    } else {
+        return ENOENT;
+    };
+
+    let bytes = target.as_bytes();
+    let copy_len = core::cmp::min(bytes.len(), buf_len as usize);
+    if let Err(errno) = crate::syscall::copy_to_user(buf_ptr, &bytes[..copy_len]) {
+        return errno;
+    }
+    copy_len as u64
 }
 
 /// Getdents64 システムコール

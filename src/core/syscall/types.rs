@@ -62,6 +62,10 @@ pub enum SyscallNumber {
     Getcwd = 79,
     /// getppid
     GetPpid = 110,
+    /// sigaltstack
+    Sigaltstack = 131,
+    /// statfs
+    Statfs = 137,
     /// setpgid
     Setpgid = 109,
     /// getpgid
@@ -116,8 +120,12 @@ pub enum SyscallNumber {
     Newfstatat = 262,
     /// faccessat
     Faccessat = 269,
+    /// set_robust_list
+    SetRobustList = 273,
     /// readlinkat
     Readlinkat = 267,
+    /// getrandom
+    Getrandom = 318,
 
     // mochiOS独自syscall (Linux未使用番号帯: 512+)
     /// スケジューラへ譲る

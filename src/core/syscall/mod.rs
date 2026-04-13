@@ -203,6 +203,8 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Kill as u64 => signal::kill(arg0, arg1),
         x if x == SyscallNumber::Tkill as u64 => signal::tkill(arg0, arg1),
         x if x == SyscallNumber::Tgkill as u64 => signal::tgkill(arg0, arg1, arg2),
+        x if x == SyscallNumber::Sigaltstack as u64 => process::sigaltstack(arg0, arg1),
+        x if x == SyscallNumber::Statfs as u64 => fs::statfs(arg0, arg1),
         x if x == SyscallNumber::GetPid as u64 => process::getpid(),
         x if x == SyscallNumber::Clone as u64 => process::fork(),
         x if x == SyscallNumber::Fork as u64 => process::fork(),
@@ -327,12 +329,14 @@ pub fn dispatch(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64)
         x if x == SyscallNumber::Getrlimit as u64 => pgroup::getrlimit(arg0, arg1),
         x if x == SyscallNumber::SetTidAddress as u64 => pgroup::set_tid_address(arg0),
         x if x == SyscallNumber::Prlimit64 as u64 => pgroup::prlimit64(arg0, arg1, arg2, arg3),
+        x if x == SyscallNumber::SetRobustList as u64 => process::set_robust_list(arg0, arg1),
         x if x == SyscallNumber::Pipe2 as u64 => pipe::pipe2_syscall(arg0, arg1),
         x if x == SyscallNumber::Openat as u64 => fs::openat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Getdents64 as u64 => fs::getdents64(arg0, arg1, arg2),
         x if x == SyscallNumber::Newfstatat as u64 => fs::newfstatat(arg0 as i64, arg1, arg2, arg3),
         x if x == SyscallNumber::Faccessat as u64 => fs::faccessat(arg0 as i64, arg1, arg2, arg3),
-        x if x == SyscallNumber::Readlinkat as u64 => types::EINVAL,
+        x if x == SyscallNumber::Readlinkat as u64 => fs::readlinkat(arg0 as i64, arg1, arg2, arg3),
+        x if x == SyscallNumber::Getrandom as u64 => process::getrandom(arg0, arg1, arg2),
         x if x == SyscallNumber::MapPhysicalPages as u64 => {
             privileged::map_physical_pages(arg0, arg1, arg2, arg3)
         }
@@ -483,11 +487,61 @@ extern "C" fn syscall_handler_rust(
 ) -> u64 {
     crate::percpu::install_current_cpu_gs_base();
     let current_tid = crate::task::current_thread_id();
+    let fs_base_for_trace = current_tid
+        .and_then(|tid| crate::task::with_thread(tid, |t| t.fs_base()))
+        .unwrap_or(0);
+    let trace_vim = current_tid
+        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
+        .and_then(|pid| crate::task::with_process(pid, |p| String::from(p.name())))
+        .is_some_and(|name| name.ends_with("vim.elf"));
+    let canary_before = if trace_vim && fs_base_for_trace >= 0x1000 {
+        let addr = fs_base_for_trace.saturating_add(0x28);
+        if validate_user_ptr(addr, 8) {
+            Some(with_user_memory_access(|| unsafe {
+                core::ptr::read_unaligned(addr as *const u64)
+            }))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let prev_cr3 = syscall_entry::switch_to_kernel_page_table();
     if let Some(tid) = current_tid {
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(true));
     }
+    if trace_vim {
+        crate::info!(
+            "vim syscall: num={}, a0={:#x}, a1={:#x}, a2={:#x}, a3={:#x}, a4={:#x}",
+            num,
+            arg0,
+            arg1,
+            arg2,
+            arg3,
+            arg4
+        );
+    }
     let ret = dispatch(num, arg0, arg1, arg2, arg3, arg4);
+    if trace_vim {
+        crate::info!("vim syscall ret: num={}, ret={:#x}", num, ret);
+        if fs_base_for_trace >= 0x1000 {
+            let addr = fs_base_for_trace.saturating_add(0x28);
+            if validate_user_ptr(addr, 8) {
+                let canary_after = with_user_memory_access(|| unsafe {
+                    core::ptr::read_unaligned(addr as *const u64)
+                });
+                if canary_before.is_some_and(|before| before != canary_after) {
+                    crate::warn!(
+                        "vim canary changed: fs={:#x} before={:#x} after={:#x} syscall={}",
+                        fs_base_for_trace,
+                        canary_before.unwrap_or(0),
+                        canary_after,
+                        num
+                    );
+                }
+            }
+        }
+    }
     if let Some(tid) = current_tid {
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(false));
     }

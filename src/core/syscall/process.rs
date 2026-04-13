@@ -828,6 +828,45 @@ pub fn arch_prctl(code: u64, addr: u64) -> u64 {
     }
 }
 
+/// sigaltstack システムコール（最小実装）
+///
+/// 互換目的で成功を返す。現状 alt stack の切り替えは行わない。
+pub fn sigaltstack(_ss: u64, _old_ss: u64) -> u64 {
+    SUCCESS
+}
+
+/// set_robust_list システムコール（最小実装）
+///
+/// glibc 初期化互換のため成功を返す。
+pub fn set_robust_list(_head: u64, _len: u64) -> u64 {
+    SUCCESS
+}
+
+/// getrandom システムコール（最小実装）
+///
+/// カーネル内の軽量PRNGでバイト列を生成して返す。
+pub fn getrandom(buf_ptr: u64, len: u64, _flags: u64) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    if buf_ptr == 0 || !super::validate_user_ptr(buf_ptr, len) {
+        return EFAULT;
+    }
+    let mut state = crate::syscall::time::get_ticks()
+        ^ buf_ptr.rotate_left(17)
+        ^ len.rotate_left(7)
+        ^ 0x9E37_79B9_7F4A_7C15;
+    crate::syscall::with_user_memory_access(|| unsafe {
+        for i in 0..len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            core::ptr::write((buf_ptr + i) as *mut u8, (state >> 24) as u8);
+        }
+    });
+    len
+}
+
 /// FindProcessByNameシステムコール
 ///
 /// プロセス名から、IPC送信先として使えるスレッドIDを検索する
