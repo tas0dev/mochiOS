@@ -15,6 +15,7 @@ pub mod process;
 pub mod signal;
 pub mod syscall_entry;
 pub mod task;
+pub mod tty;
 pub mod time;
 pub mod vga;
 
@@ -487,25 +488,6 @@ extern "C" fn syscall_handler_rust(
 ) -> u64 {
     crate::percpu::install_current_cpu_gs_base();
     let current_tid = crate::task::current_thread_id();
-    let fs_base_for_trace = current_tid
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.fs_base()))
-        .unwrap_or(0);
-    let trace_vim = current_tid
-        .and_then(|tid| crate::task::with_thread(tid, |t| t.process_id()))
-        .and_then(|pid| crate::task::with_process(pid, |p| String::from(p.name())))
-        .is_some_and(|name| name.ends_with("vim.elf"));
-    let canary_before = if trace_vim && fs_base_for_trace >= 0x1000 {
-        let addr = fs_base_for_trace.saturating_add(0x28);
-        if validate_user_ptr(addr, 8) {
-            Some(with_user_memory_access(|| unsafe {
-                core::ptr::read_unaligned(addr as *const u64)
-            }))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     let prev_cr3 = syscall_entry::switch_to_kernel_page_table();
     if let Some(tid) = current_tid {
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(true));

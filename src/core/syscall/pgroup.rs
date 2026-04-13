@@ -140,39 +140,11 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
         }
         TIOCSPGRP => SUCCESS,
         TIOCGWINSZ => {
-            // struct winsize: { ws_row(u16), ws_col(u16), ws_xpixel(u16), ws_ypixel(u16) }
-            if arg == 0 || !crate::syscall::validate_user_ptr(arg, 8) {
-                return EINVAL;
-            }
-            crate::syscall::with_user_memory_access(|| unsafe {
-                let buf = core::slice::from_raw_parts_mut(arg as *mut u8, 8);
-                buf.fill(0);
-                buf[0..2].copy_from_slice(&24u16.to_ne_bytes()); // ws_row
-                buf[2..4].copy_from_slice(&80u16.to_ne_bytes()); // ws_col
-            });
-            SUCCESS
+            crate::syscall::tty::get_winsize(arg)
         }
-        TIOCSWINSZ => SUCCESS,
-        TCGETS => {
-            // 最小互換: カーネル termios 相当の先頭 36 バイトのみを書き込む。
-            // ここを過大に書くと、呼び出し側のスタック上バッファを破壊し得る。
-            // レイアウト: c_iflag/c_oflag/c_cflag/c_lflag(各4) + c_line(1) + c_cc[19](19) = 36
-            const TERMIOS_SIZE: u64 = 36;
-            if arg == 0 || !crate::syscall::validate_user_ptr(arg, TERMIOS_SIZE) {
-                return EINVAL;
-            }
-            crate::syscall::with_user_memory_access(|| unsafe {
-                let buf = core::slice::from_raw_parts_mut(arg as *mut u8, TERMIOS_SIZE as usize);
-                buf.fill(0);
-                // c_cflag: CS8(0x30) | CREAD(0x80) | CLOCAL(0x800)
-                let cflag: u32 = 0x30 | 0x80 | 0x800;
-                buf[8..12].copy_from_slice(&cflag.to_ne_bytes());
-                // c_cc[VMIN]=1, c_cc[VTIME]=0
-                buf[17] = 1;
-            });
-            SUCCESS
-        }
-        TCSETS | TCSETSW | TCSETSF => SUCCESS, // termios 設定は無視して成功
+        TIOCSWINSZ => crate::syscall::tty::set_winsize(arg),
+        TCGETS => crate::syscall::tty::tcgets(arg),
+        TCSETS | TCSETSW | TCSETSF => crate::syscall::tty::tcsets(arg),
         _ => EINVAL,
     }
 }

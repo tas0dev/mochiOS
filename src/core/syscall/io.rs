@@ -222,31 +222,7 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     }
 
     if fd == 0 {
-        if !super::validate_user_ptr(buf_ptr, len) {
-            return EFAULT;
-        }
-
-        // 少なくとも1バイト届くまでブロックする
-        let first = crate::syscall::keyboard::read_char_blocking();
-        crate::syscall::with_user_memory_access(|| unsafe {
-            (buf_ptr as *mut u8).write(first);
-        });
-
-        // バッファに残っているスキャンコードを len-1 バイトまで追加で読む（ノンブロッキング）
-        let mut read_count: u64 = 1;
-        while read_count < len {
-            match crate::util::ps2kbd::pop_scancode() {
-                Some(sc) => {
-                    crate::syscall::with_user_memory_access(|| unsafe {
-                        (buf_ptr as *mut u8).add(read_count as usize).write(sc);
-                    });
-                    read_count += 1;
-                }
-                None => break,
-            }
-        }
-
-        return read_count;
+        return crate::syscall::tty::read_stdin(buf_ptr, len);
     }
 
     if fd >= 3 {
