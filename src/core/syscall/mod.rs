@@ -510,38 +510,9 @@ extern "C" fn syscall_handler_rust(
     if let Some(tid) = current_tid {
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(true));
     }
-    if trace_vim {
-        crate::info!(
-            "vim syscall: num={}, a0={:#x}, a1={:#x}, a2={:#x}, a3={:#x}, a4={:#x}",
-            num,
-            arg0,
-            arg1,
-            arg2,
-            arg3,
-            arg4
-        );
-    }
+
     let ret = dispatch(num, arg0, arg1, arg2, arg3, arg4);
-    if trace_vim {
-        crate::info!("vim syscall ret: num={}, ret={:#x}", num, ret);
-        if fs_base_for_trace >= 0x1000 {
-            let addr = fs_base_for_trace.saturating_add(0x28);
-            if validate_user_ptr(addr, 8) {
-                let canary_after = with_user_memory_access(|| unsafe {
-                    core::ptr::read_unaligned(addr as *const u64)
-                });
-                if canary_before.is_some_and(|before| before != canary_after) {
-                    crate::warn!(
-                        "vim canary changed: fs={:#x} before={:#x} after={:#x} syscall={}",
-                        fs_base_for_trace,
-                        canary_before.unwrap_or(0),
-                        canary_after,
-                        num
-                    );
-                }
-            }
-        }
-    }
+
     if let Some(tid) = current_tid {
         crate::task::with_thread_mut(tid, |t| t.set_in_syscall(false));
     }
