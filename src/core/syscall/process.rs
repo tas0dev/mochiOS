@@ -777,6 +777,28 @@ pub fn arch_prctl(code: u64, addr: u64) -> u64 {
             if addr > USER_SPACE_END {
                 return EINVAL;
             }
+            // glibc の起動シーケンスでは FS を切り替える最中に stack protector が
+            // 動くことがあるため、旧FS上のガード値を新FSへ引き継ぐ。
+            // （mapped かつユーザー範囲内の場合のみ）
+            let old_fs = if let Some(tid) = current_thread_id() {
+                crate::task::with_thread(tid, |t| t.fs_base()).unwrap_or(0)
+            } else {
+                unsafe { crate::cpu::read_fs_base() }
+            };
+            if old_fs >= 0x1000 && addr >= 0x1000 && old_fs != addr {
+                for off in [0x28u64, 0x30u64] {
+                    let src = old_fs.saturating_add(off);
+                    let dst = addr.saturating_add(off);
+                    if super::validate_user_ptr(src, 8) && super::validate_user_ptr(dst, 8) {
+                        let val = crate::syscall::with_user_memory_access(|| unsafe {
+                            core::ptr::read_unaligned(src as *const u64)
+                        });
+                        crate::syscall::with_user_memory_access(|| unsafe {
+                            core::ptr::write_unaligned(dst as *mut u64, val)
+                        });
+                    }
+                }
+            }
             // FS ベースレジスタを設定 (WRFSBASE または IA32_FS_BASE MSR)
             unsafe {
                 crate::cpu::write_fs_base(addr);

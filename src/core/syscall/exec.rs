@@ -1102,11 +1102,13 @@ fn exec_with_data(
         let mut phdr_vaddr: u64 = 0;
         let mut phentsize: u64 = 0;
         let mut phnum: u64 = 0;
+        let mut elf_osabi: u8 = 0;
         if let Some(eh) = elf_loader::parse_elf_header(data) {
             if eh.e_machine != EM_X86_64 {
                 crate::warn!("ELF e_machine {:#x} is not x86-64, rejecting", eh.e_machine);
                 return crate::syscall::types::EINVAL;
             }
+            elf_osabi = eh.e_ident[7];
             phentsize = eh.e_phentsize as u64;
             phnum = eh.e_phnum as u64;
             let phoff = eh.e_phoff as usize;
@@ -1519,9 +1521,15 @@ fn exec_with_data(
             proc.set_heap_start(default_heap_base);
             proc.set_heap_end(default_heap_base + heap_map_size);
         }
-        let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
-            Ok(base) => base,
-            Err(errno) => return errno,
+        // Linux/glibc バイナリは起動直後に自前で TLS/FS を初期化するため、
+        // 先行して FS を非ゼロにすると stack canary が不整合になり得る。
+        let initial_fs_base = if elf_osabi == 3 {
+            0
+        } else {
+            match map_initial_tls(new_pt_phys, aslr_seed) {
+                Ok(base) => base,
+                Err(errno) => return errno,
+            }
         };
         let pid = proc.id();
         let is_core_service = process_name.ends_with("core.service");
@@ -1701,12 +1709,14 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     let mut phdr_vaddr: u64 = 0;
     let mut phentsize: u64 = 0;
     let mut phnum: u64 = 0;
+    let mut elf_osabi: u8 = 0;
     if let Some(eh) = crate::elf::loader::parse_elf_header(data) {
         // ELFアーキテクチャ検証 (MED-07)
         if eh.e_machine != EM_X86_64 {
             crate::warn!("execve: ELF e_machine {:#x} is not x86-64", eh.e_machine);
             return EINVAL;
         }
+        elf_osabi = eh.e_ident[7];
         phentsize = eh.e_phentsize as u64;
         phnum = eh.e_phnum as u64;
         let phoff = eh.e_phoff as usize;
@@ -1871,9 +1881,13 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
     {
         return EINVAL;
     }
-    let initial_fs_base = match map_initial_tls(new_pt_phys, aslr_seed) {
-        Ok(base) => base,
-        Err(errno) => return errno,
+    let initial_fs_base = if elf_osabi == 3 {
+        0
+    } else {
+        match map_initial_tls(new_pt_phys, aslr_seed) {
+            Ok(base) => base,
+            Err(errno) => return errno,
+        }
     };
 
     // 現在のプロセスのページテーブルとヒープを更新
