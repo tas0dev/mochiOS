@@ -6,6 +6,7 @@ use crate::interrupt::spinlock::SpinLock;
 use crate::syscall::{copy_to_user, EFAULT, EINVAL, SUCCESS};
 
 const TERMIOS_SIZE: u64 = 36;
+const TERMIO_SIZE: u64 = 18;
 const WIN_SIZE: u64 = 8;
 
 const LFLAG_ISIG: u32 = 0x0001;
@@ -262,6 +263,55 @@ pub fn tcsets(arg: u64) -> u64 {
     state.lflag = lflag;
     state.line = line;
     state.cc = cc;
+    SUCCESS
+}
+
+pub fn tcgeta(arg: u64) -> u64 {
+    if arg == 0 || !crate::syscall::validate_user_ptr(arg, TERMIO_SIZE) {
+        return EINVAL;
+    }
+    let state = *TTY_STATE.lock();
+    crate::syscall::with_user_memory_access(|| unsafe {
+        let buf = core::slice::from_raw_parts_mut(arg as *mut u8, TERMIO_SIZE as usize);
+        buf.fill(0);
+        let iflag = (state.iflag & 0xFFFF) as u16;
+        let oflag = (state.oflag & 0xFFFF) as u16;
+        let cflag = (state.cflag & 0xFFFF) as u16;
+        let lflag = (state.lflag & 0xFFFF) as u16;
+        buf[0..2].copy_from_slice(&iflag.to_ne_bytes());
+        buf[2..4].copy_from_slice(&oflag.to_ne_bytes());
+        buf[4..6].copy_from_slice(&cflag.to_ne_bytes());
+        buf[6..8].copy_from_slice(&lflag.to_ne_bytes());
+        buf[8] = state.line;
+        buf[9..18].copy_from_slice(&state.cc[..9]);
+    });
+    SUCCESS
+}
+
+pub fn tcseta(arg: u64) -> u64 {
+    if arg == 0 || !crate::syscall::validate_user_ptr(arg, TERMIO_SIZE) {
+        return EINVAL;
+    }
+    let (iflag, oflag, cflag, lflag, line, cc9) = crate::syscall::with_user_memory_access(|| unsafe {
+        let p = arg as *const u8;
+        let iflag = u16::from_ne_bytes([*p.add(0), *p.add(1)]) as u32;
+        let oflag = u16::from_ne_bytes([*p.add(2), *p.add(3)]) as u32;
+        let cflag = u16::from_ne_bytes([*p.add(4), *p.add(5)]) as u32;
+        let lflag = u16::from_ne_bytes([*p.add(6), *p.add(7)]) as u32;
+        let line = *p.add(8);
+        let mut cc9 = [0u8; 9];
+        for (i, v) in cc9.iter_mut().enumerate() {
+            *v = *p.add(9 + i);
+        }
+        (iflag, oflag, cflag, lflag, line, cc9)
+    });
+    let mut state = TTY_STATE.lock();
+    state.iflag = iflag;
+    state.oflag = oflag;
+    state.cflag = cflag;
+    state.lflag = lflag;
+    state.line = line;
+    state.cc[..9].copy_from_slice(&cc9);
     SUCCESS
 }
 

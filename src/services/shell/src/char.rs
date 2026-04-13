@@ -432,10 +432,32 @@ pub struct Terminal {
     env: Vec<(String, String)>,
     ansi_esc_pending: bool,
     ansi_csi_mode: bool,
+    ansi_osc_mode: bool,
+    ansi_osc_esc_pending: bool,
     ansi_seq: [u8; ANSI_MAX_SEQ_LEN],
     ansi_seq_len: usize,
+    ansi_saved_col: u32,
+    ansi_saved_row: u32,
+    cells: Vec<Cell>,
     // コマンドパスキャッシュ（最大16エントリ）
     cmd_cache: Vec<(String, String)>, // (cmd_name, full_path)
+}
+
+#[derive(Clone, Copy)]
+struct Cell {
+    ch: u8,
+    fg: u32,
+    bg: u32,
+}
+
+impl Cell {
+    const fn blank() -> Self {
+        Self {
+            ch: b' ',
+            fg: DEFAULT_FG,
+            bg: DEFAULT_BG,
+        }
+    }
 }
 
 #[allow(unused)]
@@ -541,8 +563,13 @@ impl Terminal {
             env,
             ansi_esc_pending: false,
             ansi_csi_mode: false,
+            ansi_osc_mode: false,
+            ansi_osc_esc_pending: false,
             ansi_seq: [0; ANSI_MAX_SEQ_LEN],
             ansi_seq_len: 0,
+            ansi_saved_col: 0,
+            ansi_saved_row: 0,
+            cells: vec![Cell::blank(); (max_cols as usize).saturating_mul(max_rows as usize)],
             cmd_cache: Vec::new(),
         };
         term.load_env_file();
@@ -617,7 +644,14 @@ impl Terminal {
         }
     }
 
-    fn draw_char(&self, ch: u8, col: u32, row: u32) {
+    fn cell_index(&self, col: u32, row: u32) -> Option<usize> {
+        if col >= self.max_cols || row >= self.max_rows {
+            return None;
+        }
+        Some((row as usize) * (self.max_cols as usize) + (col as usize))
+    }
+
+    fn draw_char_pixels(&self, ch: u8, col: u32, row: u32, fg: u32, bg: u32) {
         let glyph = *self.font.glyph(ch);
         let x0 = col * FONT_WIDTH as u32;
         let y0 = row * FONT_HEIGHT as u32;
@@ -627,8 +661,31 @@ impl Terminal {
             if x0 + FONT_WIDTH as u32 > self.width { break; }
             for c in 0..FONT_WIDTH {
                 let on = (bits >> (7 - c)) & 1 != 0;
-                let color = if on { self.fg } else { self.bg };
+                let color = if on { fg } else { bg };
                 self.put_pixel(x0 + c as u32, y, color);
+            }
+        }
+    }
+
+    fn set_cell(&mut self, col: u32, row: u32, cell: Cell) {
+        if let Some(idx) = self.cell_index(col, row) {
+            self.cells[idx] = cell;
+            self.draw_char_pixels(cell.ch, col, row, cell.fg, cell.bg);
+        }
+    }
+
+    fn get_cell(&self, col: u32, row: u32) -> Cell {
+        match self.cell_index(col, row) {
+            Some(idx) => self.cells[idx],
+            None => Cell::blank(),
+        }
+    }
+
+    fn redraw_from_cells(&self) {
+        for row in 0..self.max_rows {
+            for col in 0..self.max_cols {
+                let c = self.get_cell(col, row);
+                self.draw_char_pixels(c.ch, col, row, c.fg, c.bg);
             }
         }
     }
@@ -640,26 +697,33 @@ impl Terminal {
                 self.fb_ptr.add(i).write_volatile(0);
             }
         }
+        for cell in &mut self.cells {
+            *cell = Cell::blank();
+        }
         self.col = 0;
         self.row = 0;
     }
 
     fn scroll_up(&mut self) {
-        let row_pixels = (FONT_HEIGHT as u32 * self.stride) as usize;
-        let total_pixels = (self.height * self.stride) as usize;
-        let copy_pixels = total_pixels.saturating_sub(row_pixels);
-        for i in 0..copy_pixels {
-            let v = unsafe { self.fb_ptr.add(i + row_pixels).read_volatile() };
-            unsafe {
-                self.fb_ptr.add(i).write_volatile(v);
+        if self.max_rows == 0 || self.max_cols == 0 {
+            return;
+        }
+        for row in 1..self.max_rows {
+            for col in 0..self.max_cols {
+                let c = self.get_cell(col, row);
+                if let Some(idx) = self.cell_index(col, row - 1) {
+                    self.cells[idx] = c;
+                }
             }
         }
-        for i in copy_pixels..total_pixels {
-            unsafe {
-                self.fb_ptr.add(i).write_volatile(0);
+        let last_row = self.max_rows - 1;
+        for col in 0..self.max_cols {
+            if let Some(idx) = self.cell_index(col, last_row) {
+                self.cells[idx] = Cell::blank();
             }
         }
-        self.row = self.max_rows - 1;
+        self.redraw_from_cells();
+        self.row = last_row;
     }
 
     /// 互換性のために残す（シャドウバッファ廃止により no-op）
@@ -677,17 +741,51 @@ impl Terminal {
         match byte {
             b'\n' => self.new_line(),
             b'\r' => { self.col = 0; }
+            b'\t' => {
+                let next_tab = ((self.col / 8) + 1) * 8;
+                while self.col < core::cmp::min(next_tab, self.max_cols) {
+                    self.set_cell(
+                        self.col,
+                        self.row,
+                        Cell {
+                            ch: b' ',
+                            fg: self.fg,
+                            bg: self.bg,
+                        },
+                    );
+                    self.col += 1;
+                }
+            }
             0x08 => { // Backspace
                 if self.col > 0 {
                     self.col -= 1;
-                    self.draw_char(b' ', self.col, self.row);
+                    self.set_cell(
+                        self.col,
+                        self.row,
+                        Cell {
+                            ch: b' ',
+                            fg: self.fg,
+                            bg: self.bg,
+                        },
+                    );
                 }
             }
             _ => {
+                if !(0x20..=0x7E).contains(&byte) {
+                    return;
+                }
                 if self.col >= self.max_cols {
                     self.new_line();
                 }
-                self.draw_char(byte, self.col, self.row);
+                self.set_cell(
+                    self.col,
+                    self.row,
+                    Cell {
+                        ch: byte,
+                        fg: self.fg,
+                        bg: self.bg,
+                    },
+                );
                 self.col += 1;
             }
         }
@@ -777,6 +875,8 @@ impl Terminal {
     fn reset_ansi_parser(&mut self) {
         self.ansi_esc_pending = false;
         self.ansi_csi_mode = false;
+        self.ansi_osc_mode = false;
+        self.ansi_osc_esc_pending = false;
         self.ansi_seq_len = 0;
     }
 
@@ -798,11 +898,19 @@ impl Terminal {
         params
     }
 
-    fn erase_cell(&self, col: u32, row: u32) {
-        self.draw_char(b' ', col, row);
+    fn erase_cell(&mut self, col: u32, row: u32) {
+        self.set_cell(
+            col,
+            row,
+            Cell {
+                ch: b' ',
+                fg: self.fg,
+                bg: self.bg,
+            },
+        );
     }
 
-    fn erase_line_range(&self, row: u32, start_col: u32, end_col: u32) {
+    fn erase_line_range(&mut self, row: u32, start_col: u32, end_col: u32) {
         if row >= self.max_rows {
             return;
         }
@@ -814,7 +922,7 @@ impl Terminal {
         }
     }
 
-    fn erase_screen_range(&self, start_row: u32, start_col: u32, end_row: u32, end_col: u32) {
+    fn erase_screen_range(&mut self, start_row: u32, start_col: u32, end_row: u32, end_col: u32) {
         if self.max_rows == 0 || self.max_cols == 0 {
             return;
         }
@@ -829,6 +937,97 @@ impl Terminal {
             self.erase_line_range(row, col_begin, col_end);
             row += 1;
         }
+    }
+
+    fn insert_blank_chars(&mut self, mut count: u32) {
+        if self.row >= self.max_rows || self.col >= self.max_cols || count == 0 {
+            return;
+        }
+        count = core::cmp::min(count, self.max_cols - self.col);
+        let row = self.row;
+        let start = self.col;
+        let end = self.max_cols;
+        let mut c = end;
+        while c > start + count {
+            let src = c - count - 1;
+            let dst = c - 1;
+            let moved = self.get_cell(src, row);
+            self.set_cell(dst, row, moved);
+            c -= 1;
+        }
+        self.erase_line_range(row, start, start + count);
+    }
+
+    fn delete_chars(&mut self, mut count: u32) {
+        if self.row >= self.max_rows || self.col >= self.max_cols || count == 0 {
+            return;
+        }
+        count = core::cmp::min(count, self.max_cols - self.col);
+        let row = self.row;
+        let start = self.col;
+        let end = self.max_cols;
+        let mut c = start;
+        while c + count < end {
+            let src_cell = self.get_cell(c + count, row);
+            self.set_cell(c, row, src_cell);
+            c += 1;
+        }
+        self.erase_line_range(row, end - count, end);
+    }
+
+    fn insert_blank_lines(&mut self, mut count: u32) {
+        if self.row >= self.max_rows || count == 0 {
+            return;
+        }
+        count = core::cmp::min(count, self.max_rows - self.row);
+        let start = self.row;
+        let end = self.max_rows;
+        let mut r = end;
+        while r > start + count {
+            let src = r - count - 1;
+            let dst = r - 1;
+            for col in 0..self.max_cols {
+                let c = self.get_cell(col, src);
+                self.set_cell(col, dst, c);
+            }
+            r -= 1;
+        }
+        for rr in start..start + count {
+            self.erase_line_range(rr, 0, self.max_cols);
+        }
+    }
+
+    fn delete_lines(&mut self, mut count: u32) {
+        if self.row >= self.max_rows || count == 0 {
+            return;
+        }
+        count = core::cmp::min(count, self.max_rows - self.row);
+        let start = self.row;
+        let end = self.max_rows;
+        let mut r = start;
+        while r + count < end {
+            let src = r + count;
+            for col in 0..self.max_cols {
+                let c = self.get_cell(col, src);
+                self.set_cell(col, r, c);
+            }
+            r += 1;
+        }
+        for rr in end - count..end {
+            self.erase_line_range(rr, 0, self.max_cols);
+        }
+    }
+
+    fn erase_chars(&mut self, mut count: u32) {
+        if self.row >= self.max_rows || self.col >= self.max_cols || count == 0 {
+            return;
+        }
+        count = core::cmp::min(count, self.max_cols - self.col);
+        self.erase_line_range(self.row, self.col, self.col + count);
+    }
+
+    fn read_cell(&self, col: u32, row: u32) -> u8 {
+        self.get_cell(col, row).ch
     }
 
     fn handle_csi_sequence(&mut self, final_byte: u8) {
@@ -858,11 +1057,32 @@ impl Terminal {
                 let n = p(0, 1) as u32;
                 self.col = self.col.saturating_sub(n);
             }
+            b'E' => {
+                let n = p(0, 1) as u32;
+                self.row = core::cmp::min(
+                    self.row.saturating_add(n),
+                    self.max_rows.saturating_sub(1),
+                );
+                self.col = 0;
+            }
+            b'F' => {
+                let n = p(0, 1) as u32;
+                self.row = self.row.saturating_sub(n);
+                self.col = 0;
+            }
             b'H' | b'f' => {
                 let row = p(0, 1).saturating_sub(1) as u32;
                 let col = p(1, 1).saturating_sub(1) as u32;
                 self.row = core::cmp::min(row, self.max_rows.saturating_sub(1));
                 self.col = core::cmp::min(col, self.max_cols.saturating_sub(1));
+            }
+            b'G' => {
+                let col = p(0, 1).saturating_sub(1) as u32;
+                self.col = core::cmp::min(col, self.max_cols.saturating_sub(1));
+            }
+            b'd' => {
+                let row = p(0, 1).saturating_sub(1) as u32;
+                self.row = core::cmp::min(row, self.max_rows.saturating_sub(1));
             }
             b'J' => {
                 let mode = params.get(0).copied().unwrap_or(0);
@@ -893,20 +1113,84 @@ impl Terminal {
                     _ => {}
                 }
             }
+            b's' => {
+                self.ansi_saved_col = self.col;
+                self.ansi_saved_row = self.row;
+            }
+            b'u' => {
+                self.col = core::cmp::min(self.ansi_saved_col, self.max_cols.saturating_sub(1));
+                self.row = core::cmp::min(self.ansi_saved_row, self.max_rows.saturating_sub(1));
+            }
+            b'@' => {
+                let n = p(0, 1) as u32;
+                self.insert_blank_chars(n);
+            }
+            b'P' => {
+                let n = p(0, 1) as u32;
+                self.delete_chars(n);
+            }
+            b'L' => {
+                let n = p(0, 1) as u32;
+                self.insert_blank_lines(n);
+            }
+            b'M' => {
+                let n = p(0, 1) as u32;
+                self.delete_lines(n);
+            }
+            b'X' => {
+                let n = p(0, 1) as u32;
+                self.erase_chars(n);
+            }
             _ => {}
         }
     }
 
     fn write_output_byte(&mut self, byte: u8) {
+        if self.ansi_osc_mode {
+            if byte == 0x07 {
+                self.reset_ansi_parser();
+                return;
+            }
+            if self.ansi_osc_esc_pending {
+                self.ansi_osc_esc_pending = false;
+                if byte == b'\\' {
+                    self.reset_ansi_parser();
+                }
+                return;
+            }
+            if byte == 0x1B {
+                self.ansi_osc_esc_pending = true;
+            }
+            return;
+        }
+
         if self.ansi_esc_pending {
             self.ansi_esc_pending = false;
             if byte == b'[' {
                 self.ansi_csi_mode = true;
                 self.ansi_seq_len = 0;
+            } else if byte == b']' {
+                self.ansi_osc_mode = true;
+                self.ansi_osc_esc_pending = false;
+            } else if byte == b'7' {
+                self.ansi_saved_col = self.col;
+                self.ansi_saved_row = self.row;
+            } else if byte == b'8' {
+                self.col = core::cmp::min(self.ansi_saved_col, self.max_cols.saturating_sub(1));
+                self.row = core::cmp::min(self.ansi_saved_row, self.max_rows.saturating_sub(1));
+            } else if byte == b'D' {
+                self.new_line();
+            } else if byte == b'E' {
+                self.new_line();
+                self.col = 0;
+            } else if byte == b'M' {
+                self.row = self.row.saturating_sub(1);
+            } else if byte == b'c' {
+                self.clear_screen();
+                self.fg = DEFAULT_FG;
+                self.bg = DEFAULT_BG;
             } else if byte == 0x1B {
                 self.ansi_esc_pending = true;
-            } else {
-                self.write_byte(byte);
             }
             return;
         }
@@ -918,7 +1202,7 @@ impl Terminal {
                 return;
             }
 
-            if byte.is_ascii_digit() || byte == b';' || byte == b'?' {
+            if (0x20..=0x3F).contains(&byte) {
                 if self.ansi_seq_len < self.ansi_seq.len() {
                     self.ansi_seq[self.ansi_seq_len] = byte;
                     self.ansi_seq_len += 1;

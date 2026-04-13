@@ -1,6 +1,6 @@
 //! ファイルシステム関連のシステムコール
 
-use super::types::{EBADF, EFAULT, EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR, ESRCH, SUCCESS};
+use super::types::{EBADF, EEXIST, EFAULT, EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR, ESRCH, SUCCESS};
 use crate::task::fd_table::{FdTable, FileHandle, FD_BASE, O_CLOEXEC, PROCESS_MAX_FDS};
 use alloc::string::String;
 use alloc::string::ToString;
@@ -439,6 +439,13 @@ fn resolve_path(pid_raw: u64, path: &str) -> String {
 
 const FS_SERVICE_RETRY_COUNT: usize = 3;
 const FS_SERVICE_RETRY_MS: u64 = 10;
+const O_ACCMODE: u64 = 0o3;
+const O_WRONLY: u64 = 0o1;
+const O_RDWR: u64 = 0o2;
+const O_CREAT: u64 = 0o100;
+const O_EXCL: u64 = 0o200;
+const O_TRUNC: u64 = 0o1000;
+const O_APPEND: u64 = 0o2000;
 
 fn make_tty_handle() -> alloc::boxed::Box<FileHandle> {
     alloc::boxed::Box::new(FileHandle {
@@ -450,7 +457,13 @@ fn make_tty_handle() -> alloc::boxed::Box<FileHandle> {
         remote_refs: None,
         pipe_id: None,
         pipe_write: false,
+        open_flags: O_RDWR,
     })
+}
+
+fn has_write_intent(flags: u64) -> bool {
+    let acc = flags & O_ACCMODE;
+    acc == O_WRONLY || acc == O_RDWR || (flags & (O_CREAT | O_TRUNC)) != 0
 }
 
 fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
@@ -458,6 +471,43 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
     {
         let cloexec = (flags & O_CLOEXEC) != 0;
         return match with_fd_table_mut(owner_pid, |t| t.alloc(make_tty_handle(), cloexec)) {
+            Some(Some(fd)) => fd as u64,
+            _ => ENOSYS,
+        };
+    }
+
+    if has_write_intent(flags) {
+        let exists_in_service = stat_path_via_fs_service(path).is_ok();
+        let exists_in_fallback = fallback_file_metadata(path).is_some();
+        if (flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL) && (exists_in_service || exists_in_fallback)
+        {
+            return EEXIST;
+        }
+
+        let mut data_vec = Vec::new();
+        if (flags & O_TRUNC) == 0 && exists_in_fallback {
+            if let Some(d) = crate::kmod::fs::read_all(path) {
+                data_vec = d;
+            }
+        }
+        let start_pos = if (flags & O_APPEND) != 0 {
+            data_vec.len()
+        } else {
+            0
+        };
+        let cloexec = (flags & O_CLOEXEC) != 0;
+        let handle = alloc::boxed::Box::new(FileHandle {
+            data: data_vec.into_boxed_slice(),
+            pos: start_pos,
+            dir_path: None,
+            is_remote: false,
+            fd_remote: 0,
+            remote_refs: None,
+            pipe_id: None,
+            pipe_write: false,
+            open_flags: flags,
+        });
+        return match with_fd_table_mut(owner_pid, |t| t.alloc(handle, cloexec)) {
             Some(Some(fd)) => fd as u64,
             _ => ENOSYS,
         };
@@ -487,8 +537,13 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
 
     let (data_vec, dir_path, is_remote, fd_remote) = match opened {
         Some(remote_fd) => {
-            // fstatをスキップ: ディレクトリ判定はreaddir時に遅延
-            (Vec::new(), None, true, remote_fd)
+            // ディレクトリFD経由の openat 相対解決で必要になるため、
+            // リモートでもディレクトリは dir_path を保持する。
+            let dir_path = match stat_path_via_fs_service(path) {
+                Ok((mode, _)) if (mode as u64 & 0xF000) == 0x4000 => Some(path.to_string()),
+                _ => None,
+            };
+            (Vec::new(), dir_path, true, remote_fd)
         }
         None => {
             let errno = if last_err != 0 { last_err } else { EIO };
@@ -521,6 +576,7 @@ fn open_resolved_for_pid(owner_pid: u64, path: &str, flags: u64) -> u64 {
         },
         pipe_id: None,
         pipe_write: false,
+        open_flags: flags,
     });
 
     match with_fd_table_mut(owner_pid, |t| t.alloc(handle, cloexec)) {
@@ -970,6 +1026,56 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     local.len() as u64
 }
 
+/// Write: 開かれたファイルへデータを書き込む（ローカル一時FDのみ）
+pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
+    if buf_ptr == 0 {
+        return EFAULT;
+    }
+    if len == 0 {
+        return 0;
+    }
+    if !crate::syscall::validate_user_ptr(buf_ptr, len) {
+        return EFAULT;
+    }
+    if fd < FD_BASE as u64 {
+        return EBADF;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
+    let pid = match current_process_id_raw() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+
+    let mut buf = alloc::vec![0u8; len as usize];
+    if let Err(errno) = crate::syscall::copy_from_user(buf_ptr, &mut buf) {
+        return errno;
+    }
+
+    let wrote = with_fd_table_mut(pid, |t| {
+        let fh = t.get_mut(idx).ok_or(EBADF)?;
+        if fh.is_remote {
+            return Err(ENOSYS);
+        }
+        let end = fh.pos.checked_add(buf.len()).ok_or(EINVAL)?;
+        let mut data = fh.data.to_vec();
+        if end > data.len() {
+            data.resize(end, 0);
+        }
+        data[fh.pos..end].copy_from_slice(&buf);
+        fh.data = data.into_boxed_slice();
+        fh.pos = end;
+        Ok(buf.len() as u64)
+    });
+    match wrote {
+        Some(Ok(n)) => n,
+        Some(Err(errno)) => errno,
+        None => EBADF,
+    }
+}
+
 /// Fcntl システムコール（FD フラグ操作）
 ///
 /// - F_GETFD (1): FD フラグを取得
@@ -982,12 +1088,15 @@ pub fn fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
     const F_SETFD: u64 = 2;
     const F_GETFL: u64 = 3;
     const F_SETFL: u64 = 4;
+    const F_GETLK: u64 = 5;
+    const F_SETLK: u64 = 6;
+    const F_SETLKW: u64 = 7;
 
     if fd < FD_BASE as u64 {
         // stdin/stdout/stderr: FD フラグは 0
         return match cmd {
-            F_GETFD | F_GETFL => 0,
-            F_SETFD | F_SETFL => SUCCESS,
+            F_GETFD | F_GETFL | F_GETLK => 0,
+            F_SETFD | F_SETFL | F_SETLK | F_SETLKW => SUCCESS,
             _ => EINVAL,
         };
     }
@@ -1013,9 +1122,85 @@ pub fn fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
                 _ => EBADF,
             }
         }
-        F_GETFL => 0, // O_RDONLY スタブ
-        F_SETFL => SUCCESS,
+        F_GETFL => match with_fd_table(pid, |t| t.get(idx).map(|fh| fh.open_flags)) {
+            Some(Some(v)) => v,
+            _ => EBADF,
+        },
+        F_SETFL => {
+            match with_fd_table_mut(pid, |t| {
+                let fh = t.get_mut(idx).ok_or(EBADF)?;
+                fh.open_flags = (fh.open_flags & O_ACCMODE) | (arg & !O_ACCMODE);
+                Ok::<(), u64>(())
+            }) {
+                Some(Ok(())) => SUCCESS,
+                Some(Err(errno)) => errno,
+                None => EBADF,
+            }
+        }
+        F_GETLK => SUCCESS,
+        F_SETLK | F_SETLKW => SUCCESS,
         _ => EINVAL,
+    }
+}
+
+/// fsync/fdatasync システムコール（最小実装）
+pub fn fsync(fd: u64) -> u64 {
+    if fd < FD_BASE as u64 {
+        return SUCCESS;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
+    let pid = match current_process_id_raw() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+    match with_fd_table(pid, |t| t.get(idx).is_some()) {
+        Some(true) => SUCCESS,
+        _ => EBADF,
+    }
+}
+
+/// truncate システムコール（最小実装）
+pub fn truncate(_path_ptr: u64, _len: u64) -> u64 {
+    SUCCESS
+}
+
+/// ftruncate システムコール（ローカル一時FDのみ）
+pub fn ftruncate(fd: u64, len: u64) -> u64 {
+    if fd < FD_BASE as u64 {
+        return EBADF;
+    }
+    let idx = fd as usize;
+    if idx >= PROCESS_MAX_FDS {
+        return EBADF;
+    }
+    let pid = match current_process_id_raw() {
+        Some(p) => p,
+        None => return EBADF,
+    };
+    let new_len = match usize::try_from(len) {
+        Ok(v) => v,
+        Err(_) => return EINVAL,
+    };
+    let res = with_fd_table_mut(pid, |t| {
+        let fh = t.get_mut(idx).ok_or(EBADF)?;
+        if fh.is_remote {
+            return Err(ENOSYS);
+        }
+        let mut data = fh.data.to_vec();
+        data.resize(new_len, 0);
+        fh.data = data.into_boxed_slice();
+        if fh.pos > new_len {
+            fh.pos = new_len;
+        }
+        Ok(())
+    });
+    match res {
+        Some(Ok(())) => SUCCESS,
+        Some(Err(errno)) => errno,
+        None => EBADF,
     }
 }
 
@@ -1052,6 +1237,7 @@ pub fn dup(fd: u64) -> u64 {
                 remote_refs: fh.clone_remote_refs(),
                 pipe_id: fh.pipe_id,
                 pipe_write: fh.pipe_write,
+                open_flags: fh.open_flags,
             })
         })
     });
@@ -1110,6 +1296,7 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
                     remote_refs: fh.clone_remote_refs(),
                     pipe_id: fh.pipe_id,
                     pipe_write: fh.pipe_write,
+                    open_flags: fh.open_flags,
                 })
             })
         });
@@ -1128,6 +1315,22 @@ pub fn dup2(old_fd: u64, new_fd: u64) -> u64 {
     });
 
     new_fd
+}
+
+/// unlink システムコール（最小実装）
+pub fn unlink(path_ptr: u64) -> u64 {
+    if path_ptr == 0 {
+        return EINVAL;
+    }
+    match read_cstring(path_ptr) {
+        Ok(_) => SUCCESS,
+        Err(errno) => errno,
+    }
+}
+
+/// unlinkat システムコール（最小実装）
+pub fn unlinkat(_dirfd: i64, path_ptr: u64, _flags: u64) -> u64 {
+    unlink(path_ptr)
 }
 
 /// Openat システムコール

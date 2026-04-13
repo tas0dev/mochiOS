@@ -217,6 +217,14 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
     const TCSETS: u64 = 0x5402;
     const TCSETSW: u64 = 0x5403;
     const TCSETSF: u64 = 0x5404;
+    const TCGETA: u64 = 0x5405;
+    const TCSETA: u64 = 0x5406;
+    const TCSETAW: u64 = 0x5407;
+    const TCSETAF: u64 = 0x5408;
+    const TCGETS2: u64 = 0x802C_542A;
+    const TCSETS2: u64 = 0x402C_542B;
+    const TCSETSW2: u64 = 0x402C_542C;
+    const TCSETSF2: u64 = 0x402C_542D;
     const TIOCSWINSZ: u64 = 0x5414;
     const FIONREAD: u64 = 0x541b;
 
@@ -239,8 +247,10 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
             crate::syscall::tty::get_winsize(arg)
         }
         TIOCSWINSZ => crate::syscall::tty::set_winsize(arg),
-        TCGETS => crate::syscall::tty::tcgets(arg),
-        TCSETS | TCSETSW | TCSETSF => crate::syscall::tty::tcsets(arg),
+        TCGETS | TCGETS2 => crate::syscall::tty::tcgets(arg),
+        TCGETA => crate::syscall::tty::tcgeta(arg),
+        TCSETS | TCSETSW | TCSETSF | TCSETS2 | TCSETSW2 | TCSETSF2 => crate::syscall::tty::tcsets(arg),
+        TCSETA | TCSETAW | TCSETAF => crate::syscall::tty::tcseta(arg),
         FIONREAD => {
             if arg == 0 || !crate::syscall::validate_user_ptr(arg, 4) {
                 return EINVAL;

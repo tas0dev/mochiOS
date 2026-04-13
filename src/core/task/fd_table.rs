@@ -35,6 +35,8 @@ pub struct FileHandle {
     pub pipe_id: Option<usize>,
     /// パイプの書き込み端の場合 true
     pub pipe_write: bool,
+    /// open()/openat() のファイル状態フラグ（F_GETFL/F_SETFL 用）
+    pub open_flags: u64,
 }
 
 impl FileHandle {
@@ -200,6 +202,7 @@ impl FdTable {
                 remote_refs: fh.clone_remote_refs(),
                 pipe_id: fh.pipe_id,
                 pipe_write: fh.pipe_write,
+                open_flags: fh.open_flags,
             });
             new_table.entries[i] = Box::into_raw(new_fh) as u64;
             new_table.flags[i] = self.flags[i];

@@ -274,10 +274,8 @@ fn write_fd(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                 Err(e) => e,
             }
         }
-        Some((None, _, false)) | Some((Some(_), false, false)) => {
-            // 通常ファイル or 読み込み端への write: EBADF（書き込みサポートなし）
-            EBADF
-        }
+        Some((None, _, false)) => crate::syscall::fs::write(fd, buf_ptr, len),
+        Some((Some(_), false, false)) => EBADF,
         None => EBADF,
     }
 }

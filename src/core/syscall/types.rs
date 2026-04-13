@@ -64,6 +64,10 @@ pub enum SyscallNumber {
     Tgkill = 234,
     /// getcwd
     Getcwd = 79,
+    /// truncate
+    Truncate = 76,
+    /// ftruncate
+    Ftruncate = 77,
     /// getppid
     GetPpid = 110,
     /// sigaltstack
@@ -96,8 +100,14 @@ pub enum SyscallNumber {
     Lstat = 6,
     /// readlink (スタブ)
     Readlink = 89,
+    /// unlink
+    Unlink = 87,
     /// fcntl (FD フラグ操作)
     Fcntl = 72,
+    /// fsync
+    Fsync = 74,
+    /// fdatasync
+    Fdatasync = 75,
     /// pipe
     Pipe = 22,
     /// dup
@@ -124,6 +134,8 @@ pub enum SyscallNumber {
     Pipe2 = 293,
     /// newfstatat (fstatat)
     Newfstatat = 262,
+    /// unlinkat
+    Unlinkat = 263,
     /// faccessat
     Faccessat = 269,
     /// pselect6
