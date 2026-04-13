@@ -224,6 +224,31 @@ pub fn deliver_signal_to_pid(pid: ProcessId, sig: usize) -> u64 {
         return SUCCESS;
     }
 
+    // SYSCALL 経路では return-to-user 前のシグナル送達フックがまだないため、
+    // 「自分宛て + 非ブロック + 既定動作=Terminate」はここで即時終了させる。
+    if current_pid().is_some_and(|cur| cur == pid) {
+        let (blocked, action) = match with_process(pid, |p| {
+            let state = p.signal_state();
+            let blocked = (state.mask & (1u64 << (sig - 1))) != 0;
+            (blocked, state.action(sig))
+        }) {
+            Some(v) => v,
+            None => return ESRCH,
+        };
+
+        if !blocked {
+            if action.is_ignored() {
+                return SUCCESS;
+            }
+            if action.is_default() && matches!(default_action(sig), DefaultAction::Terminate) {
+                crate::task::exit_current_task(sig as u64);
+            }
+            if action.is_default() && matches!(default_action(sig), DefaultAction::Ignore) {
+                return SUCCESS;
+            }
+        }
+    }
+
     // pending ビットをセット
     with_process_mut(pid, |p| p.signal_state_mut().set_pending(sig));
 
