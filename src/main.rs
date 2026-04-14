@@ -1,3 +1,7 @@
+use fontdue::{
+    layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle},
+    Font, FontSettings,
+};
 use swiftlib::{
     ipc::{ipc_recv, ipc_send},
     keyboard::{read_scancode, read_scancode_tap},
@@ -11,16 +15,29 @@ const KAGAMI_PROCESS_CANDIDATES: [&str; 3] =
 
 const OP_REQ_CREATE_WINDOW: u32 = 1;
 const OP_RES_WINDOW_CREATED: u32 = 2;
-const OP_REQ_FLUSH_CHUNK: u32 = 4;
 const OP_REQ_ATTACH_SHARED: u32 = 5;
 const OP_REQ_PRESENT_SHARED: u32 = 6;
 const OP_RES_SHARED_ATTACHED: u32 = 7;
-const LAYER_APP: u8 = 3;
+const LAYER_APP: u8 = 1;
+const UI_FONT_PATH: &str = "/Resources/fonts/NotoSansJP-Regular.ttf";
+
+struct UiFont {
+    font: Font,
+    px: f32,
+}
 
 struct SharedSurface {
     virt_addr: u64,
     page_count: u64,
     total_pixels: usize,
+}
+
+impl UiFont {
+    fn load(path: &str, px: f32) -> Result<Self, &'static str> {
+        let data = std::fs::read(path).map_err(|_| "font read failed")?;
+        let font = Font::from_bytes(data, FontSettings::default()).map_err(|_| "font parse failed")?;
+        Ok(Self { font, px })
+    }
 }
 
 fn main() {
@@ -43,17 +60,16 @@ fn main() {
         }
     };
 
-    let shared_surface = match setup_shared_surface(kagami_tid, window_id, width, height) {
-        Ok(surface) => surface,
+    let ui_font = match UiFont::load(UI_FONT_PATH, 18.0) {
+        Ok(font) => Some(font),
         Err(e) => {
-            eprintln!("[Terminal] shared setup failed: {}", e);
-            return;
+            eprintln!("[Terminal] failed to load {}: {} (fallback draw)", UI_FONT_PATH, e);
+            None
         }
     };
 
-    let pixels = render_terminal_bootstrap(width as usize, height as usize);
-    blit_shared_surface(&shared_surface, &pixels);
-    if let Err(e) = present_shared(kagami_tid, window_id) {
+    let pixels = render_terminal_bootstrap(width as usize, height as usize, ui_font.as_ref());
+    if let Err(e) = flush_window_shared(kagami_tid, window_id, width, height, &pixels) {
         eprintln!("[Terminal] draw failed: {}", e);
         return;
     }
@@ -101,13 +117,17 @@ fn create_window(kagami_tid: u64, width: u16, height: u16) -> Result<u32, &'stat
     Err("window create timeout")
 }
 
-fn setup_shared_surface(
+fn flush_window_shared(
     kagami_tid: u64,
     window_id: u32,
     width: u16,
     height: u16,
+    pixels: &[u32],
 ) -> Result<SharedSurface, &'static str> {
     let total = width as usize * height as usize;
+    if pixels.len() < total {
+        return Err("pixel buffer too small");
+    }
     let total_bytes = total.checked_mul(4).ok_or("size overflow")?;
     let page_count = total_bytes.div_ceil(4096);
     if page_count == 0 {
@@ -120,6 +140,12 @@ fn setup_shared_surface(
     if (virt_addr as i64) < 0 || virt_addr == 0 {
         return Err("alloc_shared_pages failed");
     }
+    let surface = SharedSurface {
+        virt_addr,
+        page_count: page_count as u64,
+        total_pixels: total,
+    };
+    blit_shared_surface(&surface, pixels);
 
     let mut attach = [0u8; 12];
     attach[0..4].copy_from_slice(&OP_REQ_ATTACH_SHARED.to_le_bytes());
@@ -135,12 +161,11 @@ fn setup_shared_surface(
         return Err("failed to send shared pages");
     }
     wait_shared_attach_ack(kagami_tid, window_id)?;
-
-    Ok(SharedSurface {
-        virt_addr,
-        page_count: page_count as u64,
-        total_pixels: total,
-    })
+    for _ in 0..3 {
+        present_shared(kagami_tid, window_id)?;
+        yield_now();
+    }
+    Ok(surface)
 }
 
 fn wait_shared_attach_ack(kagami_tid: u64, window_id: u32) -> Result<(), &'static str> {
@@ -185,59 +210,7 @@ fn present_shared(kagami_tid: u64, window_id: u32) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn flush_window_chunked(
-    kagami_tid: u64,
-    window_id: u32,
-    width: u16,
-    height: u16,
-    pixels: &[u32],
-) -> Result<(), &'static str> {
-    let total = width as usize * height as usize;
-    if pixels.len() < total {
-        return Err("pixel buffer too small");
-    }
-    let chunk_header = 20usize;
-    let max_chunk_pixels = (IPC_BUF_SIZE - chunk_header) / 4;
-    let width_usize = width as usize;
-    let height_usize = height as usize;
-    let chunk_w = width_usize.min(96).max(1);
-    let chunk_h = (max_chunk_pixels / chunk_w).max(1);
-
-    let mut y0 = 0usize;
-    while y0 < height_usize {
-        let h = (height_usize - y0).min(chunk_h);
-        let mut x0 = 0usize;
-        while x0 < width_usize {
-            let w = (width_usize - x0).min(chunk_w);
-            let mut msg = vec![0u8; chunk_header + (w * h * 4)];
-            msg[0..4].copy_from_slice(&OP_REQ_FLUSH_CHUNK.to_le_bytes());
-            msg[4..8].copy_from_slice(&window_id.to_le_bytes());
-            msg[8..10].copy_from_slice(&width.to_le_bytes());
-            msg[10..12].copy_from_slice(&height.to_le_bytes());
-            msg[12..14].copy_from_slice(&(x0 as u16).to_le_bytes());
-            msg[14..16].copy_from_slice(&(y0 as u16).to_le_bytes());
-            msg[16..18].copy_from_slice(&(w as u16).to_le_bytes());
-            msg[18..20].copy_from_slice(&(h as u16).to_le_bytes());
-            let mut off = chunk_header;
-            for row in 0..h {
-                let src_row = (y0 + row) * width_usize;
-                for col in 0..w {
-                    msg[off..off + 4]
-                        .copy_from_slice(&(pixels[src_row + x0 + col] | 0xFF00_0000).to_le_bytes());
-                    off += 4;
-                }
-            }
-            if (ipc_send(kagami_tid, &msg) as i64) < 0 {
-                return Err("send flush chunk failed");
-            }
-            x0 += w;
-        }
-        y0 += h;
-    }
-    Ok(())
-}
-
-fn render_terminal_bootstrap(width: usize, height: usize) -> Vec<u32> {
+fn render_terminal_bootstrap(width: usize, height: usize, ui_font: Option<&UiFont>) -> Vec<u32> {
     let mut px = vec![0u32; width * height];
     for y in 0..height {
         let row = y * width;
@@ -258,23 +231,40 @@ fn render_terminal_bootstrap(width: usize, height: usize) -> Vec<u32> {
         height as i32 - 18,
         0xFF0D_1117,
     );
-    draw_text(&mut px, width, 16, 10, "Terminal", 0xFFCF_D8E3);
-    draw_text(
-        &mut px,
-        width,
-        24,
-        48,
-        "Window init OK.",
-        0xFFA6_B3C2,
-    );
-    draw_text(
-        &mut px,
-        width,
-        24,
-        68,
-        "Press Esc to close this test window.",
-        0xFF7D_8CA1,
-    );
+    if let Some(font) = ui_font {
+        draw_text(&mut px, width, font, 16, 6, "Terminal", 0xFFCF_D8E3);
+        draw_text(
+            &mut px,
+            width,
+            font,
+            24,
+            50,
+            "NotoSansJP-Regular.ttf loaded.",
+            0xFFA6_B3C2,
+        );
+        draw_text(
+            &mut px,
+            width,
+            font,
+            24,
+            24 + 26,
+            "フォント: /Resources/fonts/NotoSansJP-Regular.ttf",
+            0xFF9E_B8E8,
+        );
+        draw_text(
+            &mut px,
+            width,
+            font,
+            24,
+            24 + 52,
+            "Press Esc to close this test window.",
+            0xFF7D_8CA1,
+        );
+    } else {
+        fill_rect(&mut px, width, 16, 10, 160, 16, 0xFF4A_5B70);
+        fill_rect(&mut px, width, 24, 52, 360, 10, 0xFF82_8F9C);
+        fill_rect(&mut px, width, 24, 78, 480, 10, 0xFF66_7280);
+    }
     px
 }
 
@@ -297,48 +287,68 @@ fn fill_rect(px: &mut [u32], stride: usize, x: i32, y: i32, w: i32, h: i32, colo
     }
 }
 
-fn draw_text(px: &mut [u32], stride: usize, x: i32, y: i32, s: &str, color: u32) {
-    let mut pen_x = x;
-    for ch in s.bytes() {
-        draw_char(px, stride, pen_x, y, ch, color);
-        pen_x += 8;
-    }
-}
+fn draw_text(
+    px: &mut [u32],
+    stride: usize,
+    ui_font: &UiFont,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: u32,
+) {
+    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+    layout.reset(&LayoutSettings {
+        x: x as f32,
+        y: y as f32,
+        ..LayoutSettings::default()
+    });
+    layout.append(&[&ui_font.font], &TextStyle::new(text, ui_font.px, 0));
 
-fn draw_char(px: &mut [u32], stride: usize, x: i32, y: i32, ch: u8, color: u32) {
-    let glyph = tiny_glyph(ch);
-    for (row, bits) in glyph.iter().enumerate() {
-        for col in 0..6 {
-            if (bits >> (7 - col)) & 1 == 0 {
+    let height = px.len() / stride;
+    for glyph in layout.glyphs() {
+        let (metrics, bitmap) = ui_font.font.rasterize_config(glyph.key);
+        if metrics.width == 0 || metrics.height == 0 {
+            continue;
+        }
+        let gx = glyph.x as i32;
+        let gy = glyph.y as i32;
+        for row in 0..metrics.height {
+            let yy = gy + row as i32;
+            if yy < 0 || yy as usize >= height {
                 continue;
             }
-            let xx = x + col;
-            let yy = y + row as i32;
-            if xx < 0 || yy < 0 {
-                continue;
+            for col in 0..metrics.width {
+                let xx = gx + col as i32;
+                if xx < 0 || xx as usize >= stride {
+                    continue;
+                }
+                let cov = bitmap[row * metrics.width + col];
+                if cov == 0 {
+                    continue;
+                }
+                let idx = yy as usize * stride + xx as usize;
+                px[idx] = blend_rgb(px[idx], color, cov);
             }
-            let xx = xx as usize;
-            let yy = yy as usize;
-            let height = px.len() / stride;
-            if xx >= stride || yy >= height {
-                continue;
-            }
-            px[yy * stride + xx] = color;
         }
     }
 }
 
-fn tiny_glyph(ch: u8) -> [u8; 8] {
-    match ch {
-        b'A'..=b'Z' => [0x30, 0x48, 0x84, 0xFC, 0x84, 0x84, 0x84, 0x00],
-        b'a'..=b'z' => [0x00, 0x00, 0x78, 0x04, 0x7C, 0x84, 0x7C, 0x00],
-        b'0'..=b'9' => [0x78, 0x84, 0x8C, 0x94, 0xA4, 0x84, 0x78, 0x00],
-        b'.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00],
-        b':' => [0x00, 0x30, 0x30, 0x00, 0x00, 0x30, 0x30, 0x00],
-        b'-' => [0x00, 0x00, 0x00, 0x7C, 0x00, 0x00, 0x00, 0x00],
-        b' ' => [0x00; 8],
-        _ => [0x7C, 0x84, 0x18, 0x30, 0x30, 0x00, 0x30, 0x00],
+fn blend_rgb(dst: u32, src: u32, alpha: u8) -> u32 {
+    if alpha == 255 {
+        return src | 0xFF00_0000;
     }
+    let a = alpha as u32;
+    let inv = 255u32.saturating_sub(a);
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+    let r = (sr * a + dr * inv) / 255;
+    let g = (sg * a + dg * inv) / 255;
+    let b = (sb * a + db * inv) / 255;
+    0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
 fn find_kagami_tid() -> Option<u64> {

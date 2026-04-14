@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 swiftlib = { path = "../../user", features = ["std-support"] }
+fontdue = "0.9"
 
 [profile.release]
 panic = "abort"
