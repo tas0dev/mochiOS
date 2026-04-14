@@ -30,6 +30,6 @@ rustc-ice-*.txt
 *.diff
 *.patch
 
-# Applications
-src/apps/Kagami
-src/apps/Binder
+# Applications and libs
+src/lib/**
+src/apps/**

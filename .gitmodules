@@ -13,3 +13,6 @@
 [submodule "src/apps/Dock"]
 	path = src/apps/Dock
 	url = https://github.com/tas0dev/dock
+[submodule "src/apps/Terminal"]
+	path = src/apps/Terminal
+	url = https://github.com/tas0dev/Terminal
