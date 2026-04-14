@@ -1,11 +1,7 @@
-use fontdue::{
-    layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle},
-    Font, FontSettings,
-};
+use fontdue::{Font, FontSettings};
 use swiftlib::{
     ipc::{ipc_recv, ipc_send},
     keyboard::{read_scancode, read_scancode_tap},
-    privileged,
     task::{find_process_by_name, yield_now},
 };
 
@@ -123,69 +119,83 @@ fn flush_window_shared(
     width: u16,
     height: u16,
     pixels: &[u32],
-) -> Result<SharedSurface, &'static str> {
+) -> Result<(), &'static str> {
     let total = width as usize * height as usize;
     if pixels.len() < total {
         return Err("pixel buffer too small");
     }
-    let total_bytes = total.checked_mul(4).ok_or("size overflow")?;
-    let page_count = total_bytes.div_ceil(4096);
-    if page_count == 0 {
-        return Err("shared surface page count out of range");
-    }
-
-    let mut phys_pages = vec![0u64; page_count];
-    let virt_addr =
-        unsafe { privileged::alloc_shared_pages(page_count as u64, Some(phys_pages.as_mut_slice()), 0) };
-    if (virt_addr as i64) < 0 || virt_addr == 0 {
-        return Err("alloc_shared_pages failed");
-    }
-    let surface = SharedSurface {
-        virt_addr,
-        page_count: page_count as u64,
-        total_pixels: total,
-    };
+    let surface = request_shared_surface(kagami_tid, window_id, width, height)?;
     blit_shared_surface(&surface, pixels);
+    for _ in 0..3 {
+        present_shared(kagami_tid, window_id)?;
+        yield_now();
+    }
+    Ok(())
+}
 
+fn request_shared_surface(
+    kagami_tid: u64,
+    window_id: u32,
+    width: u16,
+    height: u16,
+) -> Result<SharedSurface, &'static str> {
     let mut attach = [0u8; 12];
     attach[0..4].copy_from_slice(&OP_REQ_ATTACH_SHARED.to_le_bytes());
     attach[4..8].copy_from_slice(&window_id.to_le_bytes());
     attach[8..10].copy_from_slice(&width.to_le_bytes());
     attach[10..12].copy_from_slice(&height.to_le_bytes());
     if (ipc_send(kagami_tid, &attach) as i64) < 0 {
-        return Err("failed to send shared attach");
+        return Err("failed to request shared surface");
     }
 
-    let send_pages_ret = unsafe { privileged::ipc_send_pages(kagami_tid, phys_pages.as_slice(), 0) };
-    if (send_pages_ret as i64) < 0 {
-        return Err("failed to send shared pages");
-    }
-    wait_shared_attach_ack(kagami_tid, window_id)?;
-    for _ in 0..3 {
-        present_shared(kagami_tid, window_id)?;
-        yield_now();
-    }
-    Ok(surface)
-}
+    let need_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or("size overflow")? as u64;
 
-fn wait_shared_attach_ack(kagami_tid: u64, window_id: u32) -> Result<(), &'static str> {
     let mut recv = [0u8; IPC_BUF_SIZE];
-    for _ in 0..256 {
+    let mut got_ack = false;
+    let mut mapped: Option<SharedSurface> = None;
+    for _ in 0..512 {
         let (sender, len) = ipc_recv(&mut recv);
-        if sender != kagami_tid || len < 8 {
+        if sender != kagami_tid || len == 0 {
             yield_now();
             continue;
         }
-        let op = u32::from_le_bytes([recv[0], recv[1], recv[2], recv[3]]);
-        if op != OP_RES_SHARED_ATTACHED {
-            continue;
+
+        if len >= 16 {
+            let mapped_addr = u64::from_ne_bytes([
+                recv[0], recv[1], recv[2], recv[3], recv[4], recv[5], recv[6], recv[7],
+            ]);
+            let mapped_total = u64::from_ne_bytes([
+                recv[8], recv[9], recv[10], recv[11], recv[12], recv[13], recv[14], recv[15],
+            ]);
+            if mapped_addr != 0 && mapped_total >= need_bytes {
+                mapped = Some(SharedSurface {
+                    virt_addr: mapped_addr,
+                    page_count: mapped_total.div_ceil(4096),
+                    total_pixels: (need_bytes / 4) as usize,
+                });
+            }
         }
-        let ack_window = u32::from_le_bytes([recv[4], recv[5], recv[6], recv[7]]);
-        if ack_window == window_id {
-            return Ok(());
+
+        if len >= 8 {
+            let op = u32::from_le_bytes([recv[0], recv[1], recv[2], recv[3]]);
+            if op == OP_RES_SHARED_ATTACHED {
+                let ack_window = u32::from_le_bytes([recv[4], recv[5], recv[6], recv[7]]);
+                if ack_window == window_id {
+                    got_ack = true;
+                }
+            }
+        }
+
+        if got_ack
+            && let Some(surface) = mapped
+        {
+            return Ok(surface);
         }
     }
-    Err("shared attach ack timeout")
+    Err("shared surface mapping timeout")
 }
 
 fn blit_shared_surface(surface: &SharedSurface, pixels: &[u32]) {
@@ -232,36 +242,27 @@ fn render_terminal_bootstrap(width: usize, height: usize, ui_font: Option<&UiFon
         0xFF0D_1117,
     );
     if let Some(font) = ui_font {
-        draw_text(&mut px, width, font, 16, 6, "Terminal", 0xFFCF_D8E3);
+        draw_text(&mut px, width, font, 24, 56, "NotoSansJP-Regular.ttf loaded.", 0xFFF2_F5FA);
         draw_text(
             &mut px,
             width,
             font,
             24,
-            50,
-            "NotoSansJP-Regular.ttf loaded.",
-            0xFFA6_B3C2,
-        );
-        draw_text(
-            &mut px,
-            width,
-            font,
-            24,
-            24 + 26,
+            88,
             "フォント: /Resources/fonts/NotoSansJP-Regular.ttf",
-            0xFF9E_B8E8,
+            0xFFD1_DCFF,
         );
         draw_text(
             &mut px,
             width,
             font,
             24,
-            24 + 52,
+            120,
             "Press Esc to close this test window.",
-            0xFF7D_8CA1,
+            0xFFB3_C3DC,
         );
     } else {
-        fill_rect(&mut px, width, 16, 10, 160, 16, 0xFF4A_5B70);
+        fill_rect(&mut px, width, 24, 56, 420, 12, 0xFF9F_ACC0);
         fill_rect(&mut px, width, 24, 52, 360, 10, 0xFF82_8F9C);
         fill_rect(&mut px, width, 24, 78, 480, 10, 0xFF66_7280);
     }
@@ -296,22 +297,31 @@ fn draw_text(
     text: &str,
     color: u32,
 ) {
-    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-    layout.reset(&LayoutSettings {
-        x: x as f32,
-        y: y as f32,
-        ..LayoutSettings::default()
-    });
-    layout.append(&[&ui_font.font], &TextStyle::new(text, ui_font.px, 0));
-
     let height = px.len() / stride;
-    for glyph in layout.glyphs() {
-        let (metrics, bitmap) = ui_font.font.rasterize_config(glyph.key);
-        if metrics.width == 0 || metrics.height == 0 {
+    let line = ui_font
+        .font
+        .horizontal_line_metrics(ui_font.px)
+        .unwrap_or(fontdue::LineMetrics {
+            ascent: ui_font.px * 0.8,
+            descent: -ui_font.px * 0.2,
+            line_gap: ui_font.px * 0.2,
+            new_line_size: ui_font.px * 1.2,
+        });
+    let mut pen_x = x as f32;
+    let mut baseline = y as f32 + line.ascent;
+    for ch in text.chars() {
+        if ch == '\n' {
+            pen_x = x as f32;
+            baseline += line.new_line_size;
             continue;
         }
-        let gx = glyph.x as i32;
-        let gy = glyph.y as i32;
+        let (metrics, bitmap) = ui_font.font.rasterize(ch, ui_font.px);
+        if metrics.width == 0 || metrics.height == 0 {
+            pen_x += metrics.advance_width;
+            continue;
+        }
+        let gx = pen_x as i32 + metrics.xmin;
+        let gy = baseline as i32 + metrics.ymin - metrics.height as i32;
         for row in 0..metrics.height {
             let yy = gy + row as i32;
             if yy < 0 || yy as usize >= height {
@@ -330,6 +340,7 @@ fn draw_text(
                 px[idx] = blend_rgb(px[idx], color, cov);
             }
         }
+        pen_x += metrics.advance_width;
     }
 }
 
