@@ -81,10 +81,19 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
     let parent_tid = get_parent_thread_id();
     if let Some(parent_tid) = parent_tid {
         const CHUNK: usize = 512;
+        const IPC_SEND_RETRY: usize = 64;
         let mut offset = 0;
         while offset < buf.len() {
             let end = core::cmp::min(offset + CHUNK, buf.len());
-            if crate::syscall::ipc::send_from_kernel(parent_tid, &buf[offset..end]) {
+            let mut sent = false;
+            for _ in 0..IPC_SEND_RETRY {
+                if crate::syscall::ipc::send_from_kernel(parent_tid, &buf[offset..end]) {
+                    sent = true;
+                    break;
+                }
+                crate::task::yield_now();
+            }
+            if sent {
                 sent_chunks += 1;
             } else {
                 failed_chunks += 1;

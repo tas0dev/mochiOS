@@ -64,6 +64,8 @@ pub enum SyscallNumber {
     ExitGroup = 231,
     /// kill (シグナルを送る)
     Kill = 62,
+    /// fcntl
+    Fcntl = 72,
     /// tkill (スレッドID宛てシグナル)
     Tkill = 200,
     /// tgkill (スレッドグループ+スレッドID宛てシグナル)

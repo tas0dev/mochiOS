@@ -225,6 +225,11 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
     const TCSETS2: u64 = 0x402C_542B;
     const TCSETSW2: u64 = 0x402C_542C;
     const TCSETSF2: u64 = 0x402C_542D;
+    // newlib(sysvi386) の termios が使う ioctl 番号
+    const XCGETA: u64 = ((b'x' as u64) << 8) | 1;
+    const XCSETA: u64 = ((b'x' as u64) << 8) | 2;
+    const XCSETAW: u64 = ((b'x' as u64) << 8) | 3;
+    const XCSETAF: u64 = ((b'x' as u64) << 8) | 4;
     const TIOCSWINSZ: u64 = 0x5414;
     const FIONREAD: u64 = 0x541b;
 
@@ -246,10 +251,12 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
         TIOCGWINSZ => crate::syscall::tty::get_winsize(arg),
         TIOCSWINSZ => crate::syscall::tty::set_winsize(arg),
         TCGETS | TCGETS2 => crate::syscall::tty::tcgets(arg),
+        XCGETA => crate::syscall::tty::tcgeta(arg),
         TCGETA => crate::syscall::tty::tcgeta(arg),
         TCSETS | TCSETSW | TCSETSF | TCSETS2 | TCSETSW2 | TCSETSF2 => {
             crate::syscall::tty::tcsets(arg)
         }
+        XCSETA | XCSETAW | XCSETAF => crate::syscall::tty::tcseta(arg),
         TCSETA | TCSETAW | TCSETAF => crate::syscall::tty::tcseta(arg),
         FIONREAD => {
             if arg == 0 || !crate::syscall::validate_user_ptr(arg, 4) {

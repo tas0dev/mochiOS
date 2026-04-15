@@ -828,6 +828,24 @@ impl Terminal {
         self.index();
     }
 
+    pub fn erase_previous_cell(&mut self) {
+        if self.max_cols == 0 || self.max_rows == 0 {
+            return;
+        }
+        if self.col > 0 {
+            self.col -= 1;
+            self.set_cell(
+                self.col,
+                self.row,
+                Cell {
+                    ch: b' ',
+                    fg: self.fg,
+                    bg: self.bg,
+                },
+            );
+        }
+    }
+
     fn set_scroll_region(&mut self, top: u32, bottom: u32) {
         if self.max_rows == 0 {
             self.scroll_top = 0;

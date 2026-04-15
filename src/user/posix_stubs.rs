@@ -226,8 +226,19 @@ pub unsafe extern "C" fn pause() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fcntl(_fd: i32, _cmd: i32, _arg: i64) -> i32 {
-    0
+pub unsafe extern "C" fn fcntl(fd: i32, cmd: i32, arg: i64) -> i32 {
+    let ret = syscall3(
+        SyscallNumber::Fcntl as u64,
+        fd as u64,
+        cmd as u64,
+        arg as u64,
+    ) as i64;
+    if ret < 0 {
+        set_errno(errno_from_neg_ret(ret));
+        -1
+    } else {
+        ret as i32
+    }
 }
 
 #[unsafe(no_mangle)]

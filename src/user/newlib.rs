@@ -145,13 +145,51 @@ pub extern "C" fn fstat(fd: i32, stat: *mut u8) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn _isatty(fd: i32) -> i32 {
-    // 簡易実装: 標準入出力(0,1,2)はTTYとみなす
-    if fd >= 0 && fd <= 2 {
-        1
+pub extern "C" fn _ioctl(fd: i32, request: u64, arg: u64) -> i32 {
+    let ret = syscall3(
+        SyscallNumber::Ioctl as u64,
+        fd as u64,
+        request,
+        arg,
+    ) as i64;
+    if ret < 0 {
+        unsafe { set_errno_from_ret(ret) };
+        -1
     } else {
-        0
+        ret as i32
     }
+}
+
+#[no_mangle]
+pub extern "C" fn _isatty(fd: i32) -> i32 {
+    const TCGETS: u64 = 0x5401;
+    const XCGETA: u64 = ((b'x' as u64) << 8) | 1;
+
+    if fd < 0 {
+        return 0;
+    }
+
+    // Linux系 termios ioctl
+    let mut termios = [0u8; 36];
+    let ret = syscall3(
+        SyscallNumber::Ioctl as u64,
+        fd as u64,
+        TCGETS,
+        termios.as_mut_ptr() as u64,
+    ) as i64;
+    if ret >= 0 {
+        return 1;
+    }
+
+    // newlib(sysvi386) 互換 ioctl
+    let mut termio = [0u8; 18];
+    let ret = syscall3(
+        SyscallNumber::Ioctl as u64,
+        fd as u64,
+        XCGETA,
+        termio.as_mut_ptr() as u64,
+    ) as i64;
+    if ret >= 0 { 1 } else { 0 }
 }
 
 #[no_mangle]
