@@ -75,28 +75,19 @@ pub fn write(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         }
     });
 
+    // TTY 出力を追跡し、必要な端末応答(DSR/DAなど)を stdin 側へ注入する
+    crate::syscall::tty::process_output(&buf);
+
     // 親プロセス（シェル）が存在すればIPCで転送して描画させる
-    let mut sent_chunks: usize = 0;
-    let mut failed_chunks: usize = 0;
+    // 対話アプリ(vim等)では描画欠落が致命的なので、キューが空くまで待って必ず送る。
     let parent_tid = get_parent_thread_id();
     if let Some(parent_tid) = parent_tid {
         const CHUNK: usize = 512;
-        const IPC_SEND_RETRY: usize = 64;
         let mut offset = 0;
         while offset < buf.len() {
             let end = core::cmp::min(offset + CHUNK, buf.len());
-            let mut sent = false;
-            for _ in 0..IPC_SEND_RETRY {
-                if crate::syscall::ipc::send_from_kernel(parent_tid, &buf[offset..end]) {
-                    sent = true;
-                    break;
-                }
+            while !crate::syscall::ipc::send_from_kernel(parent_tid, &buf[offset..end]) {
                 crate::task::yield_now();
-            }
-            if sent {
-                sent_chunks += 1;
-            } else {
-                failed_chunks += 1;
             }
             offset = end;
         }

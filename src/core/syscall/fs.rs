@@ -754,15 +754,21 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
     // FileHandle からメタデータを取得する
     let file_info = with_fd_table(pid, |t| {
         t.get(idx).map(|fh| {
+            let is_tty = fh
+                .dir_path
+                .as_deref()
+                .map(is_tty_like_path)
+                .unwrap_or(false);
             (
                 fh.data.len() as u64,
                 fh.dir_path.is_some(),
+                is_tty,
                 fh.is_remote,
                 fh.fd_remote,
             )
         })
     });
-    let (size, is_dir, is_remote, fd_remote) = match file_info {
+    let (size, is_dir, is_tty, is_remote, fd_remote) = match file_info {
         Some(Some(v)) => v,
         _ => return EBADF,
     };
@@ -774,8 +780,10 @@ pub fn fstat(fd: u64, stat_ptr: u64) -> u64 {
         write_stat_buf(stat_ptr, mode_for_stat(mode), size);
         return SUCCESS;
     }
-    // S_IFREG = 0x8000, S_IFDIR = 0x4000
-    let mode = if is_dir {
+    // S_IFCHR = 0x2000, S_IFREG = 0x8000, S_IFDIR = 0x4000
+    let mode = if is_tty {
+        0x2000u32 | 0o666
+    } else if is_dir {
         0x4000u32 | 0o755
     } else {
         0x8000u32 | 0o755

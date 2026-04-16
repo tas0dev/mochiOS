@@ -128,7 +128,8 @@ exec qemu-system-x86_64 \
     -device qemu-xhci,id=xhci \
     -device usb-kbd,bus=xhci.0 \
     -device usb-tablet,bus=xhci.0 \
-    -net none \
+    -netdev user,id=net0 \
+    -device virtio-net-pci,netdev=net0 \
     -m 512M \
     -no-reboot \
     -d int,guest_errors \

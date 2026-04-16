@@ -85,7 +85,7 @@ fn main() {
                 0x08 | 0x7F => { // Backspace / Delete
                     if term.input_len > 0 {
                         term.input_len -= 1;
-                        term.write_byte(0x08);
+                        term.erase_previous_cell();
                         term.flush();
                     }
                 }

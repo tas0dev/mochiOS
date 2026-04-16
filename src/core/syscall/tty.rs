@@ -4,6 +4,7 @@
 
 use crate::interrupt::spinlock::SpinLock;
 use crate::syscall::{copy_to_user, EFAULT, EINVAL, SUCCESS};
+use alloc::vec::Vec;
 
 const TERMIOS_SIZE: u64 = 36;
 const TERMIO_SIZE: u64 = 18;
@@ -25,6 +26,7 @@ const SC_TAB: u8 = 0x0F;
 const SC_ESC: u8 = 0x01;
 const SC_RELEASE: u8 = 0x80;
 const SC_E0: u8 = 0xE0;
+const OUT_CSI_MAX_SEQ: usize = 32;
 
 #[rustfmt::skip]
 const MAP_NORMAL: [u8; 128] = [
@@ -81,6 +83,12 @@ struct TtyState {
     shift: bool,
     caps: bool,
     e0_prefix: bool,
+    out_esc_pending: bool,
+    out_csi_mode: bool,
+    out_csi_seq: [u8; OUT_CSI_MAX_SEQ],
+    out_csi_len: usize,
+    cursor_row: u16, // 1-origin
+    cursor_col: u16, // 1-origin
 }
 
 impl TtyState {
@@ -104,6 +112,12 @@ impl TtyState {
             shift: false,
             caps: false,
             e0_prefix: false,
+            out_esc_pending: false,
+            out_csi_mode: false,
+            out_csi_seq: [0; OUT_CSI_MAX_SEQ],
+            out_csi_len: 0,
+            cursor_row: 1,
+            cursor_col: 1,
         }
     }
 }
@@ -114,6 +128,263 @@ static INPUT_QUEUE: crate::util::fifo::Fifo<u8, 1024> = crate::util::fifo::Fifo:
 fn push_bytes(bytes: &[u8]) {
     for &b in bytes {
         let _ = INPUT_QUEUE.push(b);
+    }
+}
+
+fn push_ascii_u16(out: &mut Vec<u8>, mut n: u16) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+    let mut buf = [0u8; 5];
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
+fn clamp_cursor(state: &mut TtyState) {
+    let rows = state.ws_row.max(1);
+    let cols = state.ws_col.max(1);
+    if state.cursor_row == 0 {
+        state.cursor_row = 1;
+    } else if state.cursor_row > rows {
+        state.cursor_row = rows;
+    }
+    if state.cursor_col == 0 {
+        state.cursor_col = 1;
+    } else if state.cursor_col > cols {
+        state.cursor_col = cols;
+    }
+}
+
+fn parse_ascii_u16(bytes: &[u8]) -> Option<u16> {
+    let mut value = 0u16;
+    for &b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        value = value.saturating_mul(10).saturating_add((b - b'0') as u16);
+    }
+    Some(value)
+}
+
+fn csi_params(seq: &[u8]) -> (Option<u8>, [u16; 8], usize) {
+    let mut params = [0u16; 8];
+    let mut count = 0usize;
+    let mut start = 0usize;
+    let private = match seq.first().copied() {
+        Some(b'?') | Some(b'>') | Some(b'!') => {
+            start = 1;
+            Some(seq[0])
+        }
+        _ => None,
+    };
+    let mut i = start;
+    let mut part_start = start;
+    while i <= seq.len() && count < params.len() {
+        if i == seq.len() || seq[i] == b';' {
+            if i == part_start {
+                params[count] = 0;
+                count += 1;
+            } else if let Some(v) = parse_ascii_u16(&seq[part_start..i]) {
+                params[count] = v;
+                count += 1;
+            }
+            part_start = i + 1;
+        }
+        i += 1;
+    }
+    (private, params, count)
+}
+
+fn csi_param_or(params: &[u16; 8], count: usize, idx: usize, default: u16) -> u16 {
+    let v = if idx < count { params[idx] } else { default };
+    if v == 0 { default } else { v }
+}
+
+fn parse_decrqm_mode(seq: &[u8]) -> Option<u16> {
+    // `CSI ? Pm $ p` の Pm を抜き出す
+    if seq.len() < 3 || seq[0] != b'?' || *seq.last()? != b'$' {
+        return None;
+    }
+    parse_ascii_u16(&seq[1..seq.len() - 1])
+}
+
+fn handle_output_csi(state: &mut TtyState, final_byte: u8, replies: &mut Vec<u8>) {
+    let rows = state.ws_row.max(1);
+    let cols = state.ws_col.max(1);
+    let seq = &state.out_csi_seq[..state.out_csi_len];
+    let (private, params, count) = csi_params(seq);
+    match final_byte {
+        b'A' => {
+            let n = csi_param_or(&params, count, 0, 1);
+            state.cursor_row = state.cursor_row.saturating_sub(n);
+            if state.cursor_row == 0 {
+                state.cursor_row = 1;
+            }
+        }
+        b'B' => {
+            let n = csi_param_or(&params, count, 0, 1);
+            state.cursor_row = core::cmp::min(state.cursor_row.saturating_add(n), rows);
+        }
+        b'C' => {
+            let n = csi_param_or(&params, count, 0, 1);
+            state.cursor_col = core::cmp::min(state.cursor_col.saturating_add(n), cols);
+        }
+        b'D' => {
+            let n = csi_param_or(&params, count, 0, 1);
+            state.cursor_col = state.cursor_col.saturating_sub(n);
+            if state.cursor_col == 0 {
+                state.cursor_col = 1;
+            }
+        }
+        b'H' | b'f' => {
+            state.cursor_row = csi_param_or(&params, count, 0, 1);
+            state.cursor_col = csi_param_or(&params, count, 1, 1);
+            clamp_cursor(state);
+        }
+        b'G' => {
+            state.cursor_col = csi_param_or(&params, count, 0, 1);
+            clamp_cursor(state);
+        }
+        b'd' => {
+            state.cursor_row = csi_param_or(&params, count, 0, 1);
+            clamp_cursor(state);
+        }
+        b'J' => {
+            let mode = if count > 0 { params[0] } else { 0 };
+            if mode == 2 {
+                state.cursor_row = 1;
+                state.cursor_col = 1;
+            }
+        }
+        b'n' => {
+            // DSR: Device Status/CPR
+            let p0 = csi_param_or(&params, count, 0, 0);
+            if p0 == 5 {
+                // "OK" status report
+                if private == Some(b'?') {
+                    replies.extend_from_slice(b"\x1b[?0n");
+                } else {
+                    replies.extend_from_slice(b"\x1b[0n");
+                }
+            } else if p0 == 6 {
+                // Cursor Position Report
+                replies.extend_from_slice(b"\x1b[");
+                if private == Some(b'?') {
+                    replies.push(b'?');
+                }
+                push_ascii_u16(replies, state.cursor_row.max(1));
+                replies.push(b';');
+                push_ascii_u16(replies, state.cursor_col.max(1));
+                replies.push(b'R');
+            }
+        }
+        b'c' => {
+            // DA / Secondary DA (xterm 互換の代表値を返す)
+            if private == Some(b'>') {
+                replies.extend_from_slice(b"\x1b[>0;136;0c");
+            } else {
+                replies.extend_from_slice(b"\x1b[?1;2c");
+            }
+        }
+        b'p' => {
+            // DECRQM: `CSI ? Pm $ p` への応答
+            if private == Some(b'?') {
+                if let Some(mode) = parse_decrqm_mode(seq) {
+                    replies.extend_from_slice(b"\x1b[?");
+                    push_ascii_u16(replies, mode);
+                    // 0 = unsupported / unknown
+                    replies.extend_from_slice(b";0$y");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn process_output(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let mut replies: Vec<u8> = Vec::new();
+    {
+        let mut state = TTY_STATE.lock();
+        let rows = state.ws_row.max(1);
+        let cols = state.ws_col.max(1);
+        for &b in bytes {
+            if state.out_csi_mode {
+                if (0x20..=0x3F).contains(&b) {
+                    if state.out_csi_len < state.out_csi_seq.len() {
+                        let idx = state.out_csi_len;
+                        state.out_csi_seq[idx] = b;
+                        state.out_csi_len += 1;
+                    } else {
+                        state.out_csi_mode = false;
+                        state.out_csi_len = 0;
+                    }
+                    continue;
+                }
+                if (0x40..=0x7E).contains(&b) {
+                    handle_output_csi(&mut state, b, &mut replies);
+                    state.out_csi_mode = false;
+                    state.out_csi_len = 0;
+                    continue;
+                }
+                state.out_csi_mode = false;
+                state.out_csi_len = 0;
+                continue;
+            }
+
+            if state.out_esc_pending {
+                state.out_esc_pending = false;
+                if b == b'[' {
+                    state.out_csi_mode = true;
+                    state.out_csi_len = 0;
+                    continue;
+                }
+                continue;
+            }
+
+            match b {
+                0x1B => state.out_esc_pending = true,
+                b'\r' => state.cursor_col = 1,
+                b'\n' => {
+                    if state.cursor_row < rows {
+                        state.cursor_row += 1;
+                    }
+                }
+                0x08 => {
+                    if state.cursor_col > 1 {
+                        state.cursor_col -= 1;
+                    }
+                }
+                b'\t' => {
+                    let cur0 = state.cursor_col.saturating_sub(1);
+                    let next = ((cur0 / 8) + 1) * 8 + 1;
+                    state.cursor_col = core::cmp::min(next, cols);
+                }
+                0x20..=0x7E => {
+                    if state.cursor_col >= cols {
+                        state.cursor_col = 1;
+                        if state.cursor_row < rows {
+                            state.cursor_row += 1;
+                        }
+                    } else {
+                        state.cursor_col += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        clamp_cursor(&mut state);
+    }
+    if !replies.is_empty() {
+        push_bytes(&replies);
     }
 }
 
@@ -304,6 +575,10 @@ pub fn tcsets(arg: u64) -> u64 {
     state.lflag = lflag;
     state.line = line;
     state.cc = cc;
+    if (state.lflag & LFLAG_ICANON) == 0 {
+        state.cc[CC_VMIN] = 1;
+        state.cc[CC_VTIME] = 0;
+    }
     SUCCESS
 }
 
@@ -354,6 +629,10 @@ pub fn tcseta(arg: u64) -> u64 {
     state.lflag = lflag;
     state.line = line;
     state.cc[..9].copy_from_slice(&cc9);
+    if (state.lflag & LFLAG_ICANON) == 0 {
+        state.cc[CC_VMIN] = 1;
+        state.cc[CC_VTIME] = 0;
+    }
     SUCCESS
 }
 
@@ -393,6 +672,7 @@ pub fn set_winsize(arg: u64) -> u64 {
     }
     state.ws_xpixel = xpixel;
     state.ws_ypixel = ypixel;
+    clamp_cursor(&mut state);
     SUCCESS
 }
 
@@ -407,9 +687,6 @@ pub fn read_stdin(buf_ptr: u64, len: u64) -> u64 {
     let state = *TTY_STATE.lock();
     let canonical = (state.lflag & LFLAG_ICANON) != 0;
     let iflag = state.iflag;
-    let vmin = state.cc[CC_VMIN] as usize;
-    let vtime_ds = state.cc[CC_VTIME] as u64;
-    let vtime_ms = vtime_ds.saturating_mul(100);
     let mut out = alloc::vec::Vec::with_capacity(len as usize);
     if canonical {
         let first = normalize_input_byte(next_input_byte_blocking(), iflag);
@@ -422,51 +699,12 @@ pub fn read_stdin(buf_ptr: u64, len: u64) -> u64 {
             out.push(b);
         }
     } else {
-        // 対話アプリで ESC が次キー待ちになるのを避けるため、
-        // 非canonical時の最小読み取りは 1 バイトを上限に扱う。
-        let eff_vmin = if vmin == 0 { 0 } else { 1 };
-        let target_min = core::cmp::min(eff_vmin, len as usize);
-        if vmin == 0 && vtime_ds == 0 {
-            while (out.len() as u64) < len {
-                match next_input_byte_nonblocking() {
-                    Some(b) => out.push(normalize_input_byte(b, iflag)),
-                    None => break,
-                }
-            }
-        } else if eff_vmin == 0 {
-            if let Some(first) = next_input_byte_timeout(vtime_ms) {
-                out.push(normalize_input_byte(first, iflag));
-                while (out.len() as u64) < len {
-                    match next_input_byte_nonblocking() {
-                        Some(b) => out.push(normalize_input_byte(b, iflag)),
-                        None => break,
-                    }
-                }
-            } else {
-                return 0;
-            }
-        } else if vtime_ds == 0 {
-            while out.len() < target_min {
-                out.push(normalize_input_byte(next_input_byte_blocking(), iflag));
-            }
-            while (out.len() as u64) < len {
-                match next_input_byte_nonblocking() {
-                    Some(b) => out.push(normalize_input_byte(b, iflag)),
-                    None => break,
-                }
-            }
-        } else {
-            out.push(normalize_input_byte(next_input_byte_blocking(), iflag));
-            while (out.len() as u64) < len {
-                if out.len() >= target_min {
-                    break;
-                }
-                match next_input_byte_timeout(vtime_ms) {
-                    Some(b) => out.push(normalize_input_byte(b, iflag)),
-                    None => break,
-                }
-            }
-        }
+        // 対話アプリ優先: noncanonical は raw 1バイト即返却。
+        let b = match next_input_byte_nonblocking() {
+            Some(v) => v,
+            None => next_input_byte_blocking(),
+        };
+        out.push(normalize_input_byte(b, iflag));
     }
 
     if let Err(errno) = copy_to_user(buf_ptr, &out) {

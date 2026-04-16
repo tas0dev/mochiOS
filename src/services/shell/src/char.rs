@@ -433,7 +433,9 @@ pub struct Terminal {
     ansi_esc_pending: bool,
     ansi_csi_mode: bool,
     ansi_osc_mode: bool,
+    ansi_dcs_mode: bool,
     ansi_osc_esc_pending: bool,
+    ansi_dcs_esc_pending: bool,
     ansi_seq: [u8; ANSI_MAX_SEQ_LEN],
     ansi_seq_len: usize,
     ansi_saved_col: u32,
@@ -585,7 +587,9 @@ impl Terminal {
             ansi_esc_pending: false,
             ansi_csi_mode: false,
             ansi_osc_mode: false,
+            ansi_dcs_mode: false,
             ansi_osc_esc_pending: false,
+            ansi_dcs_esc_pending: false,
             ansi_seq: [0; ANSI_MAX_SEQ_LEN],
             ansi_seq_len: 0,
             ansi_saved_col: 0,
@@ -1069,7 +1073,9 @@ impl Terminal {
         self.ansi_esc_pending = false;
         self.ansi_csi_mode = false;
         self.ansi_osc_mode = false;
+        self.ansi_dcs_mode = false;
         self.ansi_osc_esc_pending = false;
+        self.ansi_dcs_esc_pending = false;
         self.ansi_seq_len = 0;
     }
 
@@ -1419,6 +1425,24 @@ impl Terminal {
     }
 
     fn write_output_byte(&mut self, byte: u8) {
+        if self.ansi_dcs_mode {
+            if byte == 0x07 {
+                self.reset_ansi_parser();
+                return;
+            }
+            if self.ansi_dcs_esc_pending {
+                self.ansi_dcs_esc_pending = false;
+                if byte == b'\\' {
+                    self.reset_ansi_parser();
+                }
+                return;
+            }
+            if byte == 0x1B {
+                self.ansi_dcs_esc_pending = true;
+            }
+            return;
+        }
+
         if self.ansi_osc_mode {
             if byte == 0x07 {
                 self.reset_ansi_parser();
@@ -1445,6 +1469,9 @@ impl Terminal {
             } else if byte == b']' {
                 self.ansi_osc_mode = true;
                 self.ansi_osc_esc_pending = false;
+            } else if byte == b'P' {
+                self.ansi_dcs_mode = true;
+                self.ansi_dcs_esc_pending = false;
             } else if byte == b'7' {
                 self.ansi_saved_col = self.col;
                 self.ansi_saved_row = self.row;
