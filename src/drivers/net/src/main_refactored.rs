@@ -44,7 +44,7 @@ fn init_device(dev: NetDevice) {
 }
 
 fn main() {
-    println!("[NETDRV][v2] network driver started");
+    println!("[NETDRV] network driver started");
 
     let devices = find_network_devices();
     if devices.is_empty() {

@@ -2,7 +2,7 @@ use crate::net_common::*;
 use crate::util::*;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{compiler_fence, Ordering as AtomicOrdering};
-use swiftlib::{mmio, port, privileged, task, time, ipc};
+use swiftlib::{ipc, mmio, port, privileged, task, time};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -33,7 +33,10 @@ pub struct VirtQueue {
 
 impl VirtQueue {
     fn desc_ptr(&self, idx: u16) -> *mut VringDesc {
-        unsafe { self.base.add(idx as usize * core::mem::size_of::<VringDesc>()) as *mut VringDesc }
+        unsafe {
+            self.base
+                .add(idx as usize * core::mem::size_of::<VringDesc>()) as *mut VringDesc
+        }
     }
 
     fn avail_idx_ptr(&self) -> *mut u16 {
@@ -51,7 +54,8 @@ impl VirtQueue {
     fn used_elem(&self, slot: usize) -> VringUsedElem {
         unsafe {
             read_volatile(
-                self.base.add(self.used_ring_off + 4 + slot * core::mem::size_of::<VringUsedElem>())
+                self.base
+                    .add(self.used_ring_off + 4 + slot * core::mem::size_of::<VringUsedElem>())
                     as *const VringUsedElem,
             )
         }
@@ -109,10 +113,7 @@ pub fn setup_virtio_legacy_queue(base: u16, queue_index: u16) -> Option<VirtQueu
     }
 
     let avail_ring_off = queue_size as usize * core::mem::size_of::<VringDesc>();
-    let used_ring_off = align_up(
-        avail_ring_off + 6 + (queue_size as usize * 2),
-        PAGE_SIZE,
-    );
+    let used_ring_off = align_up(avail_ring_off + 6 + (queue_size as usize * 2), PAGE_SIZE);
 
     println!(
         "[NETDRV] queue {} ready size={} bytes={} pfn={:#x}",
@@ -193,7 +194,8 @@ pub fn poll_rx(rt: &mut VirtioNetRuntime) {
             if frame_total > VIRTIO_NET_HDR_LEN {
                 let frame_len = frame_total - VIRTIO_NET_HDR_LEN;
                 let frame_ptr = unsafe { rt.rx_bufs[desc_id].virt.add(VIRTIO_NET_HDR_LEN) };
-                let frame = unsafe { core::slice::from_raw_parts(frame_ptr as *const u8, frame_len) };
+                let frame =
+                    unsafe { core::slice::from_raw_parts(frame_ptr as *const u8, frame_len) };
                 handle_rx_frame(rt, frame);
             }
             enqueue_desc_to_avail(&mut rt.rxq, desc_id as u16);
@@ -343,8 +345,13 @@ pub fn handle_arp(rt: &mut VirtioNetRuntime, frame: &[u8]) {
         rt.gateway_mac = Some(sender_mac);
         rt.ping_pending = true;
         println!(
-            "[NETDRV][v2] ARP reply: gateway MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            sender_mac[0], sender_mac[1], sender_mac[2], sender_mac[3], sender_mac[4], sender_mac[5]
+            "[NETDRV] ARP reply: gateway MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            sender_mac[0],
+            sender_mac[1],
+            sender_mac[2],
+            sender_mac[3],
+            sender_mac[4],
+            sender_mac[5]
         );
         if rt.tx_inflight {
             println!("[NETDRV] ARP learned but TX busy, defer ICMP");
@@ -359,8 +366,14 @@ pub fn handle_arp(rt: &mut VirtioNetRuntime, frame: &[u8]) {
     } else if op == ARP_OP_REPLY {
         println!(
             "[NETDRV] ARP reply ignored: sender={}.{}.{}.{} target={}.{}.{}.{}",
-            sender_ip[0], sender_ip[1], sender_ip[2], sender_ip[3],
-            target_ip[0], target_ip[1], target_ip[2], target_ip[3]
+            sender_ip[0],
+            sender_ip[1],
+            sender_ip[2],
+            sender_ip[3],
+            target_ip[0],
+            target_ip[1],
+            target_ip[2],
+            target_ip[3]
         );
     }
 }
@@ -385,7 +398,11 @@ pub fn handle_ipv4(rt: &mut VirtioNetRuntime, frame: &[u8]) {
     }
     let icmp = &ip[ihl..];
     if icmp[0] != ICMP_ECHO_REPLY {
-        println!("[NETDRV] ICMP type={} code={}", icmp[0], icmp.get(1).copied().unwrap_or(0));
+        println!(
+            "[NETDRV] ICMP type={} code={}",
+            icmp[0],
+            icmp.get(1).copied().unwrap_or(0)
+        );
         return;
     }
     if icmp.len() < 8 {
@@ -476,7 +493,8 @@ pub fn virtio_legacy_init_pio(dev: crate::net_common::NetDevice) -> Option<Virti
     };
 
     let device_features = port::inl(base + VIRTIO_PIO_DEVICE_FEATURES);
-    let guest_features = device_features & ((1u32 << VIRTIO_NET_F_MAC) | (1u32 << VIRTIO_NET_F_STATUS));
+    let guest_features =
+        device_features & ((1u32 << VIRTIO_NET_F_MAC) | (1u32 << VIRTIO_NET_F_STATUS));
     println!("[NETDRV] virtio legacy PIO base={:#x}", base);
     println!("[NETDRV] virtio device_features={:#010x}", device_features);
     println!("[NETDRV] virtio guest_features ={:#010x}", guest_features);
