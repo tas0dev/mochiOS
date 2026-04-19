@@ -1,5 +1,6 @@
 use crate::elf::loader as elf_loader;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::TryInto;
@@ -210,11 +211,17 @@ pub fn exec_kernel_with_name(path: &str, name: &str) -> u64 {
 }
 
 fn exec_internal(path: &str, name_override: Option<&str>, args: &[&str]) -> u64 {
-    let process_name = name_override.unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path));
+    let mut process_name = name_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_string());
+    // Special-case mapping: drivers/net.elf should be exposed as "netdrv" for compatibility
+    if process_name == "net" || process_name == "net.elf" || path.ends_with("/Binaries/drivers/net.elf") {
+        process_name = "netdrv".to_string();
+    }
     if let Some(data) = crate::init::fs::read(path) {
-        exec_with_data(&data, process_name, path, args, None)
+        exec_with_data(&data, &process_name, path, args, None)
     } else if let Some(data) = crate::kmod::fs::read_all(path) {
-        exec_with_data(&data, process_name, path, args, None)
+        exec_with_data(&data, &process_name, path, args, None)
     } else {
         crate::warn!("exec: file not found: {}", path);
         crate::syscall::types::ENOENT
