@@ -15,7 +15,7 @@ pub(crate) mod user;
 ///
 /// ## Arguments
 /// - `boot_info`: ブートローダから渡される情報構造体
-pub fn init(boot_info: &'static crate::BootInfo) {
+pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     info!("Initializing memory...");
 
     x86_64::instructions::interrupts::disable();
@@ -23,16 +23,18 @@ pub fn init(boot_info: &'static crate::BootInfo) {
     gdt::init();
     interrupt::init_idt();
 
-    paging::init(boot_info);
+    paging::init(boot_info)?;
 
     let mut page_table_lock = paging::PAGE_TABLE.lock();
     let page_table = match page_table_lock.as_mut() {
         Some(p) => p,
         None => {
             crate::warn!("PAGE_TABLE not initialized");
-            loop {
-                x86_64::instructions::hlt();
-            }
+            crate::audit::log(
+                crate::audit::AuditEventKind::Fault,
+                "memory init missing page table",
+            );
+            return Err(crate::Kernel::Memory(crate::result::Memory::NotMapped));
         }
     };
     let mut frame_alloc_lock = frame::FRAME_ALLOCATOR.lock();
@@ -40,9 +42,11 @@ pub fn init(boot_info: &'static crate::BootInfo) {
         Some(fa) => fa,
         None => {
             crate::warn!("FRAME_ALLOCATOR not initialized");
-            loop {
-                x86_64::instructions::hlt();
-            }
+            crate::audit::log(
+                crate::audit::AuditEventKind::Fault,
+                "memory init missing frame allocator",
+            );
+            return Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory));
         }
     };
     if let Err(e) = allocator::init_heap(
@@ -51,9 +55,11 @@ pub fn init(boot_info: &'static crate::BootInfo) {
         boot_info.kernel_heap_addr,
     ) {
         crate::warn!("Heap initialization failed: {:?}", e);
-        loop {
-            x86_64::instructions::hlt();
-        }
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "memory init heap initialization failed",
+        );
+        return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
     }
 
     // PITを停止してからPICを初期化
@@ -61,6 +67,7 @@ pub fn init(boot_info: &'static crate::BootInfo) {
     interrupt::init_pic();
 
     debug!("Memory initialized");
+    Ok(())
 }
 
 /// メモリマップを設定してフレームアロケータを初期化

@@ -1,8 +1,7 @@
 use crate::interrupt::spinlock::SpinLock;
-use alloc::string::String;
 use alloc::format;
+use alloc::string::String;
 use alloc::string::ToString;
-
 
 use super::fd_table::FdTable;
 use super::ids::{PrivilegeLevel, ProcessId, ProcessState};
@@ -379,19 +378,24 @@ impl ProcessTable {
         // 3. stored_name == name + ".elf"
         // 4. stored_name == "/Binaries/drivers/" + name + ".elf"
         // 5. stored_name contains name as substring (fallback)
-        
-        // 1) 完全一致
-        if let Some(p) = self.processes.iter().filter_map(|s| s.as_ref()).find(|p| p.name() == name) {
-            return Some(p);
-        }
 
-        // 2) stored without .elf
+        // 1) 完全一致
         if let Some(p) = self
             .processes
             .iter()
             .filter_map(|s| s.as_ref())
-            .find(|p| p.name().strip_suffix(".elf").map(|s| s == name).unwrap_or(false))
+            .find(|p| p.name() == name)
         {
+            return Some(p);
+        }
+
+        // 2) stored without .elf
+        if let Some(p) = self.processes.iter().filter_map(|s| s.as_ref()).find(|p| {
+            p.name()
+                .strip_suffix(".elf")
+                .map(|s| s == name)
+                .unwrap_or(false)
+        }) {
             return Some(p);
         }
 
@@ -423,7 +427,7 @@ impl ProcessTable {
 
         // 5) Try drv -> base mapping (e.g., netdrv -> net)
         if name.ends_with("drv") && name.len() > 3 {
-            let base = &name[..name.len()-3];
+            let base = &name[..name.len() - 3];
             // try base, base.elf, drivers path
             if let Some(p) = self
                 .processes

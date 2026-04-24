@@ -1,6 +1,6 @@
 //! プロセスグループ・セッション関連のシステムコール
 
-use super::types::{EFAULT, EINVAL, EPERM, ESRCH, SUCCESS};
+use super::types::{EFAULT, EINVAL, ENOMEM, ENOTSUP, EPERM, ESRCH, SUCCESS};
 use crate::task::fd_table::FD_BASE;
 
 const POLLIN: u16 = 0x0001;
@@ -75,26 +75,32 @@ fn fdset_len_bytes(nfds: u64) -> Option<u64> {
 fn fdset_test(ptr: u64, fd: u64) -> bool {
     let word_off = (fd / 64) * 8;
     let bit = (fd % 64) as u32;
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let w = core::ptr::read_unaligned((ptr + word_off) as *const u64);
-        (w & (1u64 << bit)) != 0
-    })
+    let addr = match ptr.checked_add(word_off) {
+        Some(addr) => addr,
+        None => return false,
+    };
+    crate::syscall::read_user_u64(addr)
+        .map(|w| (w & (1u64 << bit)) != 0)
+        .unwrap_or(false)
 }
 
-fn fdset_clear_all(ptr: u64, len: u64) {
-    crate::syscall::with_user_memory_access(|| unsafe {
-        core::ptr::write_bytes(ptr as *mut u8, 0, len as usize);
-    });
+fn fdset_clear_all(ptr: u64, len: u64) -> Result<(), u64> {
+    let zero = [0u8; 64];
+    let mut written = 0u64;
+    while written < len {
+        let chunk = core::cmp::min((len - written) as usize, zero.len());
+        crate::syscall::copy_to_user(ptr + written, &zero[..chunk])?;
+        written += chunk as u64;
+    }
+    Ok(())
 }
 
-fn fdset_set(ptr: u64, fd: u64) {
+fn fdset_set(ptr: u64, fd: u64) -> Result<(), u64> {
     let word_off = (fd / 64) * 8;
     let bit = (fd % 64) as u32;
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let p = (ptr + word_off) as *mut u64;
-        let v = core::ptr::read_unaligned(p as *const u64);
-        core::ptr::write_unaligned(p, v | (1u64 << bit));
-    });
+    let addr = ptr.checked_add(word_off).ok_or(EFAULT)?;
+    let v = crate::syscall::read_user_u64(addr)?;
+    crate::syscall::write_user_u64(addr, v | (1u64 << bit))
 }
 
 #[inline]
@@ -242,33 +248,94 @@ pub fn ioctl(fd: u64, request: u64, arg: u64) -> u64 {
                 Some(pid) => crate::task::with_process(pid, |p| p.pgid()).unwrap_or(1),
                 None => return EINVAL,
             };
-            crate::syscall::with_user_memory_access(|| unsafe {
-                core::ptr::write_unaligned(arg as *mut u32, pgid as u32);
-            });
-            SUCCESS
+            crate::syscall::write_user_u32(arg, pgid as u32)
+                .map(|_| SUCCESS)
+                .unwrap_or_else(|e| e)
         }
-        TIOCSPGRP => SUCCESS,
+        TIOCSPGRP => ENOTSUP,
         TIOCGWINSZ => crate::syscall::tty::get_winsize(arg),
-        TIOCSWINSZ => crate::syscall::tty::set_winsize(arg),
+        TIOCSWINSZ => ENOTSUP,
         TCGETS | TCGETS2 => crate::syscall::tty::tcgets(arg),
         XCGETA => crate::syscall::tty::tcgeta(arg),
         TCGETA => crate::syscall::tty::tcgeta(arg),
-        TCSETS | TCSETSW | TCSETSF | TCSETS2 | TCSETSW2 | TCSETSF2 => {
-            crate::syscall::tty::tcsets(arg)
-        }
-        XCSETA | XCSETAW | XCSETAF => crate::syscall::tty::tcseta(arg),
-        TCSETA | TCSETAW | TCSETAF => crate::syscall::tty::tcseta(arg),
+        TCSETS | TCSETSW | TCSETSF | TCSETS2 | TCSETSW2 | TCSETSF2 => ENOTSUP,
+        XCSETA | XCSETAW | XCSETAF => ENOTSUP,
+        TCSETA | TCSETAW | TCSETAF => ENOTSUP,
         FIONREAD => {
             if arg == 0 || !crate::syscall::validate_user_ptr(arg, 4) {
                 return EINVAL;
             }
             let n = crate::syscall::tty::pending_input_len() as u32;
-            crate::syscall::with_user_memory_access(|| unsafe {
-                core::ptr::write_unaligned(arg as *mut u32, n);
-            });
-            SUCCESS
+            crate::syscall::write_user_u32(arg, n)
+                .map(|_| SUCCESS)
+                .unwrap_or_else(|e| e)
         }
         _ => EINVAL,
+    }
+}
+
+/// mprotect システムコール
+///
+/// x86_64 の現在のユーザー保護モデルでは READ は常に許可単位になるため、
+/// ここでは READ/WRITE/EXEC の組み合わせのうち W+X を拒否しつつ、
+/// 既存マッピングの WRITABLE / NX を更新する。
+pub fn mprotect(addr: u64, len: u64, prot: u64) -> u64 {
+    const PROT_READ: u64 = 0x1;
+    const PROT_WRITE: u64 = 0x2;
+    const PROT_EXEC: u64 = 0x4;
+    const SUPPORTED_MASK: u64 = PROT_READ | PROT_WRITE | PROT_EXEC;
+    const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+
+    if len == 0 {
+        return SUCCESS;
+    }
+    if (prot & !SUPPORTED_MASK) != 0 {
+        return EINVAL;
+    }
+    if addr == 0 || addr > USER_SPACE_END {
+        return EINVAL;
+    }
+
+    let end_inclusive = match addr.checked_add(len.saturating_sub(1)) {
+        Some(v) if v <= USER_SPACE_END => v,
+        _ => return EINVAL,
+    };
+    let start = addr & !0xfffu64;
+    let length = match (end_inclusive & !0xfffu64)
+        .checked_add(4096)
+        .and_then(|end| end.checked_sub(start))
+    {
+        Some(v) if v != 0 => v,
+        _ => return EINVAL,
+    };
+
+    let present = prot != 0;
+    let writable = (prot & PROT_WRITE) != 0;
+    let executable = (prot & PROT_EXEC) != 0;
+    if present && writable && executable {
+        return EINVAL;
+    }
+
+    let pid = match current_pid() {
+        Some(p) => p,
+        None => return ESRCH,
+    };
+    let table_phys = match crate::task::with_process(pid, |p| p.page_table()).flatten() {
+        Some(pt) => pt,
+        None => return EINVAL,
+    };
+
+    match crate::mem::paging::protect_user_range_in_table(
+        table_phys, start, length, present, writable, executable,
+    ) {
+        Ok(()) => SUCCESS,
+        Err(crate::Kernel::Memory(crate::result::Memory::NotMapped)) => EFAULT,
+        Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory)) => ENOMEM,
+        Err(crate::Kernel::Memory(crate::result::Memory::PermissionDenied))
+        | Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress))
+        | Err(crate::Kernel::Memory(crate::result::Memory::AlignmentError))
+        | Err(crate::Kernel::InvalidParam) => EINVAL,
+        Err(_) => EFAULT,
     }
 }
 
@@ -293,11 +360,14 @@ pub fn poll(fds_ptr: u64, nfds: u64, timeout_arg: u64) -> u64 {
         let mut ready_count = 0u64;
         for i in 0..nfds {
             let base = fds_ptr + i * POLLFD_SIZE;
-            let (fd, events) = crate::syscall::with_user_memory_access(|| unsafe {
-                let fd = core::ptr::read_unaligned(base as *const i32);
-                let events = core::ptr::read_unaligned((base + 4) as *const u16);
-                (fd, events)
-            });
+            let fd = match crate::syscall::read_user_i32(base) {
+                Ok(fd) => fd,
+                Err(_) => continue,
+            };
+            let events = match crate::syscall::read_user_u16(base + 4) {
+                Ok(events) => events,
+                Err(_) => continue,
+            };
             let mut revents: u16 = 0;
             if fd >= 0 {
                 if (events & (POLLIN | POLLRDNORM)) != 0 && stdin_ready_for_fd(fd) {
@@ -307,9 +377,9 @@ pub fn poll(fds_ptr: u64, nfds: u64, timeout_arg: u64) -> u64 {
                     revents |= POLLOUT;
                 }
             }
-            crate::syscall::with_user_memory_access(|| unsafe {
-                core::ptr::write_unaligned((base + 6) as *mut u16, revents);
-            });
+            if crate::syscall::write_user_u16(base + 6, revents).is_err() {
+                continue;
+            }
             if revents != 0 {
                 ready_count += 1;
             }
@@ -344,11 +414,14 @@ pub fn ppoll(
         if !crate::syscall::validate_user_ptr(timeout_ptr, 16) {
             return EFAULT;
         }
-        let (sec, nsec) = crate::syscall::with_user_memory_access(|| unsafe {
-            let sec = core::ptr::read_unaligned(timeout_ptr as *const i64);
-            let nsec = core::ptr::read_unaligned((timeout_ptr + 8) as *const i64);
-            (sec, nsec)
-        });
+        let sec = match crate::syscall::read_user_i64(timeout_ptr) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let nsec = match crate::syscall::read_user_i64(timeout_ptr + 8) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
         if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
             return EINVAL;
         }
@@ -375,11 +448,14 @@ pub fn pselect6(
         if !crate::syscall::validate_user_ptr(timeout_ptr, 16) {
             return EFAULT;
         }
-        let (sec, nsec) = crate::syscall::with_user_memory_access(|| unsafe {
-            let sec = core::ptr::read_unaligned(timeout_ptr as *const i64);
-            let nsec = core::ptr::read_unaligned((timeout_ptr + 8) as *const i64);
-            (sec, nsec)
-        });
+        let sec = match crate::syscall::read_user_i64(timeout_ptr) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let nsec = match crate::syscall::read_user_i64(timeout_ptr + 8) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
         if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
             return EINVAL;
         }
@@ -429,10 +505,13 @@ pub fn pselect6(
                     ready_fds.push(fd);
                 }
             }
-            fdset_clear_all(readfds_ptr, set_len);
+            if fdset_clear_all(readfds_ptr, set_len).is_err() {
+                return 0;
+            }
             for fd in ready_fds {
-                fdset_set(readfds_ptr, fd);
-                ready_count += 1;
+                if fdset_set(readfds_ptr, fd).is_ok() {
+                    ready_count += 1;
+                }
             }
         }
         if writefds_ptr != 0 {
@@ -442,10 +521,13 @@ pub fn pselect6(
                     ready_fds.push(fd);
                 }
             }
-            fdset_clear_all(writefds_ptr, set_len);
+            if fdset_clear_all(writefds_ptr, set_len).is_err() {
+                return 0;
+            }
             for fd in ready_fds {
-                fdset_set(writefds_ptr, fd);
-                ready_count += 1;
+                if fdset_set(writefds_ptr, fd).is_ok() {
+                    ready_count += 1;
+                }
             }
         }
         ready_count
@@ -458,10 +540,10 @@ pub fn pselect6(
     let woke = wait_until_ready_or_timeout(timeout_ms, || eval_ready() > 0);
     if !woke {
         if readfds_ptr != 0 {
-            fdset_clear_all(readfds_ptr, set_len);
+            let _ = fdset_clear_all(readfds_ptr, set_len);
         }
         if writefds_ptr != 0 {
-            fdset_clear_all(writefds_ptr, set_len);
+            let _ = fdset_clear_all(writefds_ptr, set_len);
         }
         return 0;
     }
@@ -519,16 +601,15 @@ pub fn uname(buf_ptr: u64) -> u64 {
         b"x86_64",        // machine
         b"",              // domainname
     ];
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let buf = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, UTSNAME_SIZE as usize);
-        buf.fill(0);
-        for (i, f) in fields.iter().enumerate() {
-            let off = i * FIELD_LEN;
-            let n = f.len().min(FIELD_LEN - 1);
-            buf[off..off + n].copy_from_slice(&f[..n]);
-        }
-    });
-    SUCCESS
+    let mut buf = [0u8; UTSNAME_SIZE as usize];
+    for (i, f) in fields.iter().enumerate() {
+        let off = i * FIELD_LEN;
+        let n = f.len().min(FIELD_LEN - 1);
+        buf[off..off + n].copy_from_slice(&f[..n]);
+    }
+    crate::syscall::copy_to_user(buf_ptr, &buf)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|e| e)
 }
 
 /// nanosleep システムコール
@@ -538,11 +619,14 @@ pub fn nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
     if req_ptr == 0 || !crate::syscall::validate_user_ptr(req_ptr, 16) {
         return EINVAL;
     }
-    let (secs, nsecs) = crate::syscall::with_user_memory_access(|| unsafe {
-        let secs = core::ptr::read_unaligned(req_ptr as *const i64);
-        let nsecs = core::ptr::read_unaligned((req_ptr + 8) as *const i64);
-        (secs, nsecs)
-    });
+    let secs = match crate::syscall::read_user_i64(req_ptr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let nsecs = match crate::syscall::read_user_i64(req_ptr + 8) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     if secs < 0 || nsecs < 0 || nsecs >= 1_000_000_000 {
         return EINVAL;
     }
@@ -553,28 +637,17 @@ pub fn nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
     SUCCESS
 }
 
-/// mprotect システムコール（スタブ）
-///
-/// addr=0（nullページ）への保護変更は EINVAL を返す。
-/// それ以外は SUCCESS を返す（未実装）。
-pub fn mprotect(addr: u64, _len: u64, _prot: u64) -> u64 {
-    if addr < 0x1000 {
-        return super::types::EINVAL;
-    }
-    SUCCESS
-}
-
 /// getrlimit システムコール（リソース上限を無限大で返す）
 pub fn getrlimit(_resource: u64, rlim_ptr: u64) -> u64 {
     if rlim_ptr == 0 || !crate::syscall::validate_user_ptr(rlim_ptr, 16) {
         return EINVAL;
     }
-    // struct rlimit { rlim_cur: u64, rlim_max: u64 }
-    crate::syscall::with_user_memory_access(|| unsafe {
-        core::ptr::write_unaligned(rlim_ptr as *mut u64, u64::MAX);
-        core::ptr::write_unaligned((rlim_ptr + 8) as *mut u64, u64::MAX);
-    });
-    SUCCESS
+    let mut buf = [0u8; 16];
+    buf[..8].copy_from_slice(&u64::MAX.to_ne_bytes());
+    buf[8..].copy_from_slice(&u64::MAX.to_ne_bytes());
+    crate::syscall::copy_to_user(rlim_ptr, &buf)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|e| e)
 }
 
 /// prlimit64 システムコール（スタブ: 無限大を返し、設定を無視）

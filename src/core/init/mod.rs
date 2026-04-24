@@ -37,7 +37,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
     mem::init_frame_allocator(memory_map)?;
 
     // メモリ管理の初期化
-    mem::init(boot_info);
+    mem::init(boot_info)?;
 
     fs::init();
     crate::kmod::load_modules();

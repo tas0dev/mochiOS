@@ -203,7 +203,11 @@ fn csi_params(seq: &[u8]) -> (Option<u8>, [u16; 8], usize) {
 
 fn csi_param_or(params: &[u16; 8], count: usize, idx: usize, default: u16) -> u16 {
     let v = if idx < count { params[idx] } else { default };
-    if v == 0 { default } else { v }
+    if v == 0 {
+        default
+    } else {
+        v
+    }
 }
 
 fn parse_decrqm_mode(seq: &[u8]) -> Option<u16> {
@@ -537,37 +541,33 @@ pub fn tcgets(arg: u64) -> u64 {
         return EINVAL;
     }
     let state = *TTY_STATE.lock();
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let buf = core::slice::from_raw_parts_mut(arg as *mut u8, TERMIOS_SIZE as usize);
-        buf.fill(0);
-        buf[0..4].copy_from_slice(&state.iflag.to_ne_bytes());
-        buf[4..8].copy_from_slice(&state.oflag.to_ne_bytes());
-        buf[8..12].copy_from_slice(&state.cflag.to_ne_bytes());
-        buf[12..16].copy_from_slice(&state.lflag.to_ne_bytes());
-        buf[16] = state.line;
-        buf[17..36].copy_from_slice(&state.cc);
-    });
-    SUCCESS
+    let mut buf = [0u8; TERMIOS_SIZE as usize];
+    buf[0..4].copy_from_slice(&state.iflag.to_ne_bytes());
+    buf[4..8].copy_from_slice(&state.oflag.to_ne_bytes());
+    buf[8..12].copy_from_slice(&state.cflag.to_ne_bytes());
+    buf[12..16].copy_from_slice(&state.lflag.to_ne_bytes());
+    buf[16] = state.line;
+    buf[17..36].copy_from_slice(&state.cc);
+    crate::syscall::copy_to_user(arg, &buf)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|e| e)
 }
 
 pub fn tcsets(arg: u64) -> u64 {
     if arg == 0 || !crate::syscall::validate_user_ptr(arg, TERMIOS_SIZE) {
         return EINVAL;
     }
-    let (iflag, oflag, cflag, lflag, line, cc) =
-        crate::syscall::with_user_memory_access(|| unsafe {
-            let p = arg as *const u8;
-            let iflag = u32::from_ne_bytes([*p.add(0), *p.add(1), *p.add(2), *p.add(3)]);
-            let oflag = u32::from_ne_bytes([*p.add(4), *p.add(5), *p.add(6), *p.add(7)]);
-            let cflag = u32::from_ne_bytes([*p.add(8), *p.add(9), *p.add(10), *p.add(11)]);
-            let lflag = u32::from_ne_bytes([*p.add(12), *p.add(13), *p.add(14), *p.add(15)]);
-            let line = *p.add(16);
-            let mut cc = [0u8; 19];
-            for (i, v) in cc.iter_mut().enumerate() {
-                *v = *p.add(17 + i);
-            }
-            (iflag, oflag, cflag, lflag, line, cc)
-        });
+    let mut buf = [0u8; TERMIOS_SIZE as usize];
+    if let Err(e) = crate::syscall::copy_from_user(arg, &mut buf) {
+        return e;
+    }
+    let iflag = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let oflag = u32::from_ne_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let cflag = u32::from_ne_bytes([buf[8], buf[9], buf[10], buf[11]]);
+    let lflag = u32::from_ne_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    let line = buf[16];
+    let mut cc = [0u8; 19];
+    cc.copy_from_slice(&buf[17..36]);
     let mut state = TTY_STATE.lock();
     state.iflag = iflag;
     state.oflag = oflag;
@@ -587,41 +587,37 @@ pub fn tcgeta(arg: u64) -> u64 {
         return EINVAL;
     }
     let state = *TTY_STATE.lock();
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let buf = core::slice::from_raw_parts_mut(arg as *mut u8, TERMIO_SIZE as usize);
-        buf.fill(0);
-        let iflag = (state.iflag & 0xFFFF) as u16;
-        let oflag = (state.oflag & 0xFFFF) as u16;
-        let cflag = (state.cflag & 0xFFFF) as u16;
-        let lflag = (state.lflag & 0xFFFF) as u16;
-        buf[0..2].copy_from_slice(&iflag.to_ne_bytes());
-        buf[2..4].copy_from_slice(&oflag.to_ne_bytes());
-        buf[4..6].copy_from_slice(&cflag.to_ne_bytes());
-        buf[6..8].copy_from_slice(&lflag.to_ne_bytes());
-        buf[8] = state.line;
-        buf[9..18].copy_from_slice(&state.cc[..9]);
-    });
-    SUCCESS
+    let mut buf = [0u8; TERMIO_SIZE as usize];
+    let iflag = (state.iflag & 0xFFFF) as u16;
+    let oflag = (state.oflag & 0xFFFF) as u16;
+    let cflag = (state.cflag & 0xFFFF) as u16;
+    let lflag = (state.lflag & 0xFFFF) as u16;
+    buf[0..2].copy_from_slice(&iflag.to_ne_bytes());
+    buf[2..4].copy_from_slice(&oflag.to_ne_bytes());
+    buf[4..6].copy_from_slice(&cflag.to_ne_bytes());
+    buf[6..8].copy_from_slice(&lflag.to_ne_bytes());
+    buf[8] = state.line;
+    buf[9..18].copy_from_slice(&state.cc[..9]);
+    crate::syscall::copy_to_user(arg, &buf)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|e| e)
 }
 
 pub fn tcseta(arg: u64) -> u64 {
     if arg == 0 || !crate::syscall::validate_user_ptr(arg, TERMIO_SIZE) {
         return EINVAL;
     }
-    let (iflag, oflag, cflag, lflag, line, cc9) =
-        crate::syscall::with_user_memory_access(|| unsafe {
-            let p = arg as *const u8;
-            let iflag = u16::from_ne_bytes([*p.add(0), *p.add(1)]) as u32;
-            let oflag = u16::from_ne_bytes([*p.add(2), *p.add(3)]) as u32;
-            let cflag = u16::from_ne_bytes([*p.add(4), *p.add(5)]) as u32;
-            let lflag = u16::from_ne_bytes([*p.add(6), *p.add(7)]) as u32;
-            let line = *p.add(8);
-            let mut cc9 = [0u8; 9];
-            for (i, v) in cc9.iter_mut().enumerate() {
-                *v = *p.add(9 + i);
-            }
-            (iflag, oflag, cflag, lflag, line, cc9)
-        });
+    let mut buf = [0u8; TERMIO_SIZE as usize];
+    if let Err(e) = crate::syscall::copy_from_user(arg, &mut buf) {
+        return e;
+    }
+    let iflag = u16::from_ne_bytes([buf[0], buf[1]]) as u32;
+    let oflag = u16::from_ne_bytes([buf[2], buf[3]]) as u32;
+    let cflag = u16::from_ne_bytes([buf[4], buf[5]]) as u32;
+    let lflag = u16::from_ne_bytes([buf[6], buf[7]]) as u32;
+    let line = buf[8];
+    let mut cc9 = [0u8; 9];
+    cc9.copy_from_slice(&buf[9..18]);
     let mut state = TTY_STATE.lock();
     state.iflag = iflag;
     state.oflag = oflag;
@@ -641,28 +637,28 @@ pub fn get_winsize(arg: u64) -> u64 {
         return EINVAL;
     }
     let state = *TTY_STATE.lock();
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let buf = core::slice::from_raw_parts_mut(arg as *mut u8, WIN_SIZE as usize);
-        buf[0..2].copy_from_slice(&state.ws_row.to_ne_bytes());
-        buf[2..4].copy_from_slice(&state.ws_col.to_ne_bytes());
-        buf[4..6].copy_from_slice(&state.ws_xpixel.to_ne_bytes());
-        buf[6..8].copy_from_slice(&state.ws_ypixel.to_ne_bytes());
-    });
-    SUCCESS
+    let mut buf = [0u8; WIN_SIZE as usize];
+    buf[0..2].copy_from_slice(&state.ws_row.to_ne_bytes());
+    buf[2..4].copy_from_slice(&state.ws_col.to_ne_bytes());
+    buf[4..6].copy_from_slice(&state.ws_xpixel.to_ne_bytes());
+    buf[6..8].copy_from_slice(&state.ws_ypixel.to_ne_bytes());
+    crate::syscall::copy_to_user(arg, &buf)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|e| e)
 }
 
 pub fn set_winsize(arg: u64) -> u64 {
     if arg == 0 || !crate::syscall::validate_user_ptr(arg, WIN_SIZE) {
         return EINVAL;
     }
-    let (row, col, xpixel, ypixel) = crate::syscall::with_user_memory_access(|| unsafe {
-        let p = arg as *const u8;
-        let row = u16::from_ne_bytes([*p.add(0), *p.add(1)]);
-        let col = u16::from_ne_bytes([*p.add(2), *p.add(3)]);
-        let xpixel = u16::from_ne_bytes([*p.add(4), *p.add(5)]);
-        let ypixel = u16::from_ne_bytes([*p.add(6), *p.add(7)]);
-        (row, col, xpixel, ypixel)
-    });
+    let mut buf = [0u8; WIN_SIZE as usize];
+    if let Err(e) = crate::syscall::copy_from_user(arg, &mut buf) {
+        return e;
+    }
+    let row = u16::from_ne_bytes([buf[0], buf[1]]);
+    let col = u16::from_ne_bytes([buf[2], buf[3]]);
+    let xpixel = u16::from_ne_bytes([buf[4], buf[5]]);
+    let ypixel = u16::from_ne_bytes([buf[6], buf[7]]);
     let mut state = TTY_STATE.lock();
     if row != 0 {
         state.ws_row = row;

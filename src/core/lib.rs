@@ -6,10 +6,32 @@
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
 
+#[cfg(feature = "kcfi")]
+compile_error!(
+    "feature `kcfi` is intentionally gated off: the current mochiOS build does not have a \
+     verified Rust/LLVM KCFI pipeline for this freestanding x86_64 kernel. Leaving it \
+     selectable without end-to-end verification would be unsound."
+);
+
+#[cfg(feature = "cet-ibt")]
+compile_error!(
+    "feature `cet-ibt` is intentionally gated off: hand-written syscall/interrupt/trampoline \
+     assembly has not yet been fully annotated and inspected for ENDBR64 compliance."
+);
+
+#[cfg(feature = "cet-shadow-stack")]
+compile_error!(
+    "feature `cet-shadow-stack` is intentionally gated off: kernel shadow-stack allocation, \
+     context-switch save/restore, and signal integration are not yet complete."
+);
+
 extern crate alloc;
 
 /// エラー型定義
 pub mod result;
+
+/// 監査ログ
+pub mod audit;
 
 /// 割込み管理
 pub mod interrupt;

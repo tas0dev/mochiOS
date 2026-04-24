@@ -267,11 +267,12 @@ pub fn pipe2_syscall(pipefd_ptr: u64, flags: u64) -> u64 {
 
     match (read_fd, write_fd) {
         (Some(rfd), Some(wfd)) => {
-            crate::syscall::with_user_memory_access(|| unsafe {
-                core::ptr::write_unaligned(pipefd_ptr as *mut u32, rfd as u32);
-                core::ptr::write_unaligned((pipefd_ptr + 4) as *mut u32, wfd as u32);
-            });
-            super::types::SUCCESS
+            let mut fds = [0u8; 8];
+            fds[..4].copy_from_slice(&(rfd as u32).to_ne_bytes());
+            fds[4..].copy_from_slice(&(wfd as u32).to_ne_bytes());
+            crate::syscall::copy_to_user(pipefd_ptr, &fds)
+                .map(|_| super::types::SUCCESS)
+                .unwrap_or_else(|e| e)
         }
         _ => {
             close_read_end(pipe_id);

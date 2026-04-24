@@ -348,7 +348,11 @@ pub fn exit_current_task(exit_code: u64) -> ! {
                     switch_to_thread(None, next_id);
                 }
 
-                crate::sprintln!("switch_to_thread returned unexpectedly; halting.");
+                crate::audit::log(
+                    crate::audit::AuditEventKind::Fault,
+                    "scheduler switch_to_thread returned unexpectedly after exit",
+                );
+                x86_64::instructions::interrupts::disable();
                 loop {
                     x86_64::instructions::hlt();
                 }
@@ -363,7 +367,11 @@ pub fn exit_current_task(exit_code: u64) -> ! {
     }
 
     // スレッドがない場合は永久にhaltして待機
-    crate::sprintln!("No more user threads. Halting system.");
+    crate::audit::log(
+        crate::audit::AuditEventKind::Fault,
+        "scheduler observed no more user threads",
+    );
+    x86_64::instructions::interrupts::disable();
     loop {
         x86_64::instructions::hlt();
     }
@@ -416,12 +424,20 @@ pub fn start_scheduling() -> ! {
             }
         });
 
-        crate::sprintln!("switch_to_thread returned unexpectedly; halting.");
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "start_scheduling switch_to_thread returned unexpectedly",
+        );
+        x86_64::instructions::interrupts::disable();
         loop {
             x86_64::instructions::hlt();
         }
     } else {
-        crate::sprintln!("No threads to schedule; halting system.");
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "start_scheduling found no threads to schedule",
+        );
+        x86_64::instructions::interrupts::disable();
         loop {
             x86_64::instructions::hlt();
         }

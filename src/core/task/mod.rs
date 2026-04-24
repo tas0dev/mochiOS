@@ -27,8 +27,9 @@ pub use scheduler::{
     yield_now, Scheduler,
 };
 pub use signal::{
-    default_action, DefaultAction, SigAction, SignalState, SIGCHLD, SIGINT, SIGKILL, SIGTERM,
-    SIG_DFL, SIG_IGN,
+    default_action, sigreturn_stub_addr, DefaultAction, SigAction, SignalState, SA_RESTORER,
+    SIGCHLD, SIGINT, SIGKILL, SIGNAL_FRAME_MAGIC, SIGTERM, SIG_DFL, SIG_IGN,
+    USER_SIGRETURN_STUB_OFFSET,
 };
 pub use thread::{
     add_thread, allocate_kernel_stack, count_threads_by_state, current_thread_id, for_each_thread,

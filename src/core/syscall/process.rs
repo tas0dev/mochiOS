@@ -27,6 +27,23 @@ static FUTEX_WAIT_QUEUE: SpinLock<[Option<FutexWaitEntry>; MAX_FUTEX_WAITERS]> =
     SpinLock::new([None; MAX_FUTEX_WAITERS]);
 
 #[inline]
+fn aslr_mix64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+fn randomized_heap_base(pid: crate::task::ProcessId, floor: u64, max_pages: u64) -> u64 {
+    let seed = crate::cpu::boot_entropy_u64()
+        ^ crate::interrupt::timer::get_ticks().rotate_left(17)
+        ^ pid.as_u64().rotate_left(9)
+        ^ floor.rotate_left(3);
+    floor.saturating_add((aslr_mix64(seed) % max_pages) * 4096)
+}
+
+#[inline]
 fn page_align_up(addr: u64) -> Option<u64> {
     addr.checked_add(4095).map(|v| v & !4095)
 }
@@ -101,9 +118,15 @@ pub fn wake_due_futex_waiters(now_tick: u64) {
             if let Some(entry) = *slot {
                 if entry.wake_tick != NO_TIMEOUT_WAKE_TICK && now_tick >= entry.wake_tick {
                     *slot = None;
-                    debug_assert!(wake_count < wake_list.len());
-                    wake_list[wake_count] = Some(entry.tid);
-                    wake_count += 1;
+                    if wake_count < wake_list.len() {
+                        wake_list[wake_count] = Some(entry.tid);
+                        wake_count += 1;
+                    } else {
+                        crate::audit::log(
+                            crate::audit::AuditEventKind::Fault,
+                            "futex wake list overflow; dropping excess wake event",
+                        );
+                    }
                 }
             }
         }
@@ -185,7 +208,7 @@ pub fn brk(addr: u64) -> u64 {
             process.heap_end()
         );
         if process.heap_start() == 0 {
-            let default_heap_base = 0x4000_0000;
+            let default_heap_base = randomized_heap_base(pid, 0x4000_0000, 0x8000);
             process.set_heap_start(default_heap_base);
             process.set_heap_end(default_heap_base);
         }
@@ -430,9 +453,9 @@ pub fn wait(_pid: u64, status_ptr: u64, options: u64) -> u64 {
         {
             if status_ptr != 0 {
                 let status = ((exit_code & 0xff) << 8) as i32;
-                crate::syscall::with_user_memory_access(|| unsafe {
-                    core::ptr::write_unaligned(status_ptr as *mut i32, status);
-                });
+                if crate::syscall::write_user_i32(status_ptr, status).is_err() {
+                    return EFAULT;
+                }
             }
             return reaped_pid.as_u64();
         }
@@ -504,7 +527,7 @@ pub fn mmap(addr: u64, length: u64, _prot: u64, flags: u64, _fd: u64) -> u64 {
         // mmap用のヒープ領域を現在のbrk以降に割り当てる
         // (簡易実装: brkと同じ領域を使う)
         if process.heap_start() == 0 {
-            let default_heap_base = 0x5000_0000u64;
+            let default_heap_base = randomized_heap_base(pid, 0x5000_0000, 0x10000);
             process.set_heap_start(default_heap_base);
             process.set_heap_end(default_heap_base);
         }
@@ -655,9 +678,10 @@ pub fn futex(uaddr: u64, op: u32, val: u64, timeout: u64) -> u64 {
             // yield_now() 内部の switch_to_thread も CLI を実行するため、
             // without_interrupts をネストしても安全に動作する。
             let queued = x86_64::instructions::interrupts::without_interrupts(|| {
-                let current_val = crate::syscall::with_user_memory_access(|| unsafe {
-                    core::ptr::read_volatile(uaddr as *const u32)
-                });
+                let current_val = match crate::syscall::read_user_u32(uaddr) {
+                    Ok(v) => v,
+                    Err(_) => return Err(EFAULT),
+                };
                 if current_val != val as u32 {
                     return Err(EAGAIN);
                 }
@@ -790,12 +814,9 @@ pub fn arch_prctl(code: u64, addr: u64) -> u64 {
                     let src = old_fs.saturating_add(off);
                     let dst = addr.saturating_add(off);
                     if super::validate_user_ptr(src, 8) && super::validate_user_ptr(dst, 8) {
-                        let val = crate::syscall::with_user_memory_access(|| unsafe {
-                            core::ptr::read_unaligned(src as *const u64)
-                        });
-                        crate::syscall::with_user_memory_access(|| unsafe {
-                            core::ptr::write_unaligned(dst as *mut u64, val)
-                        });
+                        if let Ok(val) = crate::syscall::read_user_u64(src) {
+                            let _ = crate::syscall::write_user_u64(dst, val);
+                        }
                     }
                 }
             }
@@ -819,10 +840,10 @@ pub fn arch_prctl(code: u64, addr: u64) -> u64 {
             if !super::validate_user_ptr(addr, 8) {
                 return EFAULT;
             }
-            crate::syscall::with_user_memory_access(|| unsafe {
-                core::ptr::write_unaligned(addr as *mut u64, val)
-            });
-            SUCCESS
+            match crate::syscall::write_user_u64(addr, val) {
+                Ok(()) => SUCCESS,
+                Err(e) => e,
+            }
         }
         _ => EINVAL,
     }
@@ -856,15 +877,17 @@ pub fn getrandom(buf_ptr: u64, len: u64, _flags: u64) -> u64 {
         ^ buf_ptr.rotate_left(17)
         ^ len.rotate_left(7)
         ^ 0x9E37_79B9_7F4A_7C15;
-    crate::syscall::with_user_memory_access(|| unsafe {
-        for i in 0..len {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            core::ptr::write((buf_ptr + i) as *mut u8, (state >> 24) as u8);
-        }
-    });
-    len
+    let mut out = alloc::vec![0u8; len as usize];
+    for b in out.iter_mut() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *b = (state >> 24) as u8;
+    }
+    match crate::syscall::copy_to_user(buf_ptr, &out) {
+        Ok(()) => len,
+        Err(e) => e,
+    }
 }
 
 /// FindProcessByNameシステムコール

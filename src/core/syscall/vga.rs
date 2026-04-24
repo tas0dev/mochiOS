@@ -33,15 +33,15 @@ pub fn get_framebuffer_info(info_ptr: u64) -> u64 {
         None => return EINVAL,
     };
 
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let ptr = info_ptr as *mut u32;
-        ptr.add(0).write_volatile(fb_info.width as u32);
-        ptr.add(1).write_volatile(fb_info.height as u32);
-        ptr.add(2).write_volatile(fb_info.stride as u32);
-        ptr.add(3).write_volatile(0u32);
-    });
-
-    SUCCESS
+    let mut buf = [0u8; FB_INFO_SIZE as usize];
+    buf[0..4].copy_from_slice(&(fb_info.width as u32).to_ne_bytes());
+    buf[4..8].copy_from_slice(&(fb_info.height as u32).to_ne_bytes());
+    buf[8..12].copy_from_slice(&(fb_info.stride as u32).to_ne_bytes());
+    buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
+    match crate::syscall::copy_to_user(info_ptr, &buf) {
+        Ok(()) => SUCCESS,
+        Err(e) => e,
+    }
 }
 
 /// フレームバッファ物理メモリを呼び出し元プロセスのアドレス空間にマップする

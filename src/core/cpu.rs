@@ -8,20 +8,84 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 static FSGSBASE_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static UMIP_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static SMEP_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static SMAP_SUPPORTED: AtomicBool = AtomicBool::new(false);
 static SMAP_ENABLED: AtomicBool = AtomicBool::new(false);
+static IBPB_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static CET_IBT_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static CET_SHSTK_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static RDRAND_SUPPORTED: AtomicBool = AtomicBool::new(false);
+static SPEC_CTRL_MASK: AtomicU64 = AtomicU64::new(0);
 static BOOT_ENTROPY: AtomicU64 = AtomicU64::new(0);
 static CMOS_LOCK: Mutex<()> = Mutex::new(());
 
-/// CPUの初期化（SSE/FPU/NXE/SMEP/SMAP有効化）
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CpuVendor {
+    Intel,
+    Amd,
+    Other,
+}
+
+#[derive(Clone, Copy)]
+struct CpuidResult {
+    eax: u32,
+    ebx: u32,
+    ecx: u32,
+    edx: u32,
+}
+
+#[inline]
+fn cpuid(leaf: u32, subleaf: u32) -> CpuidResult {
+    // rbx は LLVM が予約するため、xchg で退避・復帰する。
+    let eax: u32;
+    let ebx: u64;
+    let ecx: u32;
+    let edx: u32;
+    unsafe {
+        asm!(
+            "xchg {rbx_tmp}, rbx",
+            "cpuid",
+            "xchg {rbx_tmp}, rbx",
+            inout("eax") leaf => eax,
+            inout("ecx") subleaf => ecx,
+            rbx_tmp = inout(reg) 0u64 => ebx,
+            out("edx") edx,
+            options(nomem, nostack)
+        );
+    }
+    CpuidResult {
+        eax,
+        ebx: ebx as u32,
+        ecx,
+        edx,
+    }
+}
+
+/// CPUの初期化（SSE/FPU/NXE/WP/UMIP/SMEP/SMAP/SpecCtrl有効化）
 pub fn init() {
     crate::info!("Initializing CPU features...");
 
+    detect_cpu_features();
+
     unsafe {
         enable_nxe();
+        enable_write_protect();
         enable_fpu();
         enable_sse();
+        enable_umip();
         enable_smep_smap();
+        enable_speculation_controls();
+        report_optional_control_flow_features();
     }
+}
+
+fn detect_cpu_features() {
+    FSGSBASE_SUPPORTED.store(cpu_has_fsgsbase(), Ordering::Release);
+    UMIP_SUPPORTED.store(cpu_has_umip(), Ordering::Release);
+    SMEP_SUPPORTED.store(cpu_has_smep(), Ordering::Release);
+    SMAP_SUPPORTED.store(cpu_has_smap(), Ordering::Release);
+    RDRAND_SUPPORTED.store(cpu_has_rdrand(), Ordering::Release);
 }
 
 /// EFER.NXEを有効化（NO_EXECUTEページテーブルフラグを機能させる）
@@ -65,6 +129,17 @@ unsafe fn enable_fpu() {
     asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack));
 }
 
+/// CR0.WP を有効化して supervisor write-protect を強制する
+unsafe fn enable_write_protect() {
+    let mut cr0 = read_cr0();
+    const CR0_WP_BIT: u64 = 1 << 16;
+    if (cr0 & CR0_WP_BIT) == 0 {
+        cr0 |= CR0_WP_BIT;
+        write_cr0(cr0);
+        crate::info!("CR0.WP enabled");
+    }
+}
+
 /// SSEを有効化
 unsafe fn enable_sse() {
     // CR4レジスタを読み取り
@@ -77,9 +152,8 @@ unsafe fn enable_sse() {
     cr4 |= 1 << 10;
     // ビット16 (FSGSBASE) をセット - RDFSBASE/WRFSBASE命令のサポート (TLS用)
     // CPUID leaf 7, EBX bit 0 でサポート確認
-    if cpu_has_fsgsbase() {
+    if FSGSBASE_SUPPORTED.load(Ordering::Acquire) {
         cr4 |= 1 << 16;
-        FSGSBASE_SUPPORTED.store(true, Ordering::Release);
         crate::info!("FSGSBASE enabled");
     } else {
         crate::info!("FSGSBASE not supported, using IA32_FS_BASE MSR");
@@ -89,12 +163,24 @@ unsafe fn enable_sse() {
     asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
 }
 
+/// UMIP を有効化してユーザーモードからの SGDT/SIDT 等による情報漏えいを抑止する
+unsafe fn enable_umip() {
+    if !UMIP_SUPPORTED.load(Ordering::Acquire) {
+        crate::warn!("UMIP not supported; skipping");
+        return;
+    }
+
+    let mut cr4 = read_cr4();
+    cr4 |= 1 << 11;
+    write_cr4(cr4);
+    crate::info!("UMIP enabled");
+}
+
 /// SMEP/SMAPを有効化
 unsafe fn enable_smep_smap() {
-    let mut cr4: u64;
-    asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+    let mut cr4 = read_cr4();
 
-    if cpu_has_smep() {
+    if SMEP_SUPPORTED.load(Ordering::Acquire) {
         // ビット20 (SMEP) をセット - カーネルモードでのユーザーページ実行禁止 (L-1修正)
         // ret2usr 等のカーネルモード特権昇格攻撃を防ぐ
         cr4 |= 1 << 20;
@@ -103,7 +189,7 @@ unsafe fn enable_smep_smap() {
         crate::warn!("SMEP not supported; skipping");
     }
 
-    if cpu_has_smap() {
+    if SMAP_SUPPORTED.load(Ordering::Acquire) {
         // ビット21 (SMAP) をセット - カーネルモードでのユーザーページアクセス禁止 (L-1修正)
         // カーネルが誤ってユーザー空間メモリを読み書きする脆弱性を防ぐ
         cr4 |= 1 << 21;
@@ -113,45 +199,122 @@ unsafe fn enable_smep_smap() {
         crate::warn!("SMAP not supported; skipping");
     }
 
-    asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
+    write_cr4(cr4);
+}
+
+unsafe fn enable_speculation_controls() {
+    const IA32_SPEC_CTRL: u32 = 0x48;
+    const IA32_PRED_CMD: u32 = 0x49;
+    const IA32_EFER: u32 = 0xC000_0080;
+    const SPEC_CTRL_IBRS: u64 = 1 << 0;
+    const SPEC_CTRL_STIBP: u64 = 1 << 1;
+    const SPEC_CTRL_BHI_DIS_S: u64 = 1 << 10;
+    const EFER_AUTOIBRS: u64 = 1 << 21;
+
+    let vendor = cpu_vendor();
+
+    let mut spec_ctrl_mask = 0u64;
+    if cpu_has_ibrs_ibpb() && !cpu_has_amd_autoibrs() {
+        spec_ctrl_mask |= SPEC_CTRL_IBRS;
+    }
+    if cpu_has_stibp() {
+        spec_ctrl_mask |= SPEC_CTRL_STIBP;
+    }
+    if vendor == CpuVendor::Intel && cpu_has_bhi_ctrl() {
+        spec_ctrl_mask |= SPEC_CTRL_BHI_DIS_S;
+    }
+    if spec_ctrl_mask != 0 {
+        let current = read_msr(IA32_SPEC_CTRL);
+        write_msr(IA32_SPEC_CTRL, current | spec_ctrl_mask);
+        SPEC_CTRL_MASK.store(spec_ctrl_mask, Ordering::Release);
+        crate::info!("IA32_SPEC_CTRL hardened with mask {:#x}", spec_ctrl_mask);
+    }
+
+    if cpu_has_amd_autoibrs() {
+        let efer = read_msr(IA32_EFER);
+        if (efer & EFER_AUTOIBRS) == 0 {
+            write_msr(IA32_EFER, efer | EFER_AUTOIBRS);
+            crate::info!("AMD AutoIBRS enabled");
+        }
+    }
+
+    if cpu_has_ibrs_ibpb() {
+        let _ = IA32_PRED_CMD;
+        IBPB_SUPPORTED.store(true, Ordering::Release);
+        crate::info!("IBPB supported");
+    }
+}
+
+unsafe fn report_optional_control_flow_features() {
+    let ibt = cpu_has_cet_ibt();
+    let shstk = cpu_has_cet_shadow_stack();
+    CET_IBT_SUPPORTED.store(ibt, Ordering::Release);
+    CET_SHSTK_SUPPORTED.store(shstk, Ordering::Release);
+    crate::info!(
+        "Optional CFI/CET support detected: IBT={}, shadow_stack={}",
+        ibt,
+        shstk
+    );
 }
 
 fn cpuid_leaf7_ebx() -> u32 {
-    // rbx は LLVM が予約するため xchg で保存/復元する
-    let ebx: u64;
-    unsafe {
-        asm!(
-            "xchg {tmp}, rbx",
-            "cpuid",
-            "xchg {tmp}, rbx",
-            inout("eax") 7u32 => _,
-            in("ecx") 0u32,
-            tmp = inout(reg) 0u64 => ebx,
-            out("edx") _,
-            options(nomem, nostack)
-        );
+    cpuid(7, 0).ebx
+}
+
+fn cpuid_leaf7_ecx() -> u32 {
+    cpuid(7, 0).ecx
+}
+
+fn cpuid_leaf7_edx() -> u32 {
+    cpuid(7, 0).edx
+}
+
+fn cpu_has_cet_shadow_stack() -> bool {
+    (cpuid_leaf7_ecx() & (1 << 7)) != 0
+}
+
+fn cpu_has_cet_ibt() -> bool {
+    (cpuid_leaf7_edx() & (1 << 20)) != 0
+}
+
+fn cpuid_leaf7_subleaf2_edx() -> u32 {
+    cpuid(7, 2).edx
+}
+
+fn cpuid_max_extended_leaf() -> u32 {
+    cpuid(0x8000_0000, 0).eax
+}
+
+fn cpuid_ext_8000_0008_ebx() -> u32 {
+    if cpuid_max_extended_leaf() < 0x8000_0008 {
+        return 0;
     }
-    ebx as u32
+    cpuid(0x8000_0008, 0).ebx
+}
+
+fn cpuid_ext_8000_0021_eax() -> u32 {
+    if cpuid_max_extended_leaf() < 0x8000_0021 {
+        return 0;
+    }
+    cpuid(0x8000_0021, 0).eax
+}
+
+fn cpu_vendor() -> CpuVendor {
+    let result = cpuid(0, 0);
+    match (result.ebx, result.edx, result.ecx) {
+        (0x756e_6547, 0x4965_6e69, 0x6c65_746e) => CpuVendor::Intel,
+        (0x6874_7541, 0x6974_6e65, 0x444d_4163) => CpuVendor::Amd,
+        _ => CpuVendor::Other,
+    }
 }
 
 fn cpuid_leaf1_ecx() -> u32 {
-    // rbx は LLVM が予約するため xchg で保存/復元する
-    let tmp: u64;
-    let ecx: u32;
-    unsafe {
-        asm!(
-            "xchg {rbx_tmp}, rbx",
-            "cpuid",
-            "xchg {rbx_tmp}, rbx",
-            inout("eax") 1u32 => _,
-            inout("ecx") 0u32 => ecx,
-            rbx_tmp = inout(reg) 0u64 => tmp,
-            out("edx") _,
-            options(nomem, nostack)
-        );
-    }
-    let _ = tmp;
-    ecx
+    cpuid(1, 0).ecx
+}
+
+/// CPUID で UMIP サポートを確認 (leaf 7, ECX bit 2)
+fn cpu_has_umip() -> bool {
+    (cpuid_leaf7_ecx() & (1 << 2)) != 0
 }
 
 /// CPUID で FSGSBASE サポートを確認 (leaf 7, EBX bit 0)
@@ -169,6 +332,26 @@ fn cpu_has_smap() -> bool {
     (cpuid_leaf7_ebx() & (1 << 20)) != 0
 }
 
+/// CPUID で IBRS/IBPB サポートを確認 (leaf 7, EDX bit 26)
+fn cpu_has_ibrs_ibpb() -> bool {
+    (cpuid_leaf7_edx() & (1 << 26)) != 0
+}
+
+/// CPUID で STIBP サポートを確認
+fn cpu_has_stibp() -> bool {
+    ((cpuid_leaf7_edx() & (1 << 27)) != 0) || ((cpuid_ext_8000_0008_ebx() & (1 << 15)) != 0)
+}
+
+/// Intel BHI control bit の有無を確認 (leaf 7, subleaf 2, EDX bit 4)
+fn cpu_has_bhi_ctrl() -> bool {
+    (cpuid_leaf7_subleaf2_edx() & (1 << 4)) != 0
+}
+
+/// AMD AutoIBRS サポートを確認 (Fn8000_0021:EAX bit 8)
+fn cpu_has_amd_autoibrs() -> bool {
+    cpu_vendor() == CpuVendor::Amd && (cpuid_ext_8000_0021_eax() & (1 << 8)) != 0
+}
+
 /// CPUID で RDRAND サポートを確認 (leaf 1, ECX bit 30)
 fn cpu_has_rdrand() -> bool {
     (cpuid_leaf1_ecx() & (1 << 30)) != 0
@@ -176,7 +359,7 @@ fn cpu_has_rdrand() -> bool {
 
 /// 可能なら CPU のハードウェア乱数 (RDRAND) を返す
 pub fn hw_random_u64() -> Option<u64> {
-    if !cpu_has_rdrand() {
+    if !RDRAND_SUPPORTED.load(Ordering::Acquire) {
         return None;
     }
     for _ in 0..10 {
@@ -232,6 +415,51 @@ pub unsafe fn read_fs_base() -> u64 {
 
 pub fn is_smap_enabled() -> bool {
     SMAP_ENABLED.load(Ordering::Acquire)
+}
+
+#[inline]
+pub fn speculation_barrier() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        asm!("lfence", options(nomem, nostack, preserves_flags));
+    }
+}
+
+pub fn branch_predictor_barrier() {
+    const IA32_PRED_CMD: u32 = 0x49;
+    if IBPB_SUPPORTED.load(Ordering::Acquire) {
+        unsafe {
+            write_msr(IA32_PRED_CMD, 1);
+        }
+    }
+    speculation_barrier();
+}
+
+pub fn reassert_runtime_hardening() {
+    unsafe {
+        let mut cr0 = read_cr0();
+        let mut cr4 = read_cr4();
+        cr0 |= 1 << 16;
+        if UMIP_SUPPORTED.load(Ordering::Acquire) {
+            cr4 |= 1 << 11;
+        }
+        if SMEP_SUPPORTED.load(Ordering::Acquire) {
+            cr4 |= 1 << 20;
+        }
+        if SMAP_SUPPORTED.load(Ordering::Acquire) {
+            cr4 |= 1 << 21;
+        }
+        write_cr0(cr0);
+        write_cr4(cr4);
+        let spec_ctrl_mask = SPEC_CTRL_MASK.load(Ordering::Acquire);
+        if spec_ctrl_mask != 0 {
+            const IA32_SPEC_CTRL: u32 = 0x48;
+            let current = read_msr(IA32_SPEC_CTRL);
+            if (current & spec_ctrl_mask) != spec_ctrl_mask {
+                write_msr(IA32_SPEC_CTRL, current | spec_ctrl_mask);
+            }
+        }
+    }
 }
 
 #[inline]
@@ -319,4 +547,53 @@ pub fn boot_entropy_u64() -> u64 {
         Ok(_) => mixed,
         Err(v) => v,
     }
+}
+
+unsafe fn read_msr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    asm!(
+        "rdmsr",
+        in("ecx") msr,
+        out("eax") lo,
+        out("edx") hi,
+        options(nomem, nostack)
+    );
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+unsafe fn write_msr(msr: u32, val: u64) {
+    let lo = val as u32;
+    let hi = (val >> 32) as u32;
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") lo,
+        in("edx") hi,
+        options(nomem, nostack)
+    );
+}
+
+#[inline]
+unsafe fn read_cr0() -> u64 {
+    let cr0: u64;
+    asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
+    cr0
+}
+
+#[inline]
+unsafe fn write_cr0(val: u64) {
+    asm!("mov cr0, {}", in(reg) val, options(nomem, nostack));
+}
+
+#[inline]
+unsafe fn read_cr4() -> u64 {
+    let cr4: u64;
+    asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+    cr4
+}
+
+#[inline]
+unsafe fn write_cr4(val: u64) {
+    asm!("mov cr4, {}", in(reg) val, options(nomem, nostack));
 }

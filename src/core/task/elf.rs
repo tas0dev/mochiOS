@@ -1,13 +1,12 @@
 //! ELFローダ
 
 use crate::init;
-use crate::mem::{frame, user};
+use crate::mem::{paging, user};
 use crate::result::{Kernel, Memory, Process, Result};
-use crate::task::{add_process, add_thread, PrivilegeLevel, Process as TaskProcess, Thread};
+use crate::task::{
+    add_process, add_thread, remove_process, PrivilegeLevel, Process as TaskProcess, Thread,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::structures::paging::Page;
-use x86_64::structures::paging::PageTableFlags;
-use x86_64::VirtAddr;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const PT_LOAD: u32 = 1;
@@ -69,6 +68,45 @@ pub struct LoadedElf {
     pub stack_bottom: u64,
 }
 
+struct ServiceSpawnGuard {
+    pid: crate::task::ProcessId,
+    page_table: u64,
+    kernel_stack: Option<u64>,
+    disarmed: bool,
+}
+
+impl ServiceSpawnGuard {
+    fn new(pid: crate::task::ProcessId, page_table: u64) -> Self {
+        Self {
+            pid,
+            page_table,
+            kernel_stack: None,
+            disarmed: false,
+        }
+    }
+
+    fn set_kernel_stack(&mut self, kernel_stack: u64) {
+        self.kernel_stack = Some(kernel_stack);
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for ServiceSpawnGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        if let Some(stack) = self.kernel_stack {
+            crate::task::free_kernel_stack(stack);
+        }
+        let _ = remove_process(self.pid);
+        let _ = paging::destroy_user_page_table(self.page_table);
+    }
+}
+
 #[inline]
 fn aslr_mix64(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -95,7 +133,29 @@ fn next_pie_load_bias() -> u64 {
     PIE_LOAD_BIAS + offset_pages * 4096
 }
 
+fn current_user_page_table() -> Result<u64> {
+    let pid = crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
+        .ok_or(Kernel::Memory(Memory::NotMapped))?;
+    crate::task::with_process(pid, |proc| proc.page_table())
+        .flatten()
+        .ok_or(Kernel::Memory(Memory::NotMapped))
+}
+
+fn write_user_bytes_in_table(table_phys: u64, user_addr: u64, bytes: &[u8]) -> Result<()> {
+    paging::copy_to_user_in_table(table_phys, user_addr, bytes)
+}
+
+fn write_user_u64_in_table(table_phys: u64, user_addr: u64, value: u64) -> Result<()> {
+    write_user_bytes_in_table(table_phys, user_addr, &value.to_ne_bytes())
+}
+
 pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
+    let table_phys = current_user_page_table()?;
+    load_elf_into(table_phys, data)
+}
+
+pub fn load_elf_into(table_phys: u64, data: &[u8]) -> Result<LoadedElf> {
     let header = parse_header(data)?;
     validate_header(header)?;
 
@@ -136,33 +196,29 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
             return Err(Kernel::Memory(Memory::InvalidAddress));
         }
 
-        let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-        // ロード時は常に書き込み可能にする（初期データコピーのため）
-        // TODO: 実行後にPF_Wに応じて保護属性を調整する
-        flags |= PageTableFlags::WRITABLE;
-        if phdr.p_flags & PF_X == 0 {
-            flags |= PageTableFlags::NO_EXECUTE;
-        }
-
         let vaddr = phdr.p_vaddr.wrapping_add(load_bias);
-        user::map_user_range(vaddr, phdr.p_memsz, flags)?;
-
-        unsafe {
-            let dst = vaddr as *mut u8;
-            let src = data.as_ptr().add(phdr.p_offset as usize);
-            core::ptr::copy_nonoverlapping(src, dst, filesz);
-
-            if memsz > filesz {
-                core::ptr::write_bytes(dst.add(filesz), 0, memsz - filesz);
-            }
+        let seg_src = &data[phdr.p_offset as usize..file_end];
+        let writable = (phdr.p_flags & PF_W) != 0;
+        let executable = (phdr.p_flags & PF_X) != 0;
+        if writable && executable {
+            return Err(Kernel::Memory(Memory::PermissionDenied));
         }
+        paging::map_and_copy_segment_to(
+            table_phys,
+            vaddr,
+            filesz as u64,
+            phdr.p_memsz,
+            seg_src,
+            writable,
+            executable,
+        )?;
     }
 
     if load_bias != 0 {
-        apply_relocations(data, header, load_bias)?;
+        apply_relocations_to(table_phys, data, header, load_bias)?;
     }
 
-    let stack = user::alloc_user_stack(8)?;
+    let stack = user::alloc_user_stack_in_table(table_phys, 8)?;
 
     Ok(LoadedElf {
         entry: header.e_entry.wrapping_add(load_bias),
@@ -174,43 +230,37 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf> {
 
 pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     let data = init::fs::read(path).ok_or(Kernel::InvalidParam)?;
-    let loaded = load_elf(&*data)?;
+    let new_pt_phys = paging::create_user_page_table()?;
 
-    // Services run in Ring3 (Service), not Core
-    let process = TaskProcess::new(name, PrivilegeLevel::Service, None, 1);
+    let mut process = TaskProcess::new(name, PrivilegeLevel::Service, None, 1);
+    process.set_page_table(new_pt_phys);
     let pid = process.id();
 
     if add_process(process).is_none() {
+        let _ = paging::destroy_user_page_table(new_pt_phys);
         return Err(Kernel::Process(Process::MaxProcessesReached));
     }
+    let mut guard = ServiceSpawnGuard::new(pid, new_pt_phys);
 
-    // Allocate a kernel stack (pages) for the service thread and map frames
+    let loaded = load_elf_into(new_pt_phys, &data)?;
+
     let stack_size = (loaded.stack_top - loaded.stack_bottom) as usize;
-    let page_size: usize = 4096;
-    let pages = (stack_size + page_size - 1) / page_size;
+    let kernel_stack_size = stack_size
+        .checked_add(4095)
+        .map(|v| v & !4095usize)
+        .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+    let kernel_stack_addr = crate::task::allocate_kernel_stack(kernel_stack_size)
+        .ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+    guard.set_kernel_stack(kernel_stack_addr);
 
-    // Allocate physical frames and map them immediately into kernel virtual space
-    let first_frame = frame::allocate_frame()?;
-    let first_phys = first_frame.start_address().as_u64();
-    let phys_offset = crate::mem::paging::physical_memory_offset();
-    let kernel_stack_addr = first_phys + phys_offset.unwrap_or(0);
-
-    // Map the first frame
-    let page = Page::containing_address(VirtAddr::new(kernel_stack_addr));
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-    crate::mem::paging::map_page(page, first_frame, flags)?;
-
-    // Allocate and map remaining frames
-    for i in 1..pages {
-        let f = frame::allocate_frame()?;
-        let vaddr = kernel_stack_addr + (i as u64) * (page_size as u64);
-        let page = Page::containing_address(VirtAddr::new(vaddr));
-        crate::mem::paging::map_page(page, f, flags)?;
-    }
-
-    let entry_fn: fn() -> ! = unsafe { core::mem::transmute(loaded.entry) };
-    // Create thread with kernel stack, then set its context.rsp to the user stack
-    let mut thread = Thread::new(pid, name, entry_fn, kernel_stack_addr, pages * page_size);
+    let mut thread = Thread::new_usermode(
+        pid,
+        name,
+        loaded.entry,
+        loaded.stack_top,
+        kernel_stack_addr,
+        kernel_stack_size,
+    );
 
     // Build initial user stack: argc/argv/envp/auxv and strings
     // We'll place strings at lower addresses and pointers/auxv above them.
@@ -220,10 +270,15 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
     let argv0 = path.as_bytes();
     // store argv0 string
     sp = sp.saturating_sub((argv0.len() + 1) as u64);
-    unsafe {
-        let dst = sp as *mut u8;
-        core::ptr::copy_nonoverlapping(argv0.as_ptr(), dst, argv0.len());
-        *dst.add(argv0.len()) = 0;
+    if let Err(err) = write_user_bytes_in_table(new_pt_phys, sp, argv0) {
+        let _ = remove_process(pid);
+        let _ = paging::destroy_user_page_table(new_pt_phys);
+        return Err(err);
+    }
+    if let Err(err) = write_user_bytes_in_table(new_pt_phys, sp + argv0.len() as u64, &[0]) {
+        let _ = remove_process(pid);
+        let _ = paging::destroy_user_page_table(new_pt_phys);
+        return Err(err);
     }
     let argv0_addr = sp;
 
@@ -254,10 +309,7 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
             return Err(Kernel::Memory(Memory::InvalidAddress));
         }
         sp = new_sp;
-        unsafe {
-            *(sp as *mut u64) = val;
-        }
-        Ok(())
+        write_user_u64_in_table(new_pt_phys, sp, val)
     };
 
     // AT_NULL
@@ -304,6 +356,7 @@ pub fn spawn_service(path: &str, name: &'static str) -> Result<()> {
         return Err(Kernel::Process(Process::MaxProcessesReached));
     }
 
+    guard.disarm();
     Ok(())
 }
 
@@ -346,7 +399,12 @@ struct Elf64Rela {
     r_addend: i64,
 }
 
-fn apply_relocations(data: &[u8], header: Elf64Header, load_bias: u64) -> Result<()> {
+fn apply_relocations_to(
+    table_phys: u64,
+    data: &[u8],
+    header: Elf64Header,
+    load_bias: u64,
+) -> Result<()> {
     let mut rela_addr = None;
     let mut rela_size = None;
     let mut rela_ent = None;
@@ -418,11 +476,8 @@ fn apply_relocations(data: &[u8], header: Elf64Header, load_bias: u64) -> Result
             {
                 return Err(Kernel::InvalidParam);
             }
-            let reloc_addr = reloc_vaddr as *mut u64;
             let value = load_bias.wrapping_add(rela.r_addend as u64);
-            unsafe {
-                reloc_addr.write(value);
-            }
+            write_user_u64_in_table(table_phys, reloc_vaddr, value)?;
         }
     }
 

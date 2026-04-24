@@ -344,9 +344,9 @@ fn read_fd(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             let mut buf = alloc::vec![0u8; len as usize];
             let n = crate::syscall::pipe::pipe_read_blocking(pipe_id, &mut buf);
             if n > 0 {
-                crate::syscall::with_user_memory_access(|| unsafe {
-                    core::ptr::copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, n);
-                });
+                if let Err(e) = crate::syscall::copy_to_user(buf_ptr, &buf[..n]) {
+                    return e;
+                }
             }
             n as u64
         }
