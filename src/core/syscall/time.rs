@@ -98,11 +98,13 @@ pub fn clock_gettime(clk_id: u64, ts_ptr: u64) -> u64 {
     match clk_id {
         CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
             // timespec { tv_sec: i64, tv_nsec: i64 }
-            crate::syscall::with_user_memory_access(|| unsafe {
-                core::ptr::write_unaligned(ts_ptr as *mut i64, sec as i64);
-                core::ptr::write_unaligned((ts_ptr + 8) as *mut i64, nsec as i64);
-            });
-            SUCCESS
+            let mut buf = [0u8; 16];
+            buf[0..8].copy_from_slice(&(sec as i64).to_ne_bytes());
+            buf[8..16].copy_from_slice(&(nsec as i64).to_ne_bytes());
+            match crate::syscall::copy_to_user(ts_ptr, &buf) {
+                Ok(()) => SUCCESS,
+                Err(e) => e,
+            }
         }
         _ => EINVAL,
     }

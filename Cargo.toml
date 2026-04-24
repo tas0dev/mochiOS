@@ -22,6 +22,9 @@ bench = false
 [features]
 default = ["uefi-dep"]
 uefi-dep = ["dep:uefi"]
+kcfi = []
+cet-ibt = []
+cet-shadow-stack = []
 
 [dependencies]
 uefi = { version = "0.30", features = ["alloc", "logger", "global_allocator"], optional = true }

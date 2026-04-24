@@ -146,13 +146,16 @@ pub fn map_physical_pages(
         return EFAULT;
     }
 
-    // 物理ページアドレス配列をカーネル空間へコピー
     let mut phys_pages = alloc::vec![0u64; page_count as usize];
-    let copy_size = page_count as usize * core::mem::size_of::<u64>();
-    if let Err(e) = super::copy_from_user(phys_pages_ptr, unsafe {
-        core::slice::from_raw_parts_mut(phys_pages.as_mut_ptr() as *mut u8, copy_size)
-    }) {
-        return e;
+    for i in 0..page_count as usize {
+        let addr = match phys_pages_ptr.checked_add((i * core::mem::size_of::<u64>()) as u64) {
+            Some(addr) => addr,
+            None => return EFAULT,
+        };
+        match super::read_user_u64(addr) {
+            Ok(page) => phys_pages[i] = page,
+            Err(e) => return e,
+        }
     }
 
     match map_phys_pages_into_target(target_thread_id, &phys_pages, virt_addr_hint) {
@@ -338,13 +341,12 @@ pub fn alloc_shared_pages(
 
     // 物理アドレス配列をユーザー空間へ書き込み
     if phys_addrs_out != 0 {
-        let copy_bytes = unsafe {
-            core::slice::from_raw_parts(
-                phys_pages.as_ptr() as *const u8,
-                phys_pages.len() * core::mem::size_of::<u64>(),
-            )
-        };
-        if let Err(errno) = super::copy_to_user(phys_addrs_out, copy_bytes) {
+        let mut copy_bytes = alloc::vec![0u8; phys_pages.len() * core::mem::size_of::<u64>()];
+        for (i, page) in phys_pages.iter().enumerate() {
+            let off = i * core::mem::size_of::<u64>();
+            copy_bytes[off..off + 8].copy_from_slice(&page.to_ne_bytes());
+        }
+        if let Err(errno) = super::copy_to_user(phys_addrs_out, &copy_bytes) {
             // ロールバック
             for i in 0..phys_pages.len() {
                 let rollback_virt = virt_addr + (i as u64 * 0x1000);
@@ -479,13 +481,16 @@ pub fn ipc_send_pages(
         return EFAULT;
     }
 
-    // 物理ページアドレス配列をカーネル空間へコピー
     let mut phys_pages = alloc::vec![0u64; page_count as usize];
-    let copy_size = page_count as usize * core::mem::size_of::<u64>();
-    if let Err(e) = super::copy_from_user(phys_pages_ptr, unsafe {
-        core::slice::from_raw_parts_mut(phys_pages.as_mut_ptr() as *mut u8, copy_size)
-    }) {
-        return e;
+    for i in 0..page_count as usize {
+        let addr = match phys_pages_ptr.checked_add((i * core::mem::size_of::<u64>()) as u64) {
+            Some(addr) => addr,
+            None => return EFAULT,
+        };
+        match super::read_user_u64(addr) {
+            Ok(page) => phys_pages[i] = page,
+            Err(e) => return e,
+        }
     }
 
     let mapped_addr = match map_phys_pages_into_target(dest_thread_id, &phys_pages, map_start) {

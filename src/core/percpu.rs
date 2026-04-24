@@ -89,15 +89,18 @@ fn local_apic_id() -> u32 {
 
 pub fn init_boot_cpu(syscall_kernel_rsp: u64) {
     let apic_id = local_apic_id() as usize;
-    assert!(
-        apic_id < MAX_CPUS,
-        "Boot CPU APIC ID {} exceeds MAX_CPUS {}",
-        apic_id,
-        MAX_CPUS
-    );
+    let slot = if apic_id < MAX_CPUS {
+        apic_id
+    } else {
+        crate::audit::log(
+            crate::audit::AuditEventKind::Fault,
+            "boot CPU APIC ID exceeded per-cpu table; falling back to CPU0 slot",
+        );
+        0
+    };
 
     let (cr3, _) = Cr3::read();
-    let state = &CPU_STATES[apic_id];
+    let state = &CPU_STATES[slot];
     state
         .kernel_cr3
         .store(cr3.start_address().as_u64(), Ordering::SeqCst);

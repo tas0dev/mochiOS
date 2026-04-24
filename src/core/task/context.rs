@@ -126,18 +126,24 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
 
     let mut queue = THREAD_QUEUE.lock();
 
-    let old_ctx_ptr = if let Some(id) = current_id {
+    let (old_ctx_ptr, current_process_id, current_priv) = if let Some(id) = current_id {
         if let Some(thread) = queue.get_mut(id) {
             if !thread.is_kernel_stack_guard_intact() {
+                let bottom = thread.kernel_stack_bottom();
+                let top = thread.kernel_stack_top();
+                drop(queue);
                 crate::error!(
                     "Kernel stack guard corrupted: tid={:?}, kstack=[{:#x}..{:#x})",
                     id,
-                    thread.kernel_stack_bottom(),
-                    thread.kernel_stack_top()
+                    bottom,
+                    top
                 );
-                loop {
-                    x86_64::instructions::hlt();
-                }
+                crate::audit::log(
+                    crate::audit::AuditEventKind::Quarantine,
+                    "context switch detected kernel stack corruption",
+                );
+                crate::task::terminate_thread(id);
+                return;
             }
             let ptr = thread.context_mut() as *mut Context;
             crate::debug!(
@@ -146,14 +152,21 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
                 thread.context().rsp,
                 thread.context().rip
             );
-            ptr
+            let pid = thread.process_id();
+            let priv_level =
+                with_process(pid, |p| p.privilege()).unwrap_or(crate::task::PrivilegeLevel::Core);
+            (ptr, Some(pid), priv_level)
         } else {
             return; // 現在のスレッドが見つからない
         }
     } else {
         // 現在のスレッドがない場合（初回スイッチ）はダミーに書き込む（値は捨てられる）
         crate::debug!("  No current thread (initial switch)");
-        unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXT) }
+        (
+            unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXT) },
+            None,
+            crate::task::PrivilegeLevel::Core,
+        )
     };
 
     // 次のスレッドのコンテキストへのポインタとカーネルスタックトップを取得
@@ -196,6 +209,12 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
     // SYSCALL 入口の swapgs により IA32_KERNEL_GS_BASE がユーザー値へ一時退避されるため、
     // ブロッキング syscall 中に他スレッドへ切り替える前に per-CPU GS ベースへ戻しておく。
     crate::percpu::install_current_cpu_gs_base();
+    let predictor_domain_changed =
+        current_process_id != Some(next_process_id) || current_priv != next_priv;
+    if predictor_domain_changed {
+        crate::cpu::branch_predictor_barrier();
+    }
+    crate::cpu::reassert_runtime_hardening();
 
     // 次のスレッドの FS ベースを復元 (TLS)
     unsafe {
@@ -268,25 +287,38 @@ pub unsafe fn switch_to_thread_from_isr(
 ) {
     let mut queue = THREAD_QUEUE.lock();
 
-    let old_ctx_ptr = if let Some(id) = current_id {
+    let (old_ctx_ptr, current_process_id, current_priv) = if let Some(id) = current_id {
         if let Some(thread) = queue.get_mut(id) {
             if !thread.is_kernel_stack_guard_intact() {
+                let bottom = thread.kernel_stack_bottom();
+                let top = thread.kernel_stack_top();
+                drop(queue);
                 crate::error!(
                     "Kernel stack guard corrupted (ISR): tid={:?}, kstack=[{:#x}..{:#x})",
                     id,
-                    thread.kernel_stack_bottom(),
-                    thread.kernel_stack_top()
+                    bottom,
+                    top
                 );
-                loop {
-                    x86_64::instructions::hlt();
-                }
+                crate::audit::log(
+                    crate::audit::AuditEventKind::Quarantine,
+                    "isr context switch detected kernel stack corruption",
+                );
+                crate::task::terminate_thread(id);
+                return;
             }
-            thread.context_mut() as *mut Context
+            let pid = thread.process_id();
+            let priv_level =
+                with_process(pid, |p| p.privilege()).unwrap_or(crate::task::PrivilegeLevel::Core);
+            (thread.context_mut() as *mut Context, Some(pid), priv_level)
         } else {
             return;
         }
     } else {
-        unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXT) }
+        (
+            unsafe { core::ptr::addr_of_mut!(INITIAL_DUMMY_CONTEXT) },
+            None,
+            crate::task::PrivilegeLevel::Core,
+        )
     };
 
     let (new_ctx_ptr, next_priv, next_kstack_top, next_fs_base, next_process_id, next_in_syscall) =
@@ -322,6 +354,12 @@ pub unsafe fn switch_to_thread_from_isr(
     // SYSCALL 入口の swapgs により IA32_KERNEL_GS_BASE がユーザー値へ一時退避されるため、
     // ブロッキング syscall 中に他スレッドへ切り替える前に per-CPU GS ベースへ戻しておく。
     crate::percpu::install_current_cpu_gs_base();
+    let predictor_domain_changed =
+        current_process_id != Some(next_process_id) || current_priv != next_priv;
+    if predictor_domain_changed {
+        crate::cpu::branch_predictor_barrier();
+    }
+    crate::cpu::reassert_runtime_hardening();
 
     // 次のスレッドの FS ベースを復元 (TLS)
     crate::cpu::write_fs_base(next_fs_base);

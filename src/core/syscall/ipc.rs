@@ -77,23 +77,29 @@ impl Mailbox {
         Some(self.free[self.free_count] as usize)
     }
 
-    fn free_slot(&mut self, idx: usize) {
+    fn quarantine(&mut self, reason: &'static str) {
+        crate::audit::log(crate::audit::AuditEventKind::Quarantine, reason);
+        *self = Self::new();
+    }
+
+    fn free_slot(&mut self, idx: usize) -> bool {
         if idx >= MAILBOX_CAP {
-            panic!("ipc mailbox free_slot: idx out of range: {}", idx);
+            self.quarantine("ipc mailbox free list corrupted: slot index out of range");
+            return false;
         }
         if self.free_count >= MAILBOX_CAP {
-            panic!("ipc mailbox free_slot: free_count overflow");
+            self.quarantine("ipc mailbox free list corrupted: free_count overflow");
+            return false;
         }
         for i in 0..self.free_count {
             if self.free[i] as usize == idx {
-                panic!(
-                    "ipc mailbox free_slot: double free detected for slot {}",
-                    idx
-                );
+                self.quarantine("ipc mailbox free list corrupted: double free");
+                return false;
             }
         }
         self.free[self.free_count] = idx as u8;
         self.free_count += 1;
+        true
     }
 
     fn enqueue_slot(&mut self, slot_idx: usize) -> Result<(), ()> {
@@ -142,7 +148,7 @@ impl Mailbox {
             msg.data[..data.len()].copy_from_slice(data);
         }
         if self.enqueue_slot(slot_idx).is_err() {
-            self.free_slot(slot_idx);
+            let _ = self.free_slot(slot_idx);
             return Err(());
         }
         Ok(())
@@ -166,7 +172,9 @@ impl Mailbox {
                     let from = msg.from;
                     let ext_pages_count = msg.ext_pages_count;
                     let ext_pages = msg.ext_pages;
-                    self.free_slot(slot_idx);
+                    if !self.free_slot(slot_idx) {
+                        return None;
+                    }
                     return Some((from, 0usize, ext_pages_count, ext_pages));
                 }
                 if copy_len > 0 {
@@ -175,11 +183,15 @@ impl Mailbox {
                 let from = msg.from;
                 let ext_pages_count = msg.ext_pages_count;
                 let ext_pages = msg.ext_pages;
-                self.free_slot(slot_idx);
+                if !self.free_slot(slot_idx) {
+                    return None;
+                }
                 return Some((from, copy_len, ext_pages_count, ext_pages));
             }
             // 古い宛先のメッセージは破棄
-            self.free_slot(slot_idx);
+            if !self.free_slot(slot_idx) {
+                return None;
+            }
         }
         None
     }
@@ -207,7 +219,7 @@ impl Mailbox {
                 || msg.to_generation != receiver_generation
             {
                 if self.enqueue_slot(slot_idx).is_err() {
-                    self.free_slot(slot_idx);
+                    let _ = self.free_slot(slot_idx);
                     return None;
                 }
                 continue;
@@ -218,7 +230,9 @@ impl Mailbox {
                 out[..copy_len].copy_from_slice(&msg.data[..copy_len]);
             }
             let from = msg.from;
-            self.free_slot(slot_idx);
+            if !self.free_slot(slot_idx) {
+                return None;
+            }
             return Some((from, copy_len));
         }
 
@@ -305,7 +319,7 @@ pub fn send_pages_from_kernel(
             // 物理ページ配列は data に露出させず ext_pages 側だけに保持する。
             let mut off = 0usize;
             if 16 > MAX_MSG_SIZE {
-                mb.free_slot(slot_idx);
+                let _ = mb.free_slot(slot_idx);
                 return false;
             }
             msg.data[off..off + 8].copy_from_slice(&map_start.to_ne_bytes());
@@ -319,7 +333,7 @@ pub fn send_pages_from_kernel(
             }
             // enqueue
             if mb.enqueue_slot(slot_idx).is_err() {
-                mb.free_slot(slot_idx);
+                let _ = mb.free_slot(slot_idx);
                 return false;
             }
             let waiter = mb.take_waiter();
@@ -357,7 +371,7 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
             // serialize map_start, total into data
             let mut off = 0usize;
             if 16 > MAX_MSG_SIZE {
-                mb.free_slot(slot_idx);
+                let _ = mb.free_slot(slot_idx);
                 return false;
             }
             msg.data[off..off + 8].copy_from_slice(&map_start.to_ne_bytes());
@@ -368,7 +382,7 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
             msg.ext_pages_count = 0;
             // enqueue
             if mb.enqueue_slot(slot_idx).is_err() {
-                mb.free_slot(slot_idx);
+                let _ = mb.free_slot(slot_idx);
                 return false;
             }
             let waiter = mb.take_waiter();
@@ -496,7 +510,7 @@ fn map_external_pages_for_receiver(
     for i in 0..(ext_pages_count as usize) {
         let target_virt = virt_addr + (i as u64 * 0x1000);
         let phys_addr = ext_pages[i];
-        if crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, true)
+        if crate::mem::paging::map_page_in_table(page_table, target_virt, phys_addr, true, false)
             .is_err()
         {
             for j in 0..i {
@@ -608,14 +622,9 @@ pub fn recv(buf_ptr: u64, max_len: u64) -> u64 {
     };
 
     if copy_len > 0 && buf_ptr != 0 {
-        // ユーザー空間アドレスの有効性を検証する
-        if !crate::syscall::validate_user_ptr(buf_ptr, copy_len as u64) {
-            return EFAULT;
+        if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
+            return err;
         }
-        crate::syscall::with_user_memory_access(|| unsafe {
-            let dest_slice = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, copy_len);
-            dest_slice.copy_from_slice(&recv_buf[..copy_len]);
-        });
     }
 
     // 上位32bitに送信元ID、下位32bitに長さ
@@ -677,14 +686,9 @@ pub fn recv_blocking(buf_ptr: u64, max_len: u64) -> u64 {
                     Err(e) => return e,
                 };
                 if copy_len > 0 && buf_ptr != 0 {
-                    if !crate::syscall::validate_user_ptr(buf_ptr, copy_len as u64) {
-                        return EFAULT;
+                    if let Err(err) = crate::syscall::copy_to_user(buf_ptr, &recv_buf[..copy_len]) {
+                        return err;
                     }
-                    crate::syscall::with_user_memory_access(|| unsafe {
-                        let dest_slice =
-                            core::slice::from_raw_parts_mut(buf_ptr as *mut u8, copy_len);
-                        dest_slice.copy_from_slice(&recv_buf[..copy_len]);
-                    });
                 }
                 return (from << 32) | (copy_len as u64);
             }

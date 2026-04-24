@@ -7,11 +7,11 @@ use super::ids::{ProcessId, ThreadId, ThreadState};
 /// スレッド終了時に呼ばれるハンドラ
 /// この関数から戻ることはない
 extern "C" fn thread_exit_handler() -> ! {
-    // スレッドが終了した場合の処理
-    // 通常はここに到達することはない
-    loop {
-        x86_64::instructions::hlt();
-    }
+    crate::audit::log(
+        crate::audit::AuditEventKind::Fault,
+        "thread returned into thread_exit_handler",
+    );
+    crate::task::exit_current_task(0)
 }
 
 /// スレッド構造体
@@ -290,9 +290,11 @@ impl Thread {
                 Some(t) => t,
                 None => {
                     crate::warn!("usermode_entry_trampoline: No current thread");
-                    loop {
-                        x86_64::instructions::hlt();
-                    }
+                    crate::audit::log(
+                        crate::audit::AuditEventKind::Fault,
+                        "usermode_entry_trampoline without current thread",
+                    );
+                    crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
             let (entry, stack) =
@@ -300,9 +302,11 @@ impl Thread {
                     Some(v) => v,
                     None => {
                         crate::warn!("usermode_entry_trampoline: Thread not found");
-                        loop {
-                            x86_64::instructions::hlt();
-                        }
+                        crate::audit::log(
+                            crate::audit::AuditEventKind::Fault,
+                            "usermode_entry_trampoline missing thread metadata",
+                        );
+                        crate::task::exit_current_task(crate::syscall::EINVAL);
                     }
                 };
 
@@ -404,9 +408,11 @@ impl Thread {
                 Some(t) => t,
                 None => {
                     crate::warn!("fork_child_trampoline: No current thread");
-                    loop {
-                        x86_64::instructions::hlt();
-                    }
+                    crate::audit::log(
+                        crate::audit::AuditEventKind::Fault,
+                        "fork_child_trampoline without current thread",
+                    );
+                    crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
             let (entry, stack, rflags, fs) = match with_thread(tid, |thread| {
@@ -420,9 +426,11 @@ impl Thread {
                 Some(v) => v,
                 None => {
                     crate::warn!("fork_child_trampoline: Thread not found");
-                    loop {
-                        x86_64::instructions::hlt();
-                    }
+                    crate::audit::log(
+                        crate::audit::AuditEventKind::Fault,
+                        "fork_child_trampoline missing thread metadata",
+                    );
+                    crate::task::exit_current_task(crate::syscall::EINVAL);
                 }
             };
             unsafe {

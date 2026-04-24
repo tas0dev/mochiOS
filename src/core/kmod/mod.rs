@@ -368,7 +368,8 @@ fn apply_relocations(
                 continue;
             }
             let reloc_vaddr = r_offset;
-            if reloc_vaddr < min_vaddr || reloc_vaddr + 8 > max_vaddr {
+            let reloc_end = reloc_vaddr.checked_add(8)?;
+            if reloc_vaddr < min_vaddr || reloc_end > max_vaddr {
                 return None;
             }
             let dst = base.checked_add(reloc_vaddr.checked_sub(min_vaddr)?)? as *mut u64;

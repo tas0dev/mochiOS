@@ -36,7 +36,7 @@ where
 }
 
 // ファイルシステムIPC定数（swiftlib::fs_constsと同一の値を維持）
-const FS_PATH_MAX: usize = 128;
+const FS_PATH_MAX: usize = 512;
 const FS_DATA_MAX: usize = 4096;
 const IPC_MAX_MSG_SIZE: usize = 65536;
 const FS_RECV_TIMEOUT_TICKS: u64 = 500;
@@ -73,8 +73,27 @@ static CACHED_FS_SERVICE_TID: core::sync::atomic::AtomicU64 = core::sync::atomic
 
 #[inline]
 pub(crate) fn fs_service_tid() -> Option<u64> {
-    let _ = &CACHED_FS_SERVICE_TID;
-    None
+    let cached = CACHED_FS_SERVICE_TID.load(core::sync::atomic::Ordering::Acquire);
+    if cached != 0 && crate::task::thread_id_exists(cached) {
+        return Some(cached);
+    }
+
+    let pid = crate::task::find_process_id_by_name("fs.service")
+        .or_else(|| crate::task::find_process_id_by_name("fs"))?;
+
+    let mut found_tid = None;
+    crate::task::for_each_thread(|t| {
+        if found_tid.is_none() && t.process_id() == pid {
+            found_tid = Some(t.id().as_u64());
+        }
+    });
+
+    if let Some(tid) = found_tid {
+        CACHED_FS_SERVICE_TID.store(tid, core::sync::atomic::Ordering::Release);
+        Some(tid)
+    } else {
+        None
+    }
 }
 
 fn recv_from_fs_with_timeout(fs_tid: u64, buf: &mut [u8]) -> Result<usize, u64> {
@@ -183,6 +202,11 @@ pub(crate) fn encode_fs_path(path: &str) -> Result<[u8; FS_PATH_MAX], u64> {
     let mut out = [0u8; FS_PATH_MAX];
     let bytes = path.as_bytes();
     if bytes.is_empty() || bytes.len() >= FS_PATH_MAX {
+        crate::warn!(
+            "fs: rejected path length {} (max {})",
+            bytes.len(),
+            FS_PATH_MAX - 1
+        );
         return Err(EINVAL);
     }
     if bytes.iter().any(|&b| b == 0) {
@@ -706,24 +730,15 @@ pub fn seek(fd: u64, offset: i64, whence: u64) -> u64 {
 fn write_stat_buf(stat_ptr: u64, mode: u32, size: u64) {
     const STAT_SIZE: usize = 144;
     let blocks = size.div_ceil(512);
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let buf = core::slice::from_raw_parts_mut(stat_ptr as *mut u8, STAT_SIZE);
-        buf.fill(0);
-        // st_dev = 1 (仮のデバイス番号)
-        buf[0..8].copy_from_slice(&1u64.to_ne_bytes());
-        // st_ino = 1 (inode 番号は省略)
-        buf[8..16].copy_from_slice(&1u64.to_ne_bytes());
-        // st_nlink = 1
-        buf[16..24].copy_from_slice(&1u64.to_ne_bytes());
-        // st_mode
-        buf[24..28].copy_from_slice(&mode.to_ne_bytes());
-        // st_size
-        buf[48..56].copy_from_slice(&size.to_ne_bytes());
-        // st_blksize = 4096
-        buf[56..64].copy_from_slice(&4096u64.to_ne_bytes());
-        // st_blocks
-        buf[64..72].copy_from_slice(&blocks.to_ne_bytes());
-    });
+    let mut buf = [0u8; STAT_SIZE];
+    buf[0..8].copy_from_slice(&1u64.to_ne_bytes());
+    buf[8..16].copy_from_slice(&1u64.to_ne_bytes());
+    buf[16..24].copy_from_slice(&1u64.to_ne_bytes());
+    buf[24..28].copy_from_slice(&mode.to_ne_bytes());
+    buf[48..56].copy_from_slice(&size.to_ne_bytes());
+    buf[56..64].copy_from_slice(&4096u64.to_ne_bytes());
+    buf[64..72].copy_from_slice(&blocks.to_ne_bytes());
+    let _ = crate::syscall::copy_to_user(stat_ptr, &buf);
 }
 
 /// Fstatシステムコール
@@ -879,10 +894,9 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
             if n == 0 {
                 break;
             }
-            crate::syscall::with_user_memory_access(|| unsafe {
-                let dst = core::slice::from_raw_parts_mut((buf_ptr + copied as u64) as *mut u8, n);
-                dst.copy_from_slice(&chunk[..n]);
-            });
+            if crate::syscall::copy_to_user(buf_ptr + copied as u64, &chunk[..n]).is_err() {
+                return EFAULT;
+            }
             copied += n;
             offset = next_index;
             if n < want {
@@ -904,10 +918,9 @@ pub fn readdir(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
     let joined = names.join("\n");
     let bytes = joined.as_bytes();
     let to_copy = core::cmp::min(bytes.len(), buf_len as usize);
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let dst = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, to_copy);
-        dst.copy_from_slice(&bytes[..to_copy]);
-    });
+    if crate::syscall::copy_to_user(buf_ptr, &bytes[..to_copy]).is_err() {
+        return EFAULT;
+    }
     to_copy as u64
 }
 
@@ -968,10 +981,12 @@ pub fn getcwd(buf_ptr: u64, size: u64) -> u64 {
     if (size as usize) < needed {
         return EINVAL;
     }
-    crate::syscall::with_user_memory_access(|| unsafe {
-        core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf_ptr as *mut u8, cwd_len);
-        *(buf_ptr as *mut u8).add(cwd_len) = 0;
-    });
+    if crate::syscall::copy_to_user(buf_ptr, &tmp[..cwd_len]).is_err() {
+        return EFAULT;
+    }
+    if crate::syscall::copy_to_user(buf_ptr + cwd_len as u64, &[0]).is_err() {
+        return EFAULT;
+    }
     buf_ptr
 }
 
@@ -1011,10 +1026,9 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
             Err(e) => return e,
         };
         if n > 0 {
-            crate::syscall::with_user_memory_access(|| unsafe {
-                let dst = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, n);
-                dst.copy_from_slice(&tmp[..n]);
-            });
+            if crate::syscall::copy_to_user(buf_ptr, &tmp[..n]).is_err() {
+                return EFAULT;
+            }
         }
         return n as u64;
     }
@@ -1039,10 +1053,9 @@ pub fn read(fd: u64, buf_ptr: u64, len: u64) -> u64 {
         return 0;
     }
 
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let dst = core::slice::from_raw_parts_mut(buf_ptr as *mut u8, local.len());
-        dst.copy_from_slice(&local);
-    });
+    if crate::syscall::copy_to_user(buf_ptr, &local).is_err() {
+        return EFAULT;
+    }
     local.len() as u64
 }
 
@@ -1535,15 +1548,14 @@ pub fn statfs(path_ptr: u64, buf_ptr: u64) -> u64 {
     //   long f_type, f_bsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree;
     //   fsid_t f_fsid; long f_namelen, f_frsize, f_flags, f_spare[4];
     // }
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let p = buf_ptr as *mut u64;
-        core::ptr::write_bytes(buf_ptr as *mut u8, 0, STATFS_SIZE as usize);
-        core::ptr::write_unaligned(p.add(0), 0xEF53); // ext2 magic
-        core::ptr::write_unaligned(p.add(1), 4096); // f_bsize
-        core::ptr::write_unaligned(p.add(8), 255); // f_namelen
-        core::ptr::write_unaligned(p.add(9), 4096); // f_frsize
-    });
-    SUCCESS
+    let mut buf = [0u8; STATFS_SIZE as usize];
+    buf[0..8].copy_from_slice(&0xEF53u64.to_ne_bytes()); // ext2 magic
+    buf[8..16].copy_from_slice(&4096u64.to_ne_bytes()); // f_bsize
+    buf[64..72].copy_from_slice(&255u64.to_ne_bytes()); // f_namelen
+    buf[72..80].copy_from_slice(&4096u64.to_ne_bytes()); // f_frsize
+    crate::syscall::copy_to_user(buf_ptr, &buf)
+        .map(|_| SUCCESS)
+        .unwrap_or_else(|e| e)
 }
 
 /// readlinkat システムコール（最小実装）
@@ -1687,37 +1699,30 @@ pub fn getdents64(fd: u64, buf_ptr: u64, buf_len: u64) -> u64 {
         v
     };
 
-    crate::syscall::with_user_memory_access(|| {
-        for (i, (name, dtype)) in all_entries.iter().enumerate().skip(start_pos) {
-            let name_bytes = name.as_bytes();
-            let name_len = name_bytes.len() + 1; // null 終端含む
-                                                 // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + d_name
-            let raw_size = 8 + 8 + 2 + 1 + name_len;
-            let reclen = (raw_size + 7) & !7usize; // 8 バイトアライン
-            if written + reclen > buf_len as usize {
-                break;
-            }
-            let entry_ptr = (buf_ptr + written as u64) as *mut u8;
-            unsafe {
-                let buf = core::slice::from_raw_parts_mut(entry_ptr, reclen);
-                buf.fill(0);
-                // d_ino = i+1
-                buf[0..8].copy_from_slice(&((i as u64 + 1).to_ne_bytes()));
-                // d_off = next position
-                let next_off = (i + 1) as u64;
-                buf[8..16].copy_from_slice(&next_off.to_ne_bytes());
-                // d_reclen
-                buf[16..18].copy_from_slice(&(reclen as u16).to_ne_bytes());
-                // d_type
-                buf[18] = *dtype;
-                // d_name (null terminated)
-                buf[19..19 + name_bytes.len()].copy_from_slice(name_bytes);
-                buf[19 + name_bytes.len()] = 0;
-            }
-            written += reclen;
-            new_pos = i + 1;
+    let mut out = alloc::vec![0u8; buf_len as usize];
+    for (i, (name, dtype)) in all_entries.iter().enumerate().skip(start_pos) {
+        let name_bytes = name.as_bytes();
+        let name_len = name_bytes.len() + 1;
+        let raw_size = 8 + 8 + 2 + 1 + name_len;
+        let reclen = (raw_size + 7) & !7usize;
+        if written + reclen > buf_len as usize {
+            break;
         }
-    });
+        let buf = &mut out[written..written + reclen];
+        buf.fill(0);
+        buf[0..8].copy_from_slice(&((i as u64 + 1).to_ne_bytes()));
+        let next_off = (i + 1) as u64;
+        buf[8..16].copy_from_slice(&next_off.to_ne_bytes());
+        buf[16..18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+        buf[18] = *dtype;
+        buf[19..19 + name_bytes.len()].copy_from_slice(name_bytes);
+        buf[19 + name_bytes.len()] = 0;
+        written += reclen;
+        new_pos = i + 1;
+    }
+    if written > 0 && crate::syscall::copy_to_user(buf_ptr, &out[..written]).is_err() {
+        return EFAULT;
+    }
 
     // FD の pos を更新する
     with_fd_table_mut(pid, |t| {

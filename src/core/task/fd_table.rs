@@ -40,6 +40,34 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
+    pub fn new_pipe_read(pipe_id: usize) -> Self {
+        Self {
+            data: Box::new([]),
+            pos: 0,
+            dir_path: None,
+            is_remote: false,
+            fd_remote: 0,
+            remote_refs: None,
+            pipe_id: Some(pipe_id),
+            pipe_write: false,
+            open_flags: 0,
+        }
+    }
+
+    pub fn new_pipe_write(pipe_id: usize) -> Self {
+        Self {
+            data: Box::new([]),
+            pos: 0,
+            dir_path: None,
+            is_remote: false,
+            fd_remote: 0,
+            remote_refs: None,
+            pipe_id: Some(pipe_id),
+            pipe_write: true,
+            open_flags: 1,
+        }
+    }
+
     #[inline]
     pub fn clone_remote_refs(&self) -> Option<Arc<AtomicUsize>> {
         if !self.is_remote {

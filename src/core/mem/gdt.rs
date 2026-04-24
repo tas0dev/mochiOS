@@ -14,6 +14,15 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = tss::DOUBLE_FAULT_IST_INDEX;
 
 static GDT: Once<(GlobalDescriptorTable, Selectors)> = Once::new();
 
+fn halt_on_missing_gdt(which: &'static str) -> ! {
+    crate::audit::log(crate::audit::AuditEventKind::Fault, which);
+    crate::warn!("GDT not initialized");
+    x86_64::instructions::interrupts::disable();
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
 /// GDTセレクタ
 #[allow(unused)]
 struct Selectors {
@@ -98,44 +107,28 @@ pub fn init() {
 pub fn user_code_selector() -> u16 {
     GDT.get()
         .map(|g| g.1.user_code_selector.0)
-        .unwrap_or_else(|| {
-            crate::warn!("GDT not initialized");
-            loop {
-                x86_64::instructions::hlt();
-            }
-        })
+        .unwrap_or_else(|| halt_on_missing_gdt("gdt user_code_selector unavailable"))
 }
 
 /// ユーザーモード用データセレクタ（RPL=3）を返す
 pub fn user_data_selector() -> u16 {
     GDT.get()
         .map(|g| g.1.user_data_selector.0)
-        .unwrap_or_else(|| {
-            crate::warn!("GDT not initialized");
-            loop {
-                x86_64::instructions::hlt();
-            }
-        })
+        .unwrap_or_else(|| halt_on_missing_gdt("gdt user_data_selector unavailable"))
 }
 
 /// カーネル用コードセレクタを返す
 pub fn kernel_code_selector() -> u16 {
-    GDT.get().map(|g| g.1.code_selector.0).unwrap_or_else(|| {
-        crate::warn!("GDT not initialized");
-        loop {
-            x86_64::instructions::hlt();
-        }
-    })
+    GDT.get()
+        .map(|g| g.1.code_selector.0)
+        .unwrap_or_else(|| halt_on_missing_gdt("gdt kernel_code_selector unavailable"))
 }
 
 /// カーネル用データセレクタを返す
 pub fn kernel_data_selector() -> u16 {
-    GDT.get().map(|g| g.1.data_selector.0).unwrap_or_else(|| {
-        crate::warn!("GDT not initialized");
-        loop {
-            x86_64::instructions::hlt();
-        }
-    })
+    GDT.get()
+        .map(|g| g.1.data_selector.0)
+        .unwrap_or_else(|| halt_on_missing_gdt("gdt kernel_data_selector unavailable"))
 }
 
 #[allow(unused)]

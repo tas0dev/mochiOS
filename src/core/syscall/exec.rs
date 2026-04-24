@@ -143,27 +143,16 @@ fn read_nul_args_from_user(
     max_total_bytes: usize,
     max_args: usize,
 ) -> Result<Vec<String>, u64> {
-    use crate::syscall::types::{EFAULT, EINVAL};
+    use crate::syscall::types::EINVAL;
 
     if args_ptr == 0 {
         return Ok(Vec::new());
     }
-    if !crate::syscall::validate_user_ptr(args_ptr, max_total_bytes as u64) {
-        return Err(EFAULT);
+    let mut storage = alloc::vec![0u8; max_total_bytes];
+    crate::syscall::copy_from_user(args_ptr, &mut storage)?;
+    if let Some(end) = storage.windows(2).position(|w| w == [0, 0]) {
+        storage.truncate(end + 2);
     }
-
-    let mut storage: Vec<u8> = Vec::new();
-    crate::syscall::with_user_memory_access(|| unsafe {
-        let ptr = args_ptr as *const u8;
-        for i in 0..max_total_bytes {
-            let b = ptr.add(i).read_volatile();
-            storage.push(b);
-            let len = storage.len();
-            if len >= 2 && storage[len - 1] == 0 && storage[len - 2] == 0 {
-                break;
-            }
-        }
-    });
 
     let mut out = Vec::new();
     for s in storage.split(|&b| b == 0) {
@@ -215,7 +204,10 @@ fn exec_internal(path: &str, name_override: Option<&str>, args: &[&str]) -> u64 
         .map(|s| s.to_string())
         .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_string());
     // Special-case mapping: drivers/net.elf should be exposed as "netdrv" for compatibility
-    if process_name == "net" || process_name == "net.elf" || path.ends_with("/Binaries/drivers/net.elf") {
+    if process_name == "net"
+        || process_name == "net.elf"
+        || path.ends_with("/Binaries/drivers/net.elf")
+    {
         process_name = "netdrv".to_string();
     }
     if let Some(data) = crate::init::fs::read(path) {
@@ -979,7 +971,6 @@ fn exec_with_data(
 /// 各エントリは 64 ビットポインタ。NULL で終端。
 /// max_entries を超えた場合は切り捨てる。
 fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
-    use crate::syscall::types::EFAULT;
     if array_ptr == 0 {
         return Vec::new();
     }
@@ -995,9 +986,10 @@ fn read_user_ptr_array(array_ptr: u64, max_entries: usize) -> Vec<String> {
         if !crate::syscall::validate_user_ptr(ptr_addr, 8) {
             break;
         }
-        let entry_ptr = crate::syscall::with_user_memory_access(|| unsafe {
-            core::ptr::read_unaligned(ptr_addr as *const u64)
-        });
+        let entry_ptr = match crate::syscall::read_user_u64(ptr_addr) {
+            Ok(ptr) => ptr,
+            Err(_) => break,
+        };
         if entry_ptr == 0 {
             break;
         }
@@ -1299,14 +1291,10 @@ pub fn exec_from_buffer_syscall(buf_ptr: u64, buf_len: u64) -> u64 {
         return EFAULT;
     }
 
-    // KPTI 環境ではカーネルは kernel CR3 で動作しており、ユーザー空間の
-    // 仮想アドレスに直接アクセスできない。
-    // with_user_memory_access でユーザー CR3 に一時切替してバルクコピーする。
     let mut owned = alloc::vec![0u8; buf_len as usize];
-    let dst_ptr = owned.as_mut_ptr();
-    crate::syscall::with_user_memory_access(|| unsafe {
-        core::ptr::copy_nonoverlapping(buf_ptr as *const u8, dst_ptr, buf_len as usize);
-    });
+    if let Err(e) = crate::syscall::copy_from_user(buf_ptr, &mut owned) {
+        return e;
+    }
 
     exec_with_data(
         &owned,
@@ -1343,10 +1331,9 @@ pub fn exec_from_buffer_named_syscall(buf_ptr: u64, buf_len: u64, path_ptr: u64)
     let process_name = path.rsplit('/').next().unwrap_or(path.as_str());
 
     let mut owned = alloc::vec![0u8; buf_len as usize];
-    let dst_ptr = owned.as_mut_ptr();
-    crate::syscall::with_user_memory_access(|| unsafe {
-        core::ptr::copy_nonoverlapping(buf_ptr as *const u8, dst_ptr, buf_len as usize);
-    });
+    if let Err(e) = crate::syscall::copy_from_user(buf_ptr, &mut owned) {
+        return e;
+    }
 
     exec_with_data(
         &owned,
@@ -1395,10 +1382,9 @@ pub fn exec_from_buffer_named_args_syscall(
     let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
     let mut owned = alloc::vec![0u8; buf_len as usize];
-    let dst_ptr = owned.as_mut_ptr();
-    crate::syscall::with_user_memory_access(|| unsafe {
-        core::ptr::copy_nonoverlapping(buf_ptr as *const u8, dst_ptr, buf_len as usize);
-    });
+    if let Err(e) = crate::syscall::copy_from_user(buf_ptr, &mut owned) {
+        return e;
+    }
 
     exec_with_data(
         &owned,
@@ -1442,10 +1428,9 @@ pub fn exec_from_buffer_named_args_with_requester_syscall(
     let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
     let mut owned = alloc::vec![0u8; buf_len as usize];
-    let dst_ptr = owned.as_mut_ptr();
-    crate::syscall::with_user_memory_access(|| unsafe {
-        core::ptr::copy_nonoverlapping(buf_ptr as *const u8, dst_ptr, buf_len as usize);
-    });
+    if let Err(e) = crate::syscall::copy_from_user(buf_ptr, &mut owned) {
+        return e;
+    }
 
     let parent_override = if requester_tid != 0 {
         let requester = crate::task::ThreadId::from_u64(requester_tid);

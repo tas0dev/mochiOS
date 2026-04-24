@@ -21,6 +21,10 @@ pub const SIGWINCH: usize = 28;
 
 // ----- SA_* フラグ -----
 pub const SA_RESTORER: u64 = 0x04000000;
+/// カーネルが各プロセスへ固定配置する sigreturn スタブのオフセット。
+pub const USER_SIGRETURN_STUB_OFFSET: u64 = 0x2000;
+/// シグナルフレーム整合性検証用のマジック値。
+pub const SIGNAL_FRAME_MAGIC: u64 = 0x6d6f_6368_695f_7367;
 
 /// シグナルのデフォルト動作
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +53,7 @@ pub struct SigAction {
     pub handler: u64,
     /// SA_* フラグ
     pub flags: u64,
-    /// SA_RESTORER が設定されている場合のリストア関数ポインタ
+    /// Linux 互換レイアウト維持のため残すが、カーネルは信用しない。
     pub restorer: u64,
     /// ハンドラ実行中にブロックするシグナルマスク（ビット i = シグナル i+1）
     pub mask: u64,
@@ -74,6 +78,11 @@ impl SigAction {
     pub fn has_user_handler(&self) -> bool {
         self.handler > SIG_IGN
     }
+}
+
+#[inline]
+pub fn sigreturn_stub_addr(stack_top: u64) -> Option<u64> {
+    stack_top.checked_add(USER_SIGRETURN_STUB_OFFSET)
 }
 
 /// プロセスのシグナル状態
