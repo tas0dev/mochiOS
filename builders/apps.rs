@@ -27,7 +27,7 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, _extension: &str) {
         let app_name = path.file_name().unwrap().to_string_lossy().to_string();
 
         // testsディレクトリはSTART_TEST_APP=trueの場合のみビルド
-        if app_name == "tests" && !run_tests {
+        if app_name == "ViewKit" && !run_tests {
             println!("Skipping tests app (START_TEST_APP not enabled)");
             continue;
         }
