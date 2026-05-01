@@ -22,6 +22,12 @@ fn find_project_root(manifest_dir: &Path) -> PathBuf {
 }
 
 fn main() {
+    // When building the host PoC, skip emitting mochiOS-specific linker flags.
+    if std::env::var("MOCHI_HOST_POC").is_ok() {
+        println!("cargo:warning=MOCHI_HOST_POC set; skipping mochiOS linker flags in services/driver/build.rs");
+        return;
+    }
+
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let manifest_path = Path::new(&manifest_dir);
     let project_root = find_project_root(manifest_path);

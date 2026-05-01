@@ -2,6 +2,12 @@ use std::env;
 use std::path::Path;
 
 fn main() {
+    // Skip when building host PoC
+    if std::env::var("MOCHI_HOST_POC").is_ok() {
+        println!("cargo:warning=MOCHI_HOST_POC set; skipping mochiOS linker flags in services/shell/build.rs");
+        return;
+    }
+
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
 
     let root_dir = Path::new(&manifest_dir)
