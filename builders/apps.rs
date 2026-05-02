@@ -26,11 +26,13 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, _extension: &str) {
 
         let app_name = path.file_name().unwrap().to_string_lossy().to_string();
 
+        /*
         // testsディレクトリはSTART_TEST_APP=trueの場合のみビルド
         if app_name == "ViewKit" && !run_tests {
             println!("Skipping tests app (START_TEST_APP not enabled)");
             continue;
         }
+        */
 
         let cargo_toml = path.join("Cargo.toml");
         if !cargo_toml.exists() {
@@ -299,7 +301,8 @@ pub fn build_utils(utils_dir: &Path, output_dir: &Path) {
     // Ensure build target is set to the repository's x86_64-mochios.json so output matches expectations
     let target_json = project_root.join("x86_64-mochios.json");
     if target_json.exists() {
-        cmd.arg("--target").arg(target_json.to_string_lossy().to_string());
+        cmd.arg("--target")
+            .arg(target_json.to_string_lossy().to_string());
     } else {
         cmd.arg("--target").arg("x86_64-mochios");
     }
