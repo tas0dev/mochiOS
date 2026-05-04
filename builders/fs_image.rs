@@ -255,7 +255,6 @@ pub fn setup_fs_layout(fs_dir: &Path, resources_src: &Path) -> Result<(), String
         "Libraries",    // ライブラリ（libc.aなど）を配置
         "Mount",        // マウントしたやつ配置
         "Boot",         // ブートローダー関連のファイルを配置
-        "Resources",    // アイコンやUIリソースを配置（ユーザーアプリのリソースはここに置く）
         "Services",     // サービスを配置
         "Logs",         // ログを配置
         "Home",         // ユーザーディレクトリを配置
