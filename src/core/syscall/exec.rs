@@ -860,6 +860,8 @@ fn exec_with_data(
         proc.set_page_table(new_pt_phys);
         proc.set_stack_bottom(stack_base_vaddr);
         proc.set_stack_top(stack_end_vaddr + 4096);
+        crate::info!("[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}", 
+            proc.name(), stack_base_vaddr, stack_end_vaddr, stack_end_vaddr + 4096);
         // 親プロセスの CWD を子プロセスに継承する
         if let Some(ppid) = parent_pid {
             let parent_cwd = crate::task::with_process(ppid, |p| {
@@ -1272,6 +1274,8 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_heap_end(heap_base + heap_map_size);
         p.set_stack_bottom(stack_base_vaddr);
         p.set_stack_top(stack_end_vaddr + 4096);
+        crate::info!("[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}", 
+            p.name(), stack_base_vaddr, stack_end_vaddr, stack_end_vaddr + 4096);
         prev
     })
     .flatten();

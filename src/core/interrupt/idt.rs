@@ -829,6 +829,7 @@ fn try_grow_user_stack(fault_addr: u64) -> bool {
         None => return false,
     };
     if stack_bottom == 0 || stack_top == 0 {
+        crate::error!("[STACK_GROW] FAILED: uninitialized stack - stack_bottom={:#x}, stack_top={:#x}", stack_bottom, stack_top);
         return false;
     }
     // フォルトアドレスは現在のスタック下端より下でなければならない
