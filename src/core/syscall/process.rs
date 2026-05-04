@@ -366,7 +366,7 @@ pub fn fork() -> u64 {
         None => return ENOSYS,
     };
 
-    let (parent_priv, parent_priority, parent_pt, heap_start, heap_end) =
+    let (parent_priv, parent_priority, parent_pt, heap_start, heap_end, stack_bottom, stack_top) =
         match crate::task::with_process(parent_pid, |p| {
             (
                 p.privilege(),
@@ -374,6 +374,8 @@ pub fn fork() -> u64 {
                 p.page_table(),
                 p.heap_start(),
                 p.heap_end(),
+                p.stack_bottom(),
+                p.stack_top(),
             )
         }) {
             Some(v) => v,
@@ -407,6 +409,8 @@ pub fn fork() -> u64 {
     child_proc.set_page_table(child_pt);
     child_proc.set_heap_start(heap_start);
     child_proc.set_heap_end(heap_end);
+    child_proc.set_stack_bottom(stack_bottom);
+    child_proc.set_stack_top(stack_top);
     // 親の FD テーブルを子に継承する
     if let Some(table) = child_fd_table {
         child_proc.set_fd_table(table);

@@ -859,7 +859,8 @@ fn exec_with_data(
         let mut proc = crate::task::Process::new(process_name, privilege, parent_pid, 0);
         proc.set_page_table(new_pt_phys);
         proc.set_stack_bottom(stack_base_vaddr);
-        proc.set_stack_top(stack_end_vaddr);
+        // stack_top should be one page above the highest mapped stack address
+        proc.set_stack_top(stack_end_vaddr + 4096);
         // 親プロセスの CWD を子プロセスに継承する
         if let Some(ppid) = parent_pid {
             let parent_cwd = crate::task::with_process(ppid, |p| {
