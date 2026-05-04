@@ -33,6 +33,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_DIR="$ROOT_DIR/target"
 
+rm -f "$TARGET_DIR/esp.img"
+
 mkdir -p "$TARGET_DIR"
 ESP_IMG="$TARGET_DIR/esp.img"
 

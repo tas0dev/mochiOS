@@ -493,7 +493,18 @@ pub fn ipc_send_pages(
         }
     }
 
-    let mapped_addr = match map_phys_pages_into_target(dest_thread_id, &phys_pages, map_start) {
+    // `map_start` is only a hint and is intentionally ignored.
+    // Rationale:
+    // - Avoids accidental/ABI-mismatch garbage in the 4th argument causing bogus mappings.
+    // - Mirrors `map_external_pages_for_receiver()` behaviour which ignores receiver hints for safety.
+    // - Prevents mapping shared pages onto unexpected addresses in the target process.
+    if map_start != 0 {
+        crate::debug!(
+            "[ipc_send_pages] ignoring map_start hint={:#x} (auto-placing mapping)",
+            map_start
+        );
+    }
+    let mapped_addr = match map_phys_pages_into_target(dest_thread_id, &phys_pages, 0) {
         Ok(addr) => addr,
         Err(e) => return e,
     };
