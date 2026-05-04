@@ -97,6 +97,8 @@ impl Mailbox {
                 return false;
             }
         }
+        
+        self.slots[idx] = Message::empty();
         self.free[self.free_count] = idx as u8;
         self.free_count += 1;
         true
@@ -324,7 +326,7 @@ pub fn send_pages_from_kernel(
             }
             msg.data[off..off + 8].copy_from_slice(&map_start.to_ne_bytes());
             off += 8;
-            msg.data[off..off + 8].copy_from_slice(&(total as u64).to_ne_bytes());
+            msg.data[off..off + 8].copy_from_slice(&(total).to_ne_bytes());
             off += 8;
             msg.len = off;
             msg.ext_pages_count = pages.len() as u16;
@@ -376,8 +378,10 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
             }
             msg.data[off..off + 8].copy_from_slice(&map_start.to_ne_bytes());
             off += 8;
-            msg.data[off..off + 8].copy_from_slice(&(total as u64).to_ne_bytes());
+            msg.data[off..off + 8].copy_from_slice(&(total).to_ne_bytes());
             off += 8;
+            crate::debug!("[IPC KERN] map_header: map_start={:#x} total={} -> msg.data[0..16]={:02x?}", 
+                map_start, total, &msg.data[0..16]);
             msg.len = off;
             msg.ext_pages_count = 0;
             // enqueue

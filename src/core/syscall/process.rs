@@ -411,6 +411,7 @@ pub fn fork() -> u64 {
     child_proc.set_heap_end(heap_end);
     child_proc.set_stack_bottom(stack_bottom);
     child_proc.set_stack_top(stack_top);
+    crate::info!("[STACK_INIT] FORK child: stack_bottom={:#x}, stack_top={:#x}", stack_bottom, stack_top);
     // 親の FD テーブルを子に継承する
     if let Some(table) = child_fd_table {
         child_proc.set_fd_table(table);
