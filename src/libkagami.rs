@@ -778,6 +778,8 @@ mod mochi_impl {
     pub struct HostDisplay {
         kagami_tid: u64,
         ipc_buf: [u8; IPC_BUF_SIZE],
+        pointer_callback: Option<Arc<dyn Fn(f64, f64) + Send + Sync>>,
+        keyboard_callback: Option<Arc<dyn Fn(u32, WEnum<wl_keyboard::KeyState>) + Send + Sync>>,
     }
 
     pub struct HostSurface {
@@ -793,10 +795,19 @@ mod mochi_impl {
     }
 
     pub fn register_pointer_and_keyboard(
-        _host: &mut HostDisplay,
-        _pointer_cb: Option<Arc<dyn Fn(f64, f64) + Send + Sync>>,
-        _keyboard_cb: Option<Arc<dyn Fn(u32, WEnum<wl_keyboard::KeyState>) + Send + Sync>>,
+        host: &mut HostDisplay,
+        pointer_cb: Option<Arc<dyn Fn(f64, f64) + Send + Sync>>,
+        keyboard_cb: Option<Arc<dyn Fn(u32, WEnum<wl_keyboard::KeyState>) + Send + Sync>>,
     ) -> Result<(), String> {
+        if pointer_cb.is_some() {
+            println!("[libkagami-mochi] Registering pointer callback");
+            host.pointer_callback = pointer_cb;
+        }
+        if keyboard_cb.is_some() {
+            println!("[libkagami-mochi] Registering keyboard callback");
+            host.keyboard_callback = keyboard_cb;
+        }
+        println!("[libkagami-mochi] Input callbacks registered");
         Ok(())
     }
 
@@ -808,13 +819,77 @@ mod mochi_impl {
             Ok(Self {
                 kagami_tid,
                 ipc_buf: [0u8; IPC_BUF_SIZE],
+                pointer_callback: None,
+                keyboard_callback: None,
             })
         }
 
         pub fn dispatch(&mut self) -> Result<(), String> {
-            let _ = ipc_recv(&mut self.ipc_buf);
+            #[cfg(all(unix, target_os = "linux", target_env = "musl"))]
+            {
+                let (bytes_received, _) = ipc_recv(&mut self.ipc_buf);
+                self.process_input_events(bytes_received as usize);
+            }
+            
+            #[cfg(not(all(unix, target_os = "linux", target_env = "musl")))]
+            {
+                let _ = ipc_recv(&mut self.ipc_buf);
+            }
+            
             yield_now();
             Ok(())
+        }
+        
+        fn process_input_events(&mut self, bytes_received: usize) {
+            if bytes_received >= 4 {
+                // Parse message type from first 4 bytes (little-endian)
+                let msg_type = u32::from_le_bytes([
+                    self.ipc_buf[0],
+                    self.ipc_buf[1],
+                    self.ipc_buf[2],
+                    self.ipc_buf[3],
+                ]);
+                
+                // Handle input events (if Kagami sends them)
+                // Message format (hypothetical):
+                // Type 100: Pointer Motion { type=100, x=f64, y=f64 }
+                // Type 101: Keyboard Key { type=101, key=u32, state=u32 }
+                if msg_type == 100 && bytes_received >= 20 {
+                    // Pointer Motion: 4 (type) + 8 (x:f64) + 8 (y:f64) = 20 bytes
+                    let x = f64::from_le_bytes([
+                        self.ipc_buf[4], self.ipc_buf[5], self.ipc_buf[6], self.ipc_buf[7],
+                        self.ipc_buf[8], self.ipc_buf[9], self.ipc_buf[10], self.ipc_buf[11],
+                    ]);
+                    let y = f64::from_le_bytes([
+                        self.ipc_buf[12], self.ipc_buf[13], self.ipc_buf[14], self.ipc_buf[15],
+                        self.ipc_buf[16], self.ipc_buf[17], self.ipc_buf[18], self.ipc_buf[19],
+                    ]);
+                    
+                    if let Some(cb) = &self.pointer_callback {
+                        println!("[libkagami-mochi] Pointer Motion: ({}, {})", x, y);
+                        cb(x, y);
+                    }
+                } else if msg_type == 101 && bytes_received >= 12 {
+                    // Keyboard Key: 4 (type) + 4 (key:u32) + 4 (state:u32) = 12 bytes
+                    let key = u32::from_le_bytes([
+                        self.ipc_buf[4], self.ipc_buf[5], self.ipc_buf[6], self.ipc_buf[7],
+                    ]);
+                    let state_raw = u32::from_le_bytes([
+                        self.ipc_buf[8], self.ipc_buf[9], self.ipc_buf[10], self.ipc_buf[11],
+                    ]);
+                    
+                    if let Some(cb) = &self.keyboard_callback {
+                        // Convert state_raw to WEnum<wl_keyboard::KeyState>
+                        let state = if state_raw == 0 {
+                            WEnum::Value(wl_keyboard::KeyState::Released)
+                        } else {
+                            WEnum::Value(wl_keyboard::KeyState::Pressed)
+                        };
+                        println!("[libkagami-mochi] Keyboard Key {} ({:?})", key, state);
+                        cb(key, state);
+                    }
+                }
+            }
         }
 
         pub fn create_surface(&mut self, width: i32, height: i32) -> Result<HostSurface, String> {
