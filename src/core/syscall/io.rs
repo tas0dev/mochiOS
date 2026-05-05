@@ -3,6 +3,7 @@
 use super::types::{EBADF, EFAULT, EINVAL, SUCCESS};
 use crate::util::console;
 use crate::{debug, error, info, warn};
+use crate::syscall::types;
 
 /// 標準出力のファイルディスクリプタ
 const STDOUT_FD: u64 = 1;
@@ -388,7 +389,18 @@ pub fn log(msg: u64, len: u64, level: u64) -> u64 {
         1 => warn!("{}", msg),
         2 => info!("{}", msg),
         3 => debug!("{}", msg),
-        _ => return super::types::EINVAL,
+        _ => return EINVAL,
     }
+    SUCCESS
+}
+
+/// 重力があるかを確認します。
+///
+/// ### Return
+/// SUCCESS: 重力は存在しています。
+/// それ以外が返された場合、このPCは重力下にありません。
+///
+/// 宇宙空間で使用することは想定していません。
+pub fn check_gravity_exist() -> u64 {
     SUCCESS
 }
