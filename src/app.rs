@@ -195,7 +195,7 @@ impl KagamiApp {
     fn handle_ipc_message(&mut self, sender_tid: u64, len: usize) {
         if let Some(pending) = self.pending_shared_attach {
             if pending.sender_tid == sender_tid && len >= 16 {
-                let mapped_addr = u64::from_ne_bytes([
+                let mapped_addr = u64::from_le_bytes([
                     self.ipc_buf[0],
                     self.ipc_buf[1],
                     self.ipc_buf[2],
@@ -205,7 +205,7 @@ impl KagamiApp {
                     self.ipc_buf[6],
                     self.ipc_buf[7],
                 ]);
-                let total_bytes = u64::from_ne_bytes([
+                let total_bytes = u64::from_le_bytes([
                     self.ipc_buf[8],
                     self.ipc_buf[9],
                     self.ipc_buf[10],
