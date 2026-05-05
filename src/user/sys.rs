@@ -158,6 +158,8 @@ pub enum SyscallNumber {
     MouseReadWait = 551,
     /// プロセス一覧を取得（ユーザーバッファへ書き込む）
     ListProcesses = 552,
+    /// 重力が存在するか
+    CheckGravityExist = 999,
 }
 
 /// 操作が許可されていない
