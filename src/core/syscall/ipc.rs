@@ -376,9 +376,9 @@ pub fn send_map_header_from_kernel(dest_thread_id: u64, map_start: u64, total: u
                 let _ = mb.free_slot(slot_idx);
                 return false;
             }
-            msg.data[off..off + 8].copy_from_slice(&map_start.to_ne_bytes());
+            msg.data[off..off + 8].copy_from_slice(&map_start.to_le_bytes());
             off += 8;
-            msg.data[off..off + 8].copy_from_slice(&(total).to_ne_bytes());
+            msg.data[off..off + 8].copy_from_slice(&(total).to_le_bytes());
             off += 8;
             crate::debug!("[IPC KERN] map_header: map_start={:#x} total={} -> msg.data[0..16]={:02x?}", 
                 map_start, total, &msg.data[0..16]);
@@ -548,7 +548,7 @@ fn prepare_external_pages_for_user(
     if copy_len < 16 || recv_buf.len() < 16 {
         return Err(EFAULT);
     }
-    let map_start_hint = u64::from_ne_bytes([
+    let map_start_hint = u64::from_le_bytes([
         recv_buf[0],
         recv_buf[1],
         recv_buf[2],
@@ -558,7 +558,7 @@ fn prepare_external_pages_for_user(
         recv_buf[6],
         recv_buf[7],
     ]);
-    let total = u64::from_ne_bytes([
+    let total = u64::from_le_bytes([
         recv_buf[8],
         recv_buf[9],
         recv_buf[10],
@@ -575,8 +575,8 @@ fn prepare_external_pages_for_user(
         ext_pages_count,
         ext_pages,
     )?;
-    recv_buf[0..8].copy_from_slice(&mapped_addr.to_ne_bytes());
-    recv_buf[8..16].copy_from_slice(&total.to_ne_bytes());
+    recv_buf[0..8].copy_from_slice(&mapped_addr.to_le_bytes());
+    recv_buf[8..16].copy_from_slice(&total.to_le_bytes());
     Ok(16)
 }
 

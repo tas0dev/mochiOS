@@ -18,6 +18,12 @@ const BUSYBOX_SHA256: &str = "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34
 fn build_kernel(manifest_dir: &PathBuf, fs_dir: &PathBuf, profile: &str) {
     let kernel_crate_dir = manifest_dir.join("src/core");
     let kernel_target_dir = manifest_dir.join("target/kernel");
+
+    let mut clean = std::process::Command::new("cargo");
+    clean.current_dir(&kernel_crate_dir);
+    clean.arg("clean");
+    let _ = clean.status();
+
     let mut cmd = std::process::Command::new("cargo");
     cmd.current_dir(&kernel_crate_dir);
     cmd.env("MOCHIOS_BUILDING_KERNEL", "1");
