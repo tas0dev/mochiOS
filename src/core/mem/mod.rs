@@ -17,13 +17,33 @@ pub(crate) mod user;
 /// - `boot_info`: ブートローダから渡される情報構造体
 pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     info!("Initializing memory...");
+    crate::debug!("About to disable interrupts");
 
     x86_64::instructions::interrupts::disable();
+    crate::debug!("Interrupts disabled, temporarily disabling SMAP");
+
+    let smap_was_enabled = crate::cpu::is_smap_enabled();
+    if smap_was_enabled {
+        unsafe {
+            crate::cpu::disable_smap();
+        }
+        crate::debug!("SMAP temporarily disabled");
+    }
 
     gdt::init();
+    crate::debug!("GDT initialized, initializing IDT");
     interrupt::init_idt();
+    crate::debug!("IDT initialized, initializing paging");
 
     paging::init(boot_info)?;
+    crate::debug!("Paging initialized");
+
+    if smap_was_enabled {
+        unsafe {
+            crate::cpu::enable_smap();
+        }
+        crate::debug!("SMAP re-enabled");
+    }
 
     let mut page_table_lock = paging::PAGE_TABLE.lock();
     let page_table = match page_table_lock.as_mut() {
@@ -49,6 +69,7 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
             return Err(crate::Kernel::Memory(crate::result::Memory::OutOfMemory));
         }
     };
+    crate::debug!("Locks acquired, initializing heap");
     if let Err(e) = allocator::init_heap(
         &mut *page_table,
         &mut *frame_alloc,
@@ -62,8 +83,10 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
         return Err(crate::Kernel::Memory(crate::result::Memory::InvalidAddress));
     }
 
+    crate::debug!("Heap initialized, disabling PIT");
     // PITを停止してからPICを初期化
     interrupt::disable_pit();
+    crate::debug!("PIT disabled, initializing PIC");
     interrupt::init_pic();
 
     debug!("Memory initialized");

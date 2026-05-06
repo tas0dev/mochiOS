@@ -414,7 +414,32 @@ pub unsafe fn read_fs_base() -> u64 {
 }
 
 pub fn is_smap_enabled() -> bool {
-    SMAP_ENABLED.load(Ordering::Acquire)
+    // CR4レジスタから現在の状態を直接読む（キャッシュではなく実値）
+    unsafe {
+        let cr4 = read_cr4();
+        const CR4_SMAP_BIT: u64 = 1 << 21;
+        (cr4 & CR4_SMAP_BIT) != 0
+    }
+}
+
+/// SMAP を一時的に無効化（カーネル初期化時など必要な場合に使用）
+pub unsafe fn disable_smap() {
+    let mut cr4 = read_cr4();
+    const CR4_SMAP_BIT: u64 = 1 << 21;
+    if (cr4 & CR4_SMAP_BIT) != 0 {
+        cr4 &= !CR4_SMAP_BIT;
+        write_cr4(cr4);
+    }
+}
+
+/// SMAP を再度有効化
+pub unsafe fn enable_smap() {
+    let mut cr4 = read_cr4();
+    const CR4_SMAP_BIT: u64 = 1 << 21;
+    if SMAP_ENABLED.load(Ordering::Acquire) && (cr4 & CR4_SMAP_BIT) == 0 {
+        cr4 |= CR4_SMAP_BIT;
+        write_cr4(cr4);
+    }
 }
 
 #[inline]

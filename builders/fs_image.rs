@@ -343,9 +343,9 @@ pub fn copy_newlib_libs(libc_dir: &Path, dest_dir: &Path) -> Result<(), String> 
         .map_err(|e| format!("Failed to copy crt0.o to {}: {}", dest_dir.display(), e))?;
     println!("Copied crt0.o to {}", dest_dir.display());
 
-    // ライブラリをコピー
-    let libs = ["libc.a", "libg.a", "libm.a", "libnosys.a"];
-    for lib in &libs {
+    // 必須のライブラリ
+    let required_libs = ["libc.a", "libg.a", "libm.a", "libnosys.a"];
+    for lib in &required_libs {
         let src = libc_dir.join(lib);
         let dest = dest_dir.join(lib);
         fs::copy(&src, &dest).map_err(|e| {
@@ -362,6 +362,37 @@ pub fn copy_newlib_libs(libc_dir: &Path, dest_dir: &Path) -> Result<(), String> 
             dest_dir.display(),
             src.display()
         );
+    }
+
+    // オプショナルなライブラリ（存在しない場合は空のアーカイブを作成）
+    let optional_libs = ["libgcc_s.a", "libunwind.a", "libextra.a"];
+    for lib in &optional_libs {
+        let dest = dest_dir.join(lib);
+        let src = libc_dir.join(lib);
+        
+        if src.exists() {
+            // ソースが存在する場合はコピー
+            fs::copy(&src, &dest).map_err(|e| {
+                format!(
+                    "Failed to copy {} to {}: {}",
+                    lib,
+                    dest_dir.display(),
+                    e
+                )
+            })?;
+            println!("Copied {} to {}", lib, dest_dir.display());
+        } else if !dest.exists() {
+            // ソースが存在しない場合は空のアーカイブを作成
+            use std::process::Command;
+            let status = Command::new("ar")
+                .args(&["rcs", dest.to_str().unwrap()])
+                .status()
+                .map_err(|e| format!("Failed to create empty archive for {}: {}", lib, e))?;
+            if !status.success() {
+                return Err(format!("Failed to create empty archive for {}", lib));
+            }
+            println!("Created empty archive for {} at {}", lib, dest_dir.display());
+        }
     }
 
     Ok(())

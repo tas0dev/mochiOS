@@ -1,6 +1,5 @@
 //! I/O関連のシステムコールラッパー
 
-use crate::posix_stubs::syscall;
 use crate::sys::{syscall0, syscall1, syscall2, syscall3, SyscallNumber};
 
 /// 標準出力のファイルディスクリプタ
@@ -160,7 +159,7 @@ pub fn check_gravity_exist() -> bool {
     let answer = syscall0(
         SyscallNumber::CheckGravityExist as u64
     );
-    
+
     if answer == 0 {
         return true;
     }

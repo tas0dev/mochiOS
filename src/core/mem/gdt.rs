@@ -41,12 +41,15 @@ struct Selectors {
 /// カーネルのコードセグメントセレクタを取得 (GDT初期化に内部使用)
 pub fn init() {
     info!("Initializing GDT...");
+    crate::debug!("About to init TSS");
 
     // TSSを初期化
     let tss = tss::init();
+    crate::debug!("TSS initialized");
 
     // GDTを初期化
     let (gdt, selectors) = GDT.call_once(|| {
+        crate::debug!("Creating GDT table");
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.append(Descriptor::kernel_code_segment());
         let data_selector = gdt.append(Descriptor::kernel_data_segment());
@@ -72,20 +75,30 @@ pub fn init() {
             },
         )
     });
+    crate::debug!("GDT created");
 
     unsafe {
         // GDTをロード
+        crate::debug!("Loading GDT");
         gdt.load();
+        crate::debug!("GDT loaded");
 
         // Boot Services終了後はカーネルのセグメントに切り替え
+        crate::debug!("Setting CS");
         set_cs(selectors.code_selector);
+        crate::debug!("CS set, setting data segments");
         set_data_segments(selectors.data_selector);
+        crate::debug!("Data segments set");
 
         // TSSをロード
+        crate::debug!("Loading TSS");
         load_tss(selectors.tss_selector);
+        crate::debug!("TSS loaded");
         // Ensure user data descriptor has D/B cleared for long mode (avoid GPF on iretq)
         // We modify the loaded GDT in-place: clear bit 54 (D/B) of the descriptor.
-        {
+        // ただし、SMAP有効環境ではこのメモリアクセスが違反になるため、スキップする。
+        if !crate::cpu::is_smap_enabled() {
+            crate::debug!("Modifying GDT descriptor for user data segment");
             let mut gdtr: [u8; 10] = [0; 10];
             asm!("sgdt [{}]", in(reg) &mut gdtr, options(nostack));
             let base = u64::from_le_bytes([
@@ -97,6 +110,9 @@ pub fn init() {
             // clear D/B bit (bit 54)
             let new = old & !(1u64 << 54);
             core::ptr::write_volatile(desc_ptr, new);
+            crate::debug!("GDT descriptor modified");
+        } else {
+            crate::debug!("Skipping GDT descriptor modification (SMAP enabled)");
         }
     }
 

@@ -93,173 +93,95 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
 
     let physical_memory_offset = boot_info.physical_memory_offset;
 
-    // 新しいレベル4ページテーブル用のフレームを割り当て
-    let l4_frame = match frame::allocate_frame() {
-        Ok(f) => f,
-        Err(e) => {
-            crate::warn!("Failed to allocate frame for new page table: {:?}", e);
-            crate::audit::log(
-                crate::audit::AuditEventKind::Fault,
-                "paging init failed to allocate L4 frame",
-            );
-            return Err(Kernel::Memory(Memory::OutOfMemory));
-        }
-    };
-    let l4_table_addr = l4_frame.start_address().as_u64();
-    info!("New L4 table at {:#x}", l4_table_addr);
+    // 現在のページテーブル情報を記録
+    let (old_l4_frame, _) = x86_64::registers::control::Cr3::read();
+    let old_l4_phys = old_l4_frame.start_address().as_u64();
+    
+    crate::info!("Current L4 table phys: {:#x}", old_l4_phys);
 
-    // 新しいページテーブルを初期化
-    let l4_table = unsafe { &mut *(l4_table_addr as *mut PageTable) };
-    l4_table.zero();
-
-    let mut page_table =
-        unsafe { OffsetPageTable::new(l4_table, VirtAddr::new(physical_memory_offset)) };
-
-    // フレームアロケータを取得
-    let mut allocator_lock = frame::FRAME_ALLOCATOR.lock();
-    let allocator = match allocator_lock.as_mut() {
-        Some(a) => a,
-        None => {
-            crate::warn!("Frame allocator not initialized");
-            crate::audit::log(
-                crate::audit::AuditEventKind::Fault,
-                "paging init missing frame allocator",
-            );
-            return Err(Kernel::Memory(Memory::InvalidAddress));
-        }
-    };
-
-    // メモリマップに基づいて必要な領域をidentity mapする
-    let memory_map = unsafe {
-        core::slice::from_raw_parts(
-            boot_info.memory_map_addr as *const crate::MemoryRegion,
-            boot_info.memory_map_len,
-        )
-    };
-
-    let mut mapped_pages = 0;
-
-    // 現在のスタックポインタを取得して、スタックが含まれる領域を特定する
-    let rsp: u64;
-    unsafe {
-        core::arch::asm!("mov {}, rsp", out(reg) rsp);
-    }
-    info!("Current RSP: {:#x}", rsp);
-
-    // マップすべき領域のタイプ
-    // 基本的にOSが使用する可能性のある領域はすべてRWでマップする
-    for region in memory_map {
-        let is_stack = rsp >= region.start && rsp < (region.start + region.len);
-        let should_map = match region.region_type {
-            crate::MemoryType::Usable => true,
-            crate::MemoryType::BootloaderReclaimable => true,
-            crate::MemoryType::AcpiReclaimable => true,
-            crate::MemoryType::AcpiNvs => true,
-            crate::MemoryType::Reserved => is_stack, // スタック領域のみマップ
-            crate::MemoryType::BadMemory => false,
-
-            _ => true,
-        };
-
-        if should_map {
-            crate::debug!(
-                "Mapping region {:?} at {:#x}",
-                region.region_type,
-                region.start
-            );
-            let start_frame =
-                PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(region.start));
-            let end_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
-                region.start + region.len - 1,
-            ));
-
-            for frame in PhysFrame::range_inclusive(start_frame, end_frame) {
-                let phys = frame.start_address();
-                let virt = VirtAddr::new(phys.as_u64() + physical_memory_offset); // Identity map
-                let page = Page::containing_address(virt);
-
-                let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-
-                unsafe {
-                    if let Ok(mapper) = page_table.map_to(page, frame, flags, allocator) {
-                        mapper.ignore();
-                        mapped_pages += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    // カーネルコード領域（起動時のコード）が含まれているか確認し、マップする
-    // 現在の命令ポインタ（RIP）を取得して、その周辺も確実にマップする
-    let rip: u64;
-    unsafe {
-        core::arch::asm!("lea {}, [rip]", out(reg) rip);
-    }
-    info!("Current RIP: {:#x}", rip);
-
-    // カーネルが含まれる領域を特別に検索してマップ
-    for region in memory_map {
-        let is_kernel = rip >= region.start && rip < (region.start + region.len);
-        if is_kernel {
-            crate::debug!(
-                "Kernel Code in region {:?} at {:#x} - {:#x}",
-                region.region_type,
-                region.start,
-                region.start + region.len
-            );
-        }
-        let is_stack = rsp >= region.start && rsp < (region.start + region.len);
-        if is_stack {
-            crate::debug!(
-                "Kernel Stack in region {:?} at {:#x} - {:#x}",
-                region.region_type,
-                region.start,
-                region.start + region.len
-            );
-        }
-    }
-
-    // フレームバッファをマップ (もしメモリマップに含まれていなければ)
-    let fb_start =
-        PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(boot_info.framebuffer_addr));
-    let fb_end = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
-        boot_info.framebuffer_addr + (boot_info.framebuffer_size as u64) - 1,
-    ));
-    for frame in PhysFrame::range_inclusive(fb_start, fb_end) {
-        let phys = frame.start_address();
-        let virt = VirtAddr::new(phys.as_u64() + physical_memory_offset);
-        let page = Page::containing_address(virt);
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE; // | PageTableFlags::NO_CACHE?
-        unsafe {
-            if let Ok(mapper) = page_table.map_to(page, frame, flags, allocator) {
-                mapper.ignore();
-            }
-        }
-    }
-
-    // HIGH-06 対応: カーネル .text は読み取り専用に戻す
-    protect_kernel_text_pages(&mut page_table);
-
-    // CR3スイッチ
-    drop(allocator_lock);
-
-    crate::debug!("Switching to new page table...");
-    unsafe {
-        Cr3::write(l4_frame, Cr3Flags::empty());
-        *PAGE_TABLE.lock() = Some(page_table);
-        *PHYS_OFFSET.lock() = Some(physical_memory_offset);
-        // カーネルの元のページテーブルアドレスを保存
-        KERNEL_L4_PHYS.store(l4_table_addr, core::sync::atomic::Ordering::Relaxed);
-    }
+    // グローバル状態を設定
+    *PHYS_OFFSET.lock() = Some(physical_memory_offset);
+    KERNEL_L4_PHYS.store(old_l4_phys, core::sync::atomic::Ordering::Relaxed);
+    
     // フレームアロケータに HHDM オフセットを伝えてフリーリストを有効化
     super::frame::set_phys_offset(physical_memory_offset);
-    crate::debug!("Switched CR3 successfully.");
+    
+    crate::info!("Paging initialized (deferring PAGE_TABLE setup).");
 
-    crate::debug!(
-        "Paging initialized. New table active. Mapped {} pages.",
-        mapped_pages
-    );
+    Ok(())
+}
+
+/// ページテーブルを遅延初期化する
+pub fn init_page_table() -> Result<()> {
+    crate::info!("Initializing PAGE_TABLE...");
+    
+    let phys_offset = *PHYS_OFFSET.lock();
+    let phys_offset = match phys_offset {
+        Some(off) => off,
+        None => {
+            crate::warn!("PHYS_OFFSET not set");
+            return Err(Kernel::Memory(Memory::NotMapped));
+        }
+    };
+
+    let (old_l4_frame, _) = x86_64::registers::control::Cr3::read();
+    let old_l4_phys = old_l4_frame.start_address().as_u64();
+    
+    crate::info!("Bootloader L4 table at phys {:#x}", old_l4_phys);
+    
+    // 新しい L4 テーブルをメモリに割り当てる
+    let new_l4_frame = {
+        let mut allocator_guard = frame::FRAME_ALLOCATOR.lock();
+        if let Some(alloc) = allocator_guard.as_mut() {
+            alloc.allocate_frame()
+        } else {
+            None
+        }
+    }.ok_or(Kernel::Memory(Memory::OutOfMemory))?;
+    
+    let new_l4_phys = new_l4_frame.start_address().as_u64();
+    
+    crate::info!("Allocated new L4 table at phys {:#x}", new_l4_phys);
+    
+    // ブートローダーの L4 テーブルから新しい L4 テーブルにコピー（読み込みは可能）
+    unsafe {
+        let old_l4_virt = old_l4_phys + phys_offset;
+        let new_l4_virt = new_l4_phys + phys_offset;
+        
+        crate::debug!("Copying L4 table from virt {:#x} to {:#x}", old_l4_virt, new_l4_virt);
+        
+        // ページテーブルのサイズは 4KB (512 entries * 8 bytes)
+        core::ptr::copy_nonoverlapping(
+            old_l4_virt as *const u8,
+            new_l4_virt as *mut u8,
+            4096,
+        );
+        
+        crate::info!("L4 table copied successfully");
+    }
+    
+    // 新しい L4 テーブルにアクティブに切り替える
+    unsafe {
+        let new_l4_flags = Cr3Flags::empty();
+        x86_64::registers::control::Cr3::write(new_l4_frame, new_l4_flags);
+        crate::info!("CR3 switched to new L4 table at phys {:#x}", new_l4_phys);
+    }
+    
+    // ブートローダーの L4 テーブルを記録
+    KERNEL_L4_PHYS.store(new_l4_phys, core::sync::atomic::Ordering::Release);
+    
+    // 新しい L4 テーブルでページテーブルを作成
+    let page_table = unsafe {
+        let new_l4_virt = new_l4_phys + phys_offset;
+        let l4_table = &mut *(new_l4_virt as *mut PageTable);
+        OffsetPageTable::new(l4_table, VirtAddr::new(phys_offset))
+    };
+
+    // PAGE_TABLE を設定
+    *PAGE_TABLE.lock() = Some(page_table);
+    
+    crate::info!("PAGE_TABLE initialized with new L4 table successfully.");
+
     Ok(())
 }
 

@@ -23,6 +23,7 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
         )
     };
 
+    crate::info!("Memory map has {} regions", memory_map.len());
     for (i, region) in memory_map.iter().enumerate() {
         debug!(
             "  Region {}: {:#x} - {:#x} ({:?})",
@@ -31,6 +32,15 @@ pub fn kinit(boot_info: &'static BootInfo) -> Result<&'static [MemoryRegion]> {
             region.start + region.len,
             region.region_type
         );
+        if i < 5 {
+            crate::info!(
+                "  Region {}: {:#x} - {:#x} ({:?})",
+                i,
+                region.start,
+                region.start + region.len,
+                region.region_type
+            );
+        }
     }
 
     // 先にフレームアロケータを初期化
