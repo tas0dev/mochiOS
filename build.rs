@@ -565,7 +565,7 @@ fn main() {
     for svc in &services {
         if svc.autostart {
             if svc.fs_type != "initfs" {
-                services_autostart_entries.push(format!("/Services/{}.service", svc.name));
+                services_autostart_entries.push(format!("/System/Services/{}.service", svc.name));
             } else {
                 // 場合によっては initfs に autostart=true が設定されていることがある。
                 // 開発者に分かるようにビルド時警告を出す。

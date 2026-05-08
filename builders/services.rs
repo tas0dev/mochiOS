@@ -239,7 +239,7 @@ pub fn build_service(
         let dest_name = format!("{}.service", service.name);
         // ATA/ext2 サービスは Services/ サブディレクトリに配置
         let effective_output_dir = if service.fs_type != "initfs" {
-            let services_subdir = output_dir.join("Services");
+            let services_subdir = output_dir.join("System/Services");
             fs::create_dir_all(&services_subdir)
                 .map_err(|e| format!("Failed to create Services dir: {}", e))?;
             services_subdir
