@@ -15,7 +15,7 @@ struct ServiceDef {
 const CRITICAL_SERVICES: &[ServiceDef] = &[];
 
 const BACKGROUND_SERVICES: &[ServiceDef] = &[
-    ServiceDef { name: "driver.service", path: "/Services/driver.service" },
+    ServiceDef { name: "driver.service", path: "/System/Services/driver.service" },
 ];
 
 #[cfg(feature = "run_tests")]
@@ -115,9 +115,9 @@ fn is_allowed_service_path(path: &str) -> bool {
     if path.is_empty() || path.contains("..") {
         return false;
     }
-    path.starts_with("/Services/")
+    path.starts_with("/System/Services/")
         || path.starts_with("/Binaries/")
-        || path.starts_with("Services/")
+        || path.starts_with("System/Services/")
         || path.starts_with("Binaries/")
 }
 
@@ -125,7 +125,7 @@ fn service_already_running(path: &str) -> bool {
     let name = service_name_from_path(path);
     task::find_process_by_name(path).is_some()
         || task::find_process_by_name(name).is_some()
-        || task::find_process_by_name(&format!("/Services/{}", name)).is_some()
+        || task::find_process_by_name(&format!("/System/Services/{}", name)).is_some()
 }
 
 fn fs_open_read_lines(path: &str) -> Result<Vec<String>, i64> {
