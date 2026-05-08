@@ -177,7 +177,9 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
             return;
         }
         // clear buffer
-        for b in out_buf.iter_mut() { *b = 0; }
+        for b in out_buf.iter_mut() {
+            *b = 0;
+        }
         // tid and pid: use process id for both (no separate thread id here)
         let pid_u = proc.id().as_u64();
         out_buf[0..8].copy_from_slice(&pid_u.to_ne_bytes());
@@ -195,7 +197,7 @@ pub fn list_processes(buf_ptr: u64, buf_len: u64) -> u64 {
         let name = proc.name();
         let name_bytes = name.as_bytes();
         let copy_len = core::cmp::min(64, name_bytes.len());
-        out_buf[32..32+copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        out_buf[32..32 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
 
         // copy to user
         let dest_ptr = buf_ptr + (written * RECORD_SIZE) as u64;
@@ -411,7 +413,11 @@ pub fn fork() -> u64 {
     child_proc.set_heap_end(heap_end);
     child_proc.set_stack_bottom(stack_bottom);
     child_proc.set_stack_top(stack_top);
-    crate::info!("[STACK_INIT] FORK child: stack_bottom={:#x}, stack_top={:#x}", stack_bottom, stack_top);
+    crate::info!(
+        "[STACK_INIT] FORK child: stack_bottom={:#x}, stack_top={:#x}",
+        stack_bottom,
+        stack_top
+    );
     // 親の FD テーブルを子に継承する
     if let Some(table) = child_fd_table {
         child_proc.set_fd_table(table);

@@ -13,6 +13,8 @@ pub fn register(ops: *const McxFsOps, version: u16) -> bool {
     if ops.is_null() {
         return false;
     }
+    // Disable SMAP/SMEP while reading module-provided ops struct
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
     let ops_ref = unsafe { &*ops };
     if (ops_ref.mount as usize) == 0
         || (ops_ref.read as usize) == 0
@@ -41,6 +43,8 @@ pub fn mount(device_id: u32) -> i32 {
     if ops.is_null() {
         return -38;
     }
+    // Disable SMAP/SMEP while dereferencing ops in module memory
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
     if (unsafe { (*ops).mount } as usize) == 0 {
         return -38;
     }
@@ -56,6 +60,9 @@ pub fn read_all(path: &str) -> Option<Vec<u8>> {
     if ops.is_null() {
         return crate::init::fs::read(path);
     }
+
+    // Disable SMAP/SMEP while calling into module ops
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
 
     let mut out = Vec::new();
     let path_bytes = path.as_bytes();
@@ -108,6 +115,9 @@ pub fn file_metadata(path: &str) -> Option<(u16, u64)> {
     if ops.is_null() {
         return None;
     }
+    // Disable SMAP/SMEP while calling into module ops
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
+
     let path_bytes = path.as_bytes();
     let path_arg = McxPath {
         ptr: path_bytes.as_ptr(),
@@ -133,6 +143,9 @@ pub fn readdir_path(path: &str) -> Option<Vec<alloc::string::String>> {
     if ops.is_null() {
         return None;
     }
+    // Disable SMAP/SMEP while calling into module ops
+    let _smap_guard = crate::cpu::SmapSmepGuard::new();
+
     let path_bytes = path.as_bytes();
     let path_arg = McxPath {
         ptr: path_bytes.as_ptr(),

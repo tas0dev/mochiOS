@@ -460,6 +460,57 @@ pub fn branch_predictor_barrier() {
     speculation_barrier();
 }
 
+pub struct SmapSmepGuard {
+    smap_was: bool,
+    smep_was: bool,
+}
+
+impl SmapSmepGuard {
+    /// Create a guard that disables SMAP and SMEP if they are currently enabled.
+    /// On drop, the previous state is restored.
+    pub fn new() -> Self {
+        unsafe {
+            let smap = is_smap_enabled();
+            // SMEP state read from CR4 directly
+            let cr4 = read_cr4();
+            const CR4_SMEP_BIT: u64 = 1 << 20;
+            let smep = (cr4 & CR4_SMEP_BIT) != 0;
+
+            if smap {
+                disable_smap();
+            }
+            if smep {
+                // clear SMEP bit
+                let mut cr4 = read_cr4();
+                cr4 &= !CR4_SMEP_BIT;
+                write_cr4(cr4);
+            }
+
+            SmapSmepGuard {
+                smap_was: smap,
+                smep_was: smep,
+            }
+        }
+    }
+}
+
+impl Drop for SmapSmepGuard {
+    fn drop(&mut self) {
+        unsafe {
+            // restore SMEP first
+            if self.smep_was {
+                let mut cr4 = read_cr4();
+                const CR4_SMEP_BIT: u64 = 1 << 20;
+                cr4 |= CR4_SMEP_BIT;
+                write_cr4(cr4);
+            }
+            if self.smap_was {
+                enable_smap();
+            }
+        }
+    }
+}
+
 pub fn reassert_runtime_hardening() {
     unsafe {
         let mut cr0 = read_cr0();

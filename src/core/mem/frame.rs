@@ -35,7 +35,7 @@ impl BitmapFrameAllocator {
     pub fn new(memory_map: &'static [MemoryRegion], phys_offset: u64) -> Self {
         Self {
             memory_map,
-            next_frame: 0x100000 / 4096,  // 1MB から開始（低位メモリ予約領域をスキップ）
+            next_frame: 0x100000 / 4096, // 1MB から開始（低位メモリ予約領域をスキップ）
             free_list_head: 0,
             phys_offset,
         }

@@ -14,7 +14,7 @@ static mut KERNEL_THREAD_STACK: KernelStack = KernelStack([0; KERNEL_THREAD_STAC
 
 /// カーネルメイン関数
 fn kernel_main() -> ! {
-    util::log::set_level(LogLevel::Debug);
+    util::log::set_level(LogLevel::Info);
     debug!("Kernel started");
 
     // core.serviceのみ起動（他のサービスはcore.serviceが管理）

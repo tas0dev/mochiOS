@@ -36,14 +36,34 @@ pub fn init(boot_info: &'static crate::BootInfo) -> Result<()> {
     crate::debug!("IDT initialized, initializing paging");
 
     paging::init(boot_info)?;
-    crate::debug!("Paging initialized");
+    crate::debug!("Paging initialized, initializing PAGE_TABLE");
 
-    if smap_was_enabled {
+    let smap_was_enabled_for_paging = crate::cpu::is_smap_enabled();
+    let smep_was_enabled_for_paging = unsafe {
+        let cr4 = x86_64::registers::control::Cr4::read();
+        cr4.contains(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION)
+    };
+
+    if smap_was_enabled_for_paging {
         unsafe {
-            crate::cpu::enable_smap();
+            crate::cpu::disable_smap();
         }
-        crate::debug!("SMAP re-enabled");
+        crate::debug!("SMAP temporarily disabled for PAGE_TABLE init");
     }
+    if smep_was_enabled_for_paging {
+        unsafe {
+            let mut cr4 = x86_64::registers::control::Cr4::read();
+            cr4.remove(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
+            x86_64::registers::control::Cr4::write(cr4);
+        }
+        crate::debug!("SMEP temporarily disabled for PAGE_TABLE init");
+    }
+
+    paging::init_page_table()?;
+    crate::debug!("PAGE_TABLE initialized");
+
+    // Keep SMAP/SMEP disabled during heap initialization
+    crate::info!("Keeping SMAP/SMEP disabled during kernel initialization");
 
     let mut page_table_lock = paging::PAGE_TABLE.lock();
     let page_table = match page_table_lock.as_mut() {

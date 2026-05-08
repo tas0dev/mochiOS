@@ -17,9 +17,17 @@ use core::arch::asm;
 pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3; // RPL=3
     let user_ss = gdt::user_data_selector() as u64 | 3; // RPL=3
-    let fs_base = crate::task::current_thread_id()
-        .and_then(|tid| crate::task::with_thread(tid, |thread| thread.fs_base()))
-        .unwrap_or(0);
+    let (fs_base, user_cr3) = crate::task::current_thread_id()
+        .and_then(|tid| {
+            crate::task::with_thread(tid, |thread| {
+                let pid = thread.process_id();
+                let fs = thread.fs_base();
+                let cr3 = crate::task::with_process(pid, |proc| proc.page_table().unwrap_or(0))
+                    .unwrap_or(0);
+                (fs, cr3)
+            })
+        })
+        .unwrap_or((0, 0));
 
     // GDTエントリの内容を読み取って確認
     let cs_selector = gdt::user_code_selector();
@@ -69,6 +77,9 @@ pub unsafe fn jump_to_usermode(entry: u64, user_stack: u64) -> ! {
     );
 
     crate::cpu::write_fs_base(fs_base);
+    if user_cr3 != 0 {
+        crate::mem::paging::switch_page_table(user_cr3);
+    }
 
     // iretqスタックフレームを構築:
     // SS, RSP, RFLAGS, CS, RIP
@@ -128,8 +139,15 @@ pub unsafe fn jump_to_usermode_fork_child(
 ) -> ! {
     let user_cs = gdt::user_code_selector() as u64 | 3;
     let user_ss = gdt::user_data_selector() as u64 | 3;
+    let user_cr3 = crate::task::current_thread_id()
+        .and_then(|tid| crate::task::with_thread(tid, |thread| thread.process_id()))
+        .and_then(|pid| crate::task::with_process(pid, |proc| proc.page_table().unwrap_or(0)))
+        .unwrap_or(0);
     let fs_lo = fs_base as u32;
     let fs_hi = (fs_base >> 32) as u32;
+    if user_cr3 != 0 {
+        crate::mem::paging::switch_page_table(user_cr3);
+    }
     asm!(
         "cli",
         // FS ベースを IA32_FS_BASE MSR 経由で設定

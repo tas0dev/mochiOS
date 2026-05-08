@@ -1,9 +1,9 @@
 //! I/O関連のシステムコール
 
 use super::types::{EBADF, EFAULT, EINVAL, SUCCESS};
+use crate::syscall::types;
 use crate::util::console;
 use crate::{debug, error, info, warn};
-use crate::syscall::types;
 
 /// 標準出力のファイルディスクリプタ
 const STDOUT_FD: u64 = 1;

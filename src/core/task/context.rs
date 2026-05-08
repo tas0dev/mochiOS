@@ -175,7 +175,7 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
         next_kstack_top,
         next_process_id,
         next_fs_base,
-        next_in_syscall,
+        _next_in_syscall,
         next_priv,
     ) = if let Some(thread) = queue.get(next_id) {
         let ptr = thread.context() as *const Context;
@@ -221,14 +221,12 @@ pub unsafe fn switch_to_thread(current_id: Option<ThreadId>, next_id: ThreadId) 
         crate::cpu::write_fs_base(next_fs_base);
     }
 
-    // 次のコンテキストがカーネル実行の場合はカーネルCR3に固定する
-    if next_priv == crate::task::PrivilegeLevel::Core || next_in_syscall {
-        let kernel_cr3 = crate::percpu::kernel_cr3();
-        if kernel_cr3 != 0 {
-            crate::mem::paging::switch_page_table(kernel_cr3);
-        }
-    } else if let Some(pt_phys) = with_process(next_process_id, |p| p.page_table()).flatten() {
-        crate::mem::paging::switch_page_table(pt_phys);
+    // switch_context はカーネル管理領域上の Context とカーネルスタックを読む。
+    // ユーザー CR3 に切り替えてから実行すると、KPTI で外した kernel heap 参照が
+    // kernel-mode page fault になるため、実際の user CR3 への切替は iretq 直前に行う。
+    let kernel_cr3 = crate::percpu::kernel_cr3();
+    if kernel_cr3 != 0 {
+        crate::mem::paging::switch_page_table(kernel_cr3);
     }
 
     crate::debug!("About to perform context switch...");
@@ -321,7 +319,7 @@ pub unsafe fn switch_to_thread_from_isr(
         )
     };
 
-    let (new_ctx_ptr, next_priv, next_kstack_top, next_fs_base, next_process_id, next_in_syscall) =
+    let (new_ctx_ptr, next_priv, next_kstack_top, next_fs_base, next_process_id, _next_in_syscall) =
         if let Some(thread) = queue.get(next_id) {
             let ptr = thread.context() as *const Context;
             let proc = thread.process_id();
@@ -364,14 +362,12 @@ pub unsafe fn switch_to_thread_from_isr(
     // 次のスレッドの FS ベースを復元 (TLS)
     crate::cpu::write_fs_base(next_fs_base);
 
-    // 次のコンテキストがカーネル実行の場合はカーネルCR3に固定する
-    if next_priv == crate::task::PrivilegeLevel::Core || next_in_syscall {
-        let kernel_cr3 = crate::percpu::kernel_cr3();
-        if kernel_cr3 != 0 {
-            crate::mem::paging::switch_page_table(kernel_cr3);
-        }
-    } else if let Some(pt_phys) = with_process(next_process_id, |p| p.page_table()).flatten() {
-        crate::mem::paging::switch_page_table(pt_phys);
+    // ISR 経路でもコンテキスト復元中は必ず kernel CR3 を使う。
+    // ユーザー空間への復帰時は trap/syscall の出口または usermode trampoline が
+    // 復帰対象スレッドの user CR3 を設定する。
+    let kernel_cr3 = crate::percpu::kernel_cr3();
+    if kernel_cr3 != 0 {
+        crate::mem::paging::switch_page_table(kernel_cr3);
     }
 
     if next_priv == crate::task::PrivilegeLevel::Core {

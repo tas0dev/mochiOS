@@ -87,23 +87,64 @@ fn unmap_guard_page(guard_addr: u64) -> bool {
     let mut page_table_lock = crate::mem::paging::PAGE_TABLE.lock();
     let page_table = match page_table_lock.as_mut() {
         Some(pt) => pt,
-        None => return false,
+        None => {
+            crate::debug!(
+                "unmap_guard_page: PAGE_TABLE not initialized at {:#x}",
+                guard_addr
+            );
+            return false;
+        }
     };
 
     match page_table.translate_page(page) {
-        Ok(_) => {}
-        Err(TranslateError::PageNotMapped) => return true,
-        Err(_) => return false,
+        Ok(_) => {
+            crate::debug!(
+                "unmap_guard_page: page mapped at {:#x}, attempting unmap",
+                guard_addr
+            );
+        }
+        Err(TranslateError::PageNotMapped) => {
+            crate::debug!(
+                "unmap_guard_page: page not mapped at {:#x}, returning true",
+                guard_addr
+            );
+            return true;
+        }
+        Err(TranslateError::ParentEntryHugePage) => {
+            // Huge page region - can't unmap individual 4KB pages within huge pages
+            // This is expected for bootloader-mapped regions. Skip guard page unmapping.
+            crate::debug!(
+                "unmap_guard_page: page in huge page region at {:#x}, skipping unmap",
+                guard_addr
+            );
+            return true;
+        }
+        Err(e) => {
+            crate::debug!(
+                "unmap_guard_page: translate error at {:#x}: {:?}",
+                guard_addr,
+                e
+            );
+            return false;
+        }
     }
 
     unsafe {
-        page_table
-            .unmap(page)
-            .map(|(_frame, flush)| {
+        match page_table.unmap(page) {
+            Ok((_frame, flush)) => {
                 flush.flush();
+                crate::debug!("unmap_guard_page: successfully unmapped {:#x}", guard_addr);
                 true
-            })
-            .unwrap_or(false)
+            }
+            Err(e) => {
+                crate::debug!(
+                    "unmap_guard_page: unmap error at {:#x}: {:?}",
+                    guard_addr,
+                    e
+                );
+                false
+            }
+        }
     }
 }
 
@@ -126,6 +167,10 @@ pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
             if *slot != 0 {
                 let guard_addr = *slot;
                 *slot = 0;
+                crate::debug!(
+                    "allocate_kernel_stack: reused from free list at {:#x}",
+                    guard_addr
+                );
                 return guard_addr.checked_add(KSTACK_GUARD_BYTES as u64);
             }
         }
@@ -135,6 +180,11 @@ pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
     let alloc_size = size_pages.checked_add(KSTACK_GUARD_BYTES)?;
     let off = NEXT_KSTACK_OFFSET.fetch_add(alloc_size, core::sync::atomic::Ordering::SeqCst);
     if off + alloc_size > KSTACK_POOL_SIZE {
+        crate::debug!(
+            "allocate_kernel_stack: pool exhausted, need {}, have {}",
+            off + alloc_size,
+            KSTACK_POOL_SIZE
+        );
         return None;
     }
 
@@ -143,10 +193,22 @@ pub fn allocate_kernel_stack(size: usize) -> Option<u64> {
         pool.0.as_ptr() as u64
     };
     let guard_addr = pool_base.checked_add(off as u64)?;
+    crate::debug!(
+        "allocate_kernel_stack: allocated from pool at {:#x}, calling unmap_guard_page",
+        guard_addr
+    );
     if !unmap_guard_page(guard_addr) {
+        crate::debug!(
+            "allocate_kernel_stack: unmap_guard_page failed at {:#x}",
+            guard_addr
+        );
         return None;
     }
 
+    crate::debug!(
+        "allocate_kernel_stack: returning stack top {:#x}",
+        guard_addr + KSTACK_GUARD_BYTES as u64
+    );
     guard_addr.checked_add(KSTACK_GUARD_BYTES as u64)
 }
 
@@ -569,6 +631,10 @@ impl Thread {
     }
 
     pub fn is_kernel_stack_guard_intact(&self) -> bool {
+        use x86_64::structures::paging::mapper::TranslateError;
+        use x86_64::structures::paging::Mapper;
+        use x86_64::structures::paging::{Page, Size4KiB};
+
         let (pool_start, pool_end) = {
             let pool = KSTACK_POOL.lock();
             let start = pool.0.as_ptr() as u64;
@@ -585,7 +651,19 @@ impl Thread {
             return true;
         }
         let guard_start = self.kernel_stack - KSTACK_GUARD_BYTES as u64;
-        crate::mem::paging::translate_addr(VirtAddr::new(guard_start)).is_none()
+        let guard_page = Page::<Size4KiB>::containing_address(VirtAddr::new(guard_start));
+        let mut page_table_lock = crate::mem::paging::PAGE_TABLE.lock();
+        let Some(page_table) = page_table_lock.as_mut() else {
+            return true;
+        };
+        match page_table.translate_page(guard_page) {
+            Ok(_) => false,
+            Err(TranslateError::PageNotMapped) => true,
+            // 現状の early kernel 領域は bootloader の huge page に載ることがある。
+            // その場合は 4KiB guard を作れていないので、破損として扱わない。
+            Err(TranslateError::ParentEntryHugePage) => true,
+            Err(_) => false,
+        }
     }
 
     /// カーネルスタックのベースアドレス（フリーリスト返却用）

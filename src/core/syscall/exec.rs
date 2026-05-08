@@ -430,6 +430,12 @@ fn exec_with_data(
 
     {
         let data: &[u8] = data;
+        // Disable SMAP/SMEP for the duration of the exec mapping operations.
+        // Many helper functions perform direct physical/HHDM accesses; re-enabling
+        // SMAP/SMEP during execution can cause page faults when touching user
+        // page tables. Hold the guard for the whole scope so it's restored on drop.
+        let _smap_guard = crate::cpu::SmapSmepGuard::new();
+
         // MED-27修正: エントリポイントが0の場合はELFが無効として拒否する
         // 以前はentry=0のままプロセスを作成し、仮想アドレス0にジャンプしていた
         let mut entry = match elf_loader::entry_point(data) {
@@ -453,6 +459,9 @@ fn exec_with_data(
         };
         let mut new_pt_guard = UserPageTableGuard::new(new_pt_phys);
         crate::debug!("Created user page table at {:#x}", new_pt_phys);
+
+        // Note: SMAP/SMEP are already disabled globally during kernel initialization
+        // and are kept disabled for all exec operations. See src/core/mem/mod.rs:66
 
         // ELFアーキテクチャ検証 (MED-07)
         let mut phdr_vaddr: u64 = 0;
@@ -542,7 +551,9 @@ fn exec_with_data(
                             writable,
                             executable,
                         ) {
-                            crate::warn!("Failed to map segment: {:?}", e);
+                            crate::warn!("Failed to map segment at {:#x}: {:?}", vaddr, e);
+                            crate::warn!("  new_pt_phys={:#x}, filesz={}, memsz={}, writable={}, executable={}", 
+                                new_pt_phys, filesz, memsz, writable, executable);
                             return crate::syscall::types::EINVAL;
                         }
                     }
@@ -860,8 +871,13 @@ fn exec_with_data(
         proc.set_page_table(new_pt_phys);
         proc.set_stack_bottom(stack_base_vaddr);
         proc.set_stack_top(stack_end_vaddr + 4096);
-        crate::info!("[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}", 
-            proc.name(), stack_base_vaddr, stack_end_vaddr, stack_end_vaddr + 4096);
+        crate::info!(
+            "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
+            proc.name(),
+            stack_base_vaddr,
+            stack_end_vaddr,
+            stack_end_vaddr + 4096
+        );
         // 親プロセスの CWD を子プロセスに継承する
         if let Some(ppid) = parent_pid {
             let parent_cwd = crate::task::with_process(ppid, |p| {
@@ -902,8 +918,8 @@ fn exec_with_data(
             }
             return crate::syscall::types::EINVAL;
         }
-        new_pt_guard.disarm();
         // allocate kernel stack for the new thread
+        // unmap_guard_page() がページテーブル操作を行うため、SmapSmepGuard スコープを保持
         const KERNEL_THREAD_STACK_SIZE: usize = 4096 * 32; // 128KB
         let kstack = match crate::task::thread::allocate_kernel_stack(KERNEL_THREAD_STACK_SIZE) {
             Some(a) => a,
@@ -922,6 +938,7 @@ fn exec_with_data(
                 return crate::syscall::types::ENOMEM;
             }
         };
+        new_pt_guard.disarm();
 
         // ユーザーモードスレッドを作成
         // RSP に initial_rsp を設定
@@ -960,7 +977,11 @@ fn exec_with_data(
         }
 
         // report scheduling state
-        crate::info!("exec: scheduler_enabled={} thread_count={}", crate::task::is_scheduler_enabled(), crate::task::thread_count());
+        crate::info!(
+            "exec: scheduler_enabled={} thread_count={}",
+            crate::task::is_scheduler_enabled(),
+            crate::task::thread_count()
+        );
         if let Some(next) = crate::task::peek_next_thread() {
             crate::info!("exec: peek_next_thread -> {:?}", next);
         } else {
@@ -968,12 +989,18 @@ fn exec_with_data(
         }
 
         // log current thread and thread-state counts
-        crate::info!("exec: current_thread={:?}", crate::task::current_thread_id());
-        crate::info!("exec: ready_count={} running_count={}",
+        crate::info!(
+            "exec: current_thread={:?}",
+            crate::task::current_thread_id()
+        );
+        crate::info!(
+            "exec: ready_count={} running_count={}",
             crate::task::count_threads_by_state(crate::task::ThreadState::Ready),
             crate::task::count_threads_by_state(crate::task::ThreadState::Running)
         );
-        if let Some(tid) = add_res { crate::info!("exec: new_thread_id={:?}", tid); }
+        if let Some(tid) = add_res {
+            crate::info!("exec: new_thread_id={:?}", tid);
+        }
 
         // Ensure newly launched user process gets CPU promptly
         if crate::task::is_scheduler_enabled() {
@@ -1274,8 +1301,13 @@ pub fn execve_syscall(path_ptr: u64, argv: u64, envp: u64) -> u64 {
         p.set_heap_end(heap_base + heap_map_size);
         p.set_stack_bottom(stack_base_vaddr);
         p.set_stack_top(stack_end_vaddr + 4096);
-        crate::info!("[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}", 
-            p.name(), stack_base_vaddr, stack_end_vaddr, stack_end_vaddr + 4096);
+        crate::info!(
+            "[STACK_INIT] {}: stack_base={:#x}, stack_end={:#x}, stack_top={:#x}",
+            p.name(),
+            stack_base_vaddr,
+            stack_end_vaddr,
+            stack_end_vaddr + 4096
+        );
         prev
     })
     .flatten();

@@ -369,17 +369,11 @@ pub fn copy_newlib_libs(libc_dir: &Path, dest_dir: &Path) -> Result<(), String> 
     for lib in &optional_libs {
         let dest = dest_dir.join(lib);
         let src = libc_dir.join(lib);
-        
+
         if src.exists() {
             // ソースが存在する場合はコピー
-            fs::copy(&src, &dest).map_err(|e| {
-                format!(
-                    "Failed to copy {} to {}: {}",
-                    lib,
-                    dest_dir.display(),
-                    e
-                )
-            })?;
+            fs::copy(&src, &dest)
+                .map_err(|e| format!("Failed to copy {} to {}: {}", lib, dest_dir.display(), e))?;
             println!("Copied {} to {}", lib, dest_dir.display());
         } else if !dest.exists() {
             // ソースが存在しない場合は空のアーカイブを作成
@@ -391,7 +385,11 @@ pub fn copy_newlib_libs(libc_dir: &Path, dest_dir: &Path) -> Result<(), String> 
             if !status.success() {
                 return Err(format!("Failed to create empty archive for {}", lib));
             }
-            println!("Created empty archive for {} at {}", lib, dest_dir.display());
+            println!(
+                "Created empty archive for {} at {}",
+                lib,
+                dest_dir.display()
+            );
         }
     }
 

@@ -112,10 +112,7 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 fn tick_booting_gif() {}
 
 /// `\System\initfs.img` を読み込んで物理アドレスとサイズを返す
-unsafe fn load_initfs(
-    bt: &BootServices,
-    image_handle: Handle,
-) -> (u64, usize) {
+unsafe fn load_initfs(bt: &BootServices, image_handle: Handle) -> (u64, usize) {
     let initfs_path = cstr16!(r"\System\initfs.img");
 
     // LoadedImage デバイスを優先
@@ -201,10 +198,7 @@ unsafe fn try_load_raw(
 }
 
 /// `\System\kernel.elf` を読み込み、PT_LOAD セグメントを物理アドレスに展開してエントリアドレスを返す
-unsafe fn load_kernel(
-    bt: &BootServices,
-    image_handle: Handle,
-) -> Option<u64> {
+unsafe fn load_kernel(bt: &BootServices, image_handle: Handle) -> Option<u64> {
     let kernel_path = cstr16!(r"\System\kernel.elf");
 
     // LoadedImage からブートローダー自身のデバイスハンドルを取得して優先的に試みる
