@@ -55,7 +55,7 @@ fn copy_initfs_runtime_tree(src: &Path, dst: &Path, in_libraries: bool) -> Resul
         let name = entry.file_name();
         let dst_path = dst.join(&name);
         let name_str = name.to_string_lossy();
-        let child_in_libraries = in_libraries || name_str == "Libraries";
+        let child_in_libraries = in_libraries || name_str == "lib";
         let src_meta = fs::symlink_metadata(&src_path)
             .map_err(|e| format!("Failed to stat {}: {}", src_path.display(), e))?;
 
@@ -138,7 +138,7 @@ pub fn create_initfs_image(ramfs_dir: &Path, output_path: &Path) -> Result<(), S
 
     emit_rerun_if_changed(ramfs_dir);
 
-    // サービスのビルドでは ramfs/Libraries が必要だが、InitFS 本体には
+    // サービスのビルドでは ramfs/lib が必要だが、InitFS 本体には
     // 実行時に不要な静的成果物 (.a/.o) を含めない
     let staging_dir = output_path
         .parent()
@@ -249,16 +249,17 @@ pub fn create_ext2_image(fs_dir: &Path, output_path: &Path) -> Result<(), String
 /// fsディレクトリの標準レイアウトを作成
 pub fn setup_fs_layout(fs_dir: &Path, resources_src: &Path) -> Result<(), String> {
     let dirs = [
-        "System",           // システム（カーネルやカーネルに関連するファイルを配置）
-        "Applications",     // ユーザーアプリケーションを配置
-        "Binaries",         // コマンドやユーティリティを配置
-        "Libraries",        // ライブラリ（libc.aなど）を配置
-        "Mount",            // マウントしたやつ配置
-        "Boot",             // ブートローダー関連のファイルを配置
-        "Logs",             // ログを配置
-        "Home",             // ユーザーディレクトリを配置
-        "Config",           // 設定ファイルを配置
-        "Temp",             // 一時ファイルを配置
+        "system",       // システム（カーネルやカーネルに関連するファイルを配置）
+        "applications", // ユーザーアプリケーションを配置
+        "bin",          // コマンドやユーティリティを配置
+        "lib",          // ライブラリを配置
+        "mount",        // マウントしたやつ配置
+        "boot",         // ブートローダー関連のファイルを配置
+        "log",          // ログを配置
+        "home",         // ユーザーディレクトリを配置
+        "config",       // 設定ファイルを配置
+        "tmp",          // 一時ファイルを配置
+        "var",          // 変動するデータを配置
     ];
 
     for dir in &dirs {
@@ -269,8 +270,8 @@ pub fn setup_fs_layout(fs_dir: &Path, resources_src: &Path) -> Result<(), String
     }
 
     // src/resources/ の各サブディレクトリを対応する fs/ ディレクトリにコピー
-    // 例: src/resources/System/ → fs/System/
-    //     src/resources/Config/ → fs/Config/
+    // 例: src/resources/system/ → fs/system/
+    //     src/resources/config/ → fs/config/
     if resources_src.is_dir() {
         for entry in fs::read_dir(resources_src)
             .map_err(|e| format!("Failed to read resources dir: {}", e))?

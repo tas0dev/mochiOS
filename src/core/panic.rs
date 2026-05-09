@@ -32,7 +32,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         warn!("Message: {}", s);
     }
 
-    warn!("System halted. Please reset.");
+    warn!("system halted. Please reset.");
 
     // 割り込みを無効化
     #[cfg(target_arch = "x86_64")]

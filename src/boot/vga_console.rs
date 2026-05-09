@@ -1,7 +1,7 @@
 //! ブートローダー用 VGA フレームバッファコンソール
 //!
 //! GOP で取得したフレームバッファに直接ピクセルを書き込む。
-//! UEFI ConOut や ExitBootServices の影響を受けない。
+//! UEFI ConOut や ExitBootservices の影響を受けない。
 
 use core::fmt;
 

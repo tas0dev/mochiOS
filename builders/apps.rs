@@ -197,7 +197,7 @@ pub fn build_apps(apps_dir: &Path, output_dir: &Path, _extension: &str) {
 
                         if let Some(fs_root) = output_dir.parent() {
                             let app_service_dir =
-                                fs_root.join("Libraries").join("AppService").join(&app_name);
+                                fs_root.join("lib").join("AppService").join(&app_name);
                             if let Err(e) = fs::create_dir_all(&app_service_dir) {
                                 println!(
                                     "cargo:warning=Failed to create app service dir for {}: {}",
@@ -256,7 +256,7 @@ pub fn build_utils(utils_dir: &Path, output_dir: &Path) {
     }
 
     if let Err(e) = fs::create_dir_all(output_dir) {
-        println!("cargo:warning=Failed to create Binaries dir: {}", e);
+        println!("cargo:warning=Failed to create bin dir: {}", e);
         return;
     }
 
@@ -278,15 +278,15 @@ pub fn build_utils(utils_dir: &Path, output_dir: &Path) {
         cmd.env_remove(key);
     }
 
-    // Determine project root (look for ramfs/Libraries)
+    // Determine project root (look for ramfs/lib)
     let mut project_root = utils_dir.to_path_buf();
     while project_root.parent().is_some() {
-        if project_root.join("ramfs").join("Libraries").exists() {
+        if project_root.join("ramfs").join("lib").exists() {
             break;
         }
         project_root.pop();
     }
-    let libs_dir = project_root.join("ramfs").join("Libraries");
+    let libs_dir = project_root.join("ramfs").join("lib");
 
     if libs_dir.exists() {
         // Set RUSTFLAGS so that utilities are linked with the same crt0 and libs

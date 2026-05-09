@@ -83,7 +83,7 @@ pub fn init() {
         gdt.load();
         crate::debug!("GDT loaded");
 
-        // Boot Services終了後はカーネルのセグメントに切り替え
+        // Boot services終了後はカーネルのセグメントに切り替え
         crate::debug!("Setting CS");
         set_cs(selectors.code_selector);
         crate::debug!("CS set, setting data segments");

@@ -206,7 +206,7 @@ fn exec_internal(path: &str, name_override: Option<&str>, args: &[&str]) -> u64 
     // Special-case mapping: drivers/net.elf should be exposed as "netdrv" for compatibility
     if process_name == "net"
         || process_name == "net.elf"
-        || path.ends_with("/Binaries/drivers/net.elf")
+        || path.ends_with("/bin/drivers/net.elf")
     {
         process_name = "netdrv".to_string();
     }
@@ -255,20 +255,20 @@ pub fn exec_from_fs_stream(path_ptr: u64, args_ptr: u64) -> u64 {
 #[inline]
 fn resolve_exec_privilege(process_name: &str, exec_path: &str) -> crate::task::PrivilegeLevel {
     // .service は従来通り Service 権限で実行。
-    // Binaries/drivers 配下は Service/Core 呼び出し元からの起動時に Service 権限を付与する。
+    // bin/drivers 配下は Service/Core 呼び出し元からの起動時に Service 権限を付与する。
     // Kagami / ViewKit / Binder / Dock はデスクトップ描画のため Service 権限を付与する。
     let is_driver_path =
-        exec_path.starts_with("Binaries/drivers/") || exec_path.starts_with("/Binaries/drivers/");
+        exec_path.starts_with("bin/drivers/") || exec_path.starts_with("/bin/drivers/");
     let is_kagami_viewkit_path = matches!(
         exec_path,
-        "/Applications/Kagami.app/entry.elf"
-            | "/Applications/ViewKit.app/entry.elf"
-            | "/Applications/Binder.app/entry.elf"
-            | "/Applications/Dock.app/entry.elf"
-            | "Applications/Kagami.app/entry.elf"
-            | "Applications/ViewKit.app/entry.elf"
-            | "Applications/Binder.app/entry.elf"
-            | "Applications/Dock.app/entry.elf"
+        "/applications/Kagami.app/entry.elf"
+            | "/applications/ViewKit.app/entry.elf"
+            | "/applications/Binder.app/entry.elf"
+            | "/applications/Dock.app/entry.elf"
+            | "applications/Kagami.app/entry.elf"
+            | "applications/ViewKit.app/entry.elf"
+            | "applications/Binder.app/entry.elf"
+            | "applications/Dock.app/entry.elf"
     );
     if process_name.ends_with(".service")
         || is_kagami_viewkit_path

@@ -1,4 +1,4 @@
-# Binaries
+# bin
 target/
 /fs/
 /ramfs/
@@ -30,6 +30,6 @@ rustc-ice-*.txt
 *.diff
 *.patch
 
-# Applications and libs
+# applications and libs
 src/lib/**
 src/apps/**

@@ -7,8 +7,8 @@ use swiftlib::ipc;
 use swiftlib::io;
 
 const OP_NOTIFY_READY: u64 = 0xFF;
-const DRIVER_CONFIG_PATH: &str = "/Config/drivers.list";
-const DEFAULT_DRIVERS: &[&str] = &["/Binaries/drivers/usb.elf"];
+const DRIVER_CONFIG_PATH: &str = "/config/drivers.list";
+const DEFAULT_DRIVERS: &[&str] = &["/bin/drivers/usb.elf"];
 
 fn load_driver_list() -> Vec<String> {
     let mut drivers = Vec::new();

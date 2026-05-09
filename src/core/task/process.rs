@@ -376,7 +376,7 @@ impl ProcessTable {
         // 1. 完全一致
         // 2. stored_name without ".elf" == name
         // 3. stored_name == name + ".elf"
-        // 4. stored_name == "/Binaries/drivers/" + name + ".elf"
+        // 4. stored_name == "/bin/drivers/" + name + ".elf"
         // 5. stored_name contains name as substring (fallback)
 
         // 1) 完全一致
@@ -413,7 +413,7 @@ impl ProcessTable {
         }
 
         // 4) drivers path variant
-        let mut drivers_path = String::from("/Binaries/drivers/");
+        let mut drivers_path = String::from("/bin/drivers/");
         drivers_path.push_str(name);
         drivers_path.push_str(".elf");
         if let Some(p) = self
@@ -437,7 +437,7 @@ impl ProcessTable {
             {
                 return Some(p);
             }
-            let mut drivers_path = String::from("/Binaries/drivers/");
+            let mut drivers_path = String::from("/bin/drivers/");
             drivers_path.push_str(base);
             drivers_path.push_str(".elf");
             if let Some(p) = self

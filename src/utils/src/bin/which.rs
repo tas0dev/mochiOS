@@ -25,8 +25,8 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         }
     };
     
-    // PATH はデフォルトで /Binaries
-    let path = "/Binaries";
+    // PATH はデフォルトで /bin
+    let path = "/bin";
     
     // コマンドのフルパスを構築
     let mut full_path_buf = [0u8; 256];

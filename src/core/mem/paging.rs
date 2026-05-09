@@ -884,13 +884,14 @@ pub fn create_user_page_table() -> Result<u64> {
             }
         }
 
-        // L2[1] エントリ（0x800000-0xBFFFFF）に新しいL1テーブルをセット
+        // L2[4] エントリ（0x800000-0x9FFFFF）に新しいL1テーブルをセット
+        // NOTE: L2 エントリは 2MiB 単位なので、0x800000 >> 21 == 4
         let new_l1_frame = frame::allocate_frame()?;
         let new_l1_phys = new_l1_frame.start_address().as_u64();
         let new_l1 = unsafe { &mut *((new_l1_phys + phys_off) as *mut PageTable) };
         new_l1.zero();
 
-        new_l2[1].set_addr(
+        new_l2[4].set_addr(
             PhysAddr::new(new_l1_phys),
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
         );
@@ -1274,6 +1275,15 @@ pub fn map_and_copy_segment_to(
 
     let mut page_addr = start;
     while page_addr < end {
+        let l4_index = ((page_addr >> 39) & 0x1ff) as usize;
+        let l3_index = ((page_addr >> 30) & 0x1ff) as usize;
+        let l2_index = ((page_addr >> 21) & 0x1ff) as usize;
+        let l1_index = ((page_addr >> 12) & 0x1ff) as usize;
+
+        // 指定ページのためにページテーブル階層を確実に作成
+        //（セグメントが L2/L1 境界を跨ぐと中間の L1 が作成されていない可能性があるため）
+        ensure_user_page_table_hierarchy(temp_kern_virt, page_addr, phys_off)?;
+
         let frame = {
             let mut alloc = frame::FRAME_ALLOCATOR.lock();
             alloc
@@ -1290,10 +1300,7 @@ pub fn map_and_copy_segment_to(
         }
 
         // 直接ページテーブルにエントリを作成（テンポラリマッピング経由で）
-        let l4_index = ((page_addr >> 39) & 0x1ff) as usize;
-        let l3_index = ((page_addr >> 30) & 0x1ff) as usize;
-        let l2_index = ((page_addr >> 21) & 0x1ff) as usize;
-        let l1_index = ((page_addr >> 12) & 0x1ff) as usize;
+        
 
         crate::debug!(
             "Mapping page {:#x} (L4[{}]->L3[{}]->L2[{}]->L1[{}])",

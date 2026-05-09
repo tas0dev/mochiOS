@@ -71,7 +71,7 @@ pub unsafe extern "C" fn switch_context(old_context: *mut Context, new_context: 
         "cli",
         // save current (ret address is at [rsp])
         "lea rax, [rsp + 0x08]",
-        // System V AMD64 ABI (used by x86_64-unknown-none):
+        // system V AMD64 ABI (used by x86_64-unknown-none):
         // 第1引数 (old_context) = rdi
         // 第2引数 (new_context) = rsi
         "mov [rdi + 0x00], rax", // rsp

@@ -543,10 +543,10 @@ extern "C" fn syscall_handler_rust(
     ret
 }
 
-/// SYSCALL 命令エントリから呼ばれる System V ABI ディスパッチ関数
+/// SYSCALL 命令エントリから呼ばれる system V ABI ディスパッチ関数
 ///
 /// syscall_entry.rs の naked asm から `call {dispatch}` で呼ばれる。
-/// System V ABI: 引数は rdi, rsi, rdx, rcx, r8, r9 の順。
+/// system V ABI: 引数は rdi, rsi, rdx, rcx, r8, r9 の順。
 #[no_mangle]
 pub extern "sysv64" fn syscall_dispatch_sysv(
     num: u64,

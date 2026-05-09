@@ -94,7 +94,7 @@ Planned actions:
  - Wipe partition table on $DEV and create GPT with 2 partitions:
    1) ESP FAT32 512MiB -> $PART1
    2) rootfs ext2      -> $PART2 (rest of disk)
- - Copy EFI and System from efiboot.img into ESP
+ - Copy EFI and system from efiboot.img into ESP
  - Write $ROOTFS_IMG to $PART2
 
 WARNING: This will DESTROY all data on $DEV. Continue? Type YES to proceed:
@@ -144,13 +144,13 @@ MOUNT_ESP="$TMP_DIR/mnt_esp"
 mkdir -p "$MOUNT_ESP"
 mount "$PART1" "$MOUNT_ESP"
 
-echo "[+] Copying EFI/ and System/ to ESP..."
+echo "[+] Copying EFI/ and system/ to ESP..."
 # Ensure destination dirs exist
 mkdir -p "$MOUNT_ESP/EFI"
-mkdir -p "$MOUNT_ESP/System"
+mkdir -p "$MOUNT_ESP/system"
 
 cp -r "$MOUNT_EFI/EFI" "$MOUNT_ESP/" || true
-cp -r "$MOUNT_EFI/System" "$MOUNT_ESP/" || true
+cp -r "$MOUNT_EFI/system" "$MOUNT_ESP/" || true
 sync
 
 umount "$MOUNT_ESP"

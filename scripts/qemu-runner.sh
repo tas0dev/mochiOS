@@ -44,7 +44,7 @@ PROFILE="debug"
 [[ "$SRC" == */release/* ]] && PROFILE="release"
 
 FALLBACK_KERNEL="$ROOT_DIR/target/kernel/x86_64-unknown-none/$PROFILE/kernel"
-FS_KERNEL="$ROOT_DIR/fs/System/kernel.elf"
+FS_KERNEL="$ROOT_DIR/fs/system/kernel.elf"
 KERNEL_ELF="${FALLBACK_KERNEL}"
 [ ! -f "$KERNEL_ELF" ] && KERNEL_ELF="$FS_KERNEL"
 
@@ -61,12 +61,12 @@ rm -f "$ESP_IMG"
 dd if=/dev/zero of="$ESP_IMG" bs=1M count="$esp_mb" status=none
 mkdosfs -F 32 -n EFI "$ESP_IMG" > /dev/null
 
-mmd -i "$ESP_IMG" ::/EFI ::/EFI/BOOT ::/System
+mmd -i "$ESP_IMG" ::/EFI ::/EFI/BOOT ::/system
 mcopy -i "$ESP_IMG" "$BOOTX64_SRC" ::/EFI/BOOT/BOOTX64.EFI
 
-[ -f "$KERNEL_ELF" ] && mcopy -i "$ESP_IMG" "$KERNEL_ELF" ::/System/kernel.elf
-[ -f "$INITFS_IMG" ] && mcopy -i "$ESP_IMG" "$INITFS_IMG" ::/System/initfs.img
-[ -f "$ROOTFS_IMG" ] && mcopy -i "$ESP_IMG" "$ROOTFS_IMG" ::/System/rootfs.ext2
+[ -f "$KERNEL_ELF" ] && mcopy -i "$ESP_IMG" "$KERNEL_ELF" ::/system/kernel.elf
+[ -f "$INITFS_IMG" ] && mcopy -i "$ESP_IMG" "$INITFS_IMG" ::/system/initfs.img
+[ -f "$ROOTFS_IMG" ] && mcopy -i "$ESP_IMG" "$ROOTFS_IMG" ::/system/rootfs.ext2
 
 KVM_ARGS=()
 if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then

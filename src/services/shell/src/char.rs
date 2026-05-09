@@ -31,9 +31,9 @@ const ANSI_COLOR_BRIGHT: [u32; 8] = [
     0x0055_FFFF, // bright cyan
     0x00FF_FFFF, // bright white
 ];
-const FONT_BIN_PATH: &str = "/System/fonts/ter-u12b.bin";
-const FONT_BDF_PATH: &str = "/System/fonts/ter-u12b.bdf";
-const ENV_FILE_PATH: &str = "/Config/env.txt";
+const FONT_BIN_PATH: &str = "/system/fonts/ter-u12b.bin";
+const FONT_BDF_PATH: &str = "/system/fonts/ter-u12b.bdf";
+const ENV_FILE_PATH: &str = "/config/env.txt";
 const FONT_BIN_SIZE: usize = GLYPH_COUNT * FONT_HEIGHT;
 const FONT_BDF_MAX_SIZE: usize = 512 * 1024;
 const ENV_FILE_MAX_SIZE: usize = 4096;
@@ -352,7 +352,7 @@ impl Font {
         }
     }
 
-    /// `System/fonts/ter-u12b.bin` を優先し、失敗時はBDFを解析する
+    /// `system/fonts/ter-u12b.bin` を優先し、失敗時はBDFを解析する
     pub fn load() -> Option<Self> {
         if let Some(font) = Self::load_from_binary() {
             return Some(font);
@@ -567,7 +567,7 @@ impl Terminal {
         let max_cols = info.width / FONT_WIDTH as u32;
         let max_rows = info.height / FONT_HEIGHT as u32;
         let mut env = Vec::new();
-        env.push(("PATH".to_string(), "/Binaries:/Applications".to_string()));
+        env.push(("PATH".to_string(), "/bin:/applications".to_string()));
         env.push(("TERM".to_string(), "xterm-256color".to_string()));
         let mut term = Terminal {
             fb_ptr,
@@ -2135,7 +2135,7 @@ impl Terminal {
             return;
         }
         let app_name = raw_name.strip_suffix(".app").unwrap_or(raw_name);
-        let about_path = format!("/Applications/{}.app/about.toml", app_name);
+        let about_path = format!("/applications/{}.app/about.toml", app_name);
         match self.load_file_bytes(&about_path, 16 * 1024) {
             Some(data) => {
                 if let Ok(text) = core::str::from_utf8(&data) {
@@ -2280,14 +2280,14 @@ impl Terminal {
                 self.clear_screen();
             }
             "version" => {
-                if let Some(data) = read_file_from_fs("/System/about.txt", 4096) {
+                if let Some(data) = read_file_from_fs("/system/about.txt", 4096) {
                     if let Ok(text) = core::str::from_utf8(&data) {
                         self.write_str(text);
                         if !text.ends_with('\n') {
                             self.write_byte(b'\n');
                         }
                     } else {
-                        self.write_str("Error: /System/about.txt is not valid UTF-8\n");
+                        self.write_str("Error: /system/about.txt is not valid UTF-8\n");
                     }
                 } else {
                     self.write_str("mochiOS (about.txt not found)\n");

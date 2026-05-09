@@ -696,12 +696,15 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     warn!("{:#?}", stack_frame);
 
     if is_user_mode {
+        // Dump detailed virtual->physical diagnostics using the active CR3
+        dump_invalid_opcode_diagnostics(&stack_frame);
         error!("Terminating faulting user process");
         crate::task::scheduler::exit_current_process(-1);
     } else {
         halt_cpu();
     }
 }
+
 
 /// ページフォルト例外ハンドラ
 ///

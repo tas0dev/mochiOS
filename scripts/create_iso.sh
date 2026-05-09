@@ -38,7 +38,7 @@ case "$BOOT_SRC" in
 esac
 
 FALLBACK_KERNEL="$ROOT_DIR/target/kernel/x86_64-unknown-none/$PROFILE/kernel"
-FS_KERNEL="$ROOT_DIR/fs/System/kernel.elf"
+FS_KERNEL="$ROOT_DIR/fs/system/kernel.elf"
 if [ -f "$FALLBACK_KERNEL" ]; then
     KERNEL_ELF="$FALLBACK_KERNEL"
 elif [ -f "$FS_KERNEL" ]; then
@@ -64,7 +64,7 @@ trap "rm -rf $TEMP_DIR" EXIT
 ESP_IMG="$TEMP_DIR/esp.img"
 ISO_ROOT="$TEMP_DIR/isoroot"
 EFI_DIR="$ISO_ROOT/EFI/BOOT"
-SYS_DIR="$ISO_ROOT/System"
+SYS_DIR="$ISO_ROOT/system"
 
 mkdir -p "$EFI_DIR"
 mkdir -p "$SYS_DIR"
@@ -83,19 +83,19 @@ else
     mkdosfs -F 32 -n MOCHIOS "$ESP_IMG" >/dev/null
 fi
 
-mmd -i "$ESP_IMG" ::/EFI ::/EFI/BOOT ::/System
+mmd -i "$ESP_IMG" ::/EFI ::/EFI/BOOT ::/system
 mcopy -i "$ESP_IMG" "$BOOT_SRC" ::/EFI/BOOT/BOOTX64.EFI
 cp "$KERNEL_ELF" "$SYS_DIR/kernel.elf"
 if [ -n "$INITFS_IMG" ] && [ -f "$INITFS_IMG" ]; then
     cp "$INITFS_IMG" "$SYS_DIR/initfs.img"
 else
-    echo "Warning: initfs.ext2 not found; ISO will not include System/initfs.img" >&2
+    echo "Warning: initfs.ext2 not found; ISO will not include system/initfs.img" >&2
 fi
 
 if [ -n "$ROOTFS_IMG" ] && [ -f "$ROOTFS_IMG" ]; then
     cp "$ROOTFS_IMG" "$SYS_DIR/rootfs.ext2"
 else
-    echo "Warning: rootfs.ext2 not found; ISO will not include System/rootfs.ext2" >&2
+    echo "Warning: rootfs.ext2 not found; ISO will not include system/rootfs.ext2" >&2
 fi
 
 cp "$ESP_IMG" "$ISO_ROOT/esp.img"

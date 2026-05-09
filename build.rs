@@ -14,7 +14,7 @@ use builders::{
 const BUSYBOX_URL: &str = "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox";
 const BUSYBOX_SHA256: &str = "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348";
 
-/// カーネル ELF をビルドして fs/System/kernel.elf にコピーする
+/// カーネル ELF をビルドして fs/system/kernel.elf にコピーする
 fn build_kernel(manifest_dir: &PathBuf, fs_dir: &PathBuf, profile: &str) {
     let kernel_crate_dir = manifest_dir.join("src/core");
     let kernel_target_dir = manifest_dir.join("target/kernel");
@@ -50,8 +50,8 @@ fn build_kernel(manifest_dir: &PathBuf, fs_dir: &PathBuf, profile: &str) {
         .join("x86_64-unknown-none")
         .join(profile)
         .join("kernel");
-    let system_dir = fs_dir.join("System");
-    fs::create_dir_all(&system_dir).expect("failed to create System directory");
+    let system_dir = fs_dir.join("system");
+    fs::create_dir_all(&system_dir).expect("failed to create system directory");
     let dest = system_dir.join("kernel.elf");
     if !kernel_bin.exists() {
         panic!("kernel binary not found at {}", kernel_bin.display());
@@ -94,7 +94,7 @@ fn compute_sha256(path: &Path) -> Result<String, String> {
 
 /// BusyBoxをダウンロード
 fn ensure_busybox_binary(fs_dir: &Path) -> Result<(), String> {
-    let binaries_dir = fs_dir.join("Binaries");
+    let binaries_dir = fs_dir.join("bin");
     fs::create_dir_all(&binaries_dir)
         .map_err(|e| format!("Failed to create {}: {}", binaries_dir.display(), e))?;
 
@@ -271,7 +271,7 @@ fn prune_stale_service_artifacts(
         }
     }
 
-    let fs_services_dir = fs_dir.join("Services");
+    let fs_services_dir = fs_dir.join("services");
     if let Ok(entries) = fs::read_dir(&fs_services_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -431,12 +431,12 @@ fn main() {
     build_user_libs(&user_src_dir, &libc_dir);
 
     // newlibライブラリをramfsとfsにコピー
-    copy_newlib_libs(&libc_dir, &ramfs_dir.join("Libraries"))
-        .expect("cargo:warning=Failed to copy newlib libs to ramfs/Libraries");
-    copy_newlib_libs(&libc_dir, &fs_dir.join("Libraries"))
-        .expect("cargo:warning=Failed to copy newlib libs to fs/Libraries");
+    copy_newlib_libs(&libc_dir, &ramfs_dir.join("lib"))
+        .expect("cargo:warning=Failed to copy newlib libs to ramfs/lib");
+    copy_newlib_libs(&libc_dir, &fs_dir.join("lib"))
+        .expect("cargo:warning=Failed to copy newlib libs to fs/lib");
 
-    // libgcc_sをfs/Librariesにコピー
+    // libgcc_sをfs/libにコピー
     if let Ok(out) = std::process::Command::new("gcc")
         .arg("-print-file-name=libgcc_s.so.1")
         .output()
@@ -444,7 +444,7 @@ fn main() {
         if out.status.success() {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             use std::path::Path;
-            let libs_dir = fs_dir.join("Libraries");
+            let libs_dir = fs_dir.join("lib");
             let _ = fs::create_dir_all(&libs_dir);
             if path != "libgcc_s.so.1" && Path::new(&path).exists() {
                 let dest = libs_dir.join("libgcc_s.so.1");
@@ -457,7 +457,7 @@ fn main() {
                         let _ = symlink("libgcc_s.so.1", &link);
                     }
                 }
-                println!("Copied libgcc_s to fs/Libraries: {}", path);
+                println!("Copied libgcc_s to fs/lib: {}", path);
             } else {
                 let candidates = [
                     "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
@@ -476,7 +476,7 @@ fn main() {
                                 let _ = symlink("libgcc_s.so.1", &link);
                             }
                         }
-                        println!("Copied libgcc_s to fs/Libraries from {}", c);
+                        println!("Copied libgcc_s to fs/lib from {}", c);
                         break;
                     }
                 }
@@ -524,7 +524,7 @@ fn main() {
 
     // アプリケーションをビルド
     let apps_dir = manifest_dir.join("src/apps");
-    let applications_dir = fs_dir.join("Applications");
+    let applications_dir = fs_dir.join("applications");
     if apps_dir.is_dir() {
         println!("Building applications");
         build_apps(&apps_dir, &applications_dir, "elf");
@@ -532,7 +532,7 @@ fn main() {
 
     // ユーティリティコマンドをビルド
     let utils_dir = manifest_dir.join("src/utils");
-    let binaries_dir = fs_dir.join("Binaries");
+    let binaries_dir = fs_dir.join("bin");
     if utils_dir.is_dir() {
         println!("Building utility commands");
         build_utils(&utils_dir, &binaries_dir);
@@ -551,7 +551,7 @@ fn main() {
     };
 
     // driver.service が参照する自動起動ドライバ一覧を生成
-    let driver_autostart_path = fs_dir.join("Config").join("drivers.list");
+    let driver_autostart_path = fs_dir.join("config").join("drivers.list");
     match fs::write(&driver_autostart_path, driver_autostart_entries.join("\n")) {
         Ok(_) => println!("Generated {}", driver_autostart_path.display()),
         Err(e) => panic!(
@@ -565,7 +565,7 @@ fn main() {
     for svc in &services {
         if svc.autostart {
             if svc.fs_type != "initfs" {
-                services_autostart_entries.push(format!("/System/Services/{}.service", svc.name));
+                services_autostart_entries.push(format!("/system/services/{}.service", svc.name));
             } else {
                 // 場合によっては initfs に autostart=true が設定されていることがある。
                 // 開発者に分かるようにビルド時警告を出す。
@@ -573,7 +573,7 @@ fn main() {
             }
         }
     }
-    let services_autostart_path = fs_dir.join("Config").join("services.list");
+    let services_autostart_path = fs_dir.join("config").join("services.list");
     match fs::write(
         &services_autostart_path,
         services_autostart_entries.join("\n"),

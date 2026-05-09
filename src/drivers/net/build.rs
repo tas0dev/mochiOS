@@ -17,7 +17,7 @@ fn find_project_root(manifest_dir: &Path) -> PathBuf {
     }
 
     for ancestor in manifest_dir.ancestors().skip(1) {
-        if ancestor.join("ramfs").join("Libraries").exists() {
+        if ancestor.join("ramfs").join("lib").exists() {
             return ancestor.to_path_buf();
         }
     }
@@ -37,7 +37,7 @@ fn main() {
     let manifest_path = Path::new(&manifest_dir);
     let project_root = find_project_root(manifest_path);
 
-    let libs_dir = project_root.join("ramfs").join("Libraries");
+    let libs_dir = project_root.join("ramfs").join("lib");
 
     println!("cargo:rustc-link-search=native={}", libs_dir.display());
     println!("cargo:rustc-link-arg={}/crt0.o", libs_dir.display());

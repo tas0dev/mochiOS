@@ -137,7 +137,7 @@ pub fn init() {
 /// ファイルを取得（rootfs を優先し、なければ initfs を検索）
 ///
 /// ## Arguments
-/// - `name`: ルートからのパス（例: "hello.txt", "System/fonts/ter-u12b.bdf"）
+/// - `name`: ルートからのパス（例: "hello.txt", "system/fonts/ter-u12b.bdf"）
 ///
 /// ## Returns
 /// - ファイルが存在すれば内容のバイトベクタ、存在しなければNone

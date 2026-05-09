@@ -199,7 +199,7 @@ pub fn handle_kernel_error(error: Kernel) {
         }
     }
 
-    crate::info!("System halted.");
+    crate::info!("system halted.");
 }
 
 /// 結果型のエイリアス

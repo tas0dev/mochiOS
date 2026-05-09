@@ -22,7 +22,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", linker_script.display());
     }
 
-    let libs_dir = root_dir.join("ramfs").join("Libraries");
+    let libs_dir = root_dir.join("ramfs").join("lib");
 
     if libs_dir.exists() {
         println!("cargo:rustc-link-search=native={}", libs_dir.display());
@@ -43,6 +43,6 @@ fn main() {
         println!("cargo:rustc-link-lib=static=nosys");
     }
 
-    println!("cargo:rerun-if-changed=../../../ramfs/Libraries/libc.a");
+    println!("cargo:rerun-if-changed=../../../ramfs/lib/libc.a");
 }
 

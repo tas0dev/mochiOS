@@ -111,9 +111,9 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 #[inline]
 fn tick_booting_gif() {}
 
-/// `\System\initfs.img` を読み込んで物理アドレスとサイズを返す
+/// `\system\initfs.img` を読み込んで物理アドレスとサイズを返す
 unsafe fn load_initfs(bt: &BootServices, image_handle: Handle) -> (u64, usize) {
-    let initfs_path = cstr16!(r"\System\initfs.img");
+    let initfs_path = cstr16!(r"\system\initfs.img");
 
     // LoadedImage デバイスを優先
     let handles: alloc::vec::Vec<Handle> =
@@ -197,9 +197,9 @@ unsafe fn try_load_raw(
     Some((addr, size))
 }
 
-/// `\System\kernel.elf` を読み込み、PT_LOAD セグメントを物理アドレスに展開してエントリアドレスを返す
+/// `\system\kernel.elf` を読み込み、PT_LOAD セグメントを物理アドレスに展開してエントリアドレスを返す
 unsafe fn load_kernel(bt: &BootServices, image_handle: Handle) -> Option<u64> {
-    let kernel_path = cstr16!(r"\System\kernel.elf");
+    let kernel_path = cstr16!(r"\system\kernel.elf");
 
     // LoadedImage からブートローダー自身のデバイスハンドルを取得して優先的に試みる
     match bt.open_protocol_exclusive::<LoadedImage>(image_handle) {
@@ -568,7 +568,7 @@ unsafe fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Sta
     // ブートローダーではプリロードしない（起動時間短縮）
     let (rootfs_addr, rootfs_size) = (0u64, 0usize);
 
-    // Boot Services を終了してメモリマップを取得
+    // Boot services を終了してメモリマップを取得
     let (_system_table, memory_map_iter) =
         unsafe { system_table.exit_boot_services(UefiMemType::LOADER_DATA) };
 
@@ -617,7 +617,7 @@ unsafe fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Sta
         BOOT_INFO.rootfs_size = rootfs_size;
     }
 
-    // カーネルへジャンプ (System V AMD64 ABI)
+    // カーネルへジャンプ (system V AMD64 ABI)
     let kernel_entry: unsafe extern "sysv64" fn(*mut BootInfo) -> ! =
         core::mem::transmute(kernel_entry_addr);
     unsafe { kernel_entry(addr_of_mut!(BOOT_INFO)) }

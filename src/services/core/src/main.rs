@@ -15,7 +15,7 @@ struct ServiceDef {
 const CRITICAL_SERVICES: &[ServiceDef] = &[];
 
 const BACKGROUND_SERVICES: &[ServiceDef] = &[
-    ServiceDef { name: "driver.service", path: "/System/Services/driver.service" },
+    ServiceDef { name: "driver.service", path: "/system/services/driver.service" },
 ];
 
 #[cfg(feature = "run_tests")]
@@ -115,17 +115,17 @@ fn is_allowed_service_path(path: &str) -> bool {
     if path.is_empty() || path.contains("..") {
         return false;
     }
-    path.starts_with("/System/Services/")
-        || path.starts_with("/Binaries/")
-        || path.starts_with("System/Services/")
-        || path.starts_with("Binaries/")
+    path.starts_with("/system/services/")
+        || path.starts_with("/bin/")
+        || path.starts_with("system/services/")
+        || path.starts_with("bin/")
 }
 
 fn service_already_running(path: &str) -> bool {
     let name = service_name_from_path(path);
     task::find_process_by_name(path).is_some()
         || task::find_process_by_name(name).is_some()
-        || task::find_process_by_name(&format!("/System/Services/{}", name)).is_some()
+        || task::find_process_by_name(&format!("/system/services/{}", name)).is_some()
 }
 
 fn fs_open_read_lines(path: &str) -> Result<Vec<String>, i64> {
@@ -165,8 +165,8 @@ fn main() {
         return;
     }
 
-    // Try to read /Config/services.list and start listed services from rootfs.
-    match fs_open_read_lines("/Config/services.list") {
+    // Try to read /config/services.list and start listed services from rootfs.
+    match fs_open_read_lines("/config/services.list") {
         Ok(lines) => {
             println!("[CORE] Found services.list with {} entries", lines.len());
             for p in lines {
