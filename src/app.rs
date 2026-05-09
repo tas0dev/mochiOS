@@ -194,45 +194,54 @@ impl KagamiApp {
 
     fn handle_ipc_message(&mut self, sender_tid: u64, len: usize) {
         if let Some(pending) = self.pending_shared_attach {
-            if pending.sender_tid == sender_tid && len >= 16 {
-                let mapped_addr = u64::from_le_bytes([
+            const MAP_HEADER_MAGIC: u32 = 0xABCD_DCBAu32;
+            if pending.sender_tid == sender_tid && len >= 20 {
+                let magic = u32::from_le_bytes([
                     self.ipc_buf[0],
                     self.ipc_buf[1],
                     self.ipc_buf[2],
                     self.ipc_buf[3],
-                    self.ipc_buf[4],
-                    self.ipc_buf[5],
-                    self.ipc_buf[6],
-                    self.ipc_buf[7],
                 ]);
-                let total_bytes = u64::from_le_bytes([
-                    self.ipc_buf[8],
-                    self.ipc_buf[9],
-                    self.ipc_buf[10],
-                    self.ipc_buf[11],
-                    self.ipc_buf[12],
-                    self.ipc_buf[13],
-                    self.ipc_buf[14],
-                    self.ipc_buf[15],
-                ]);
-                println!("[KAGAMI] received map header from {} mapped=0x{:x} total_bytes={}", sender_tid, mapped_addr, total_bytes);
-                if self.renderer.attach_mapped_shared_surface(
-                    pending.window_id,
-                    pending.width,
-                    pending.height,
-                    mapped_addr,
-                    total_bytes,
-                ) {
-                    println!("[KAGAMI] attach_mapped_shared_surface OK for window {}", pending.window_id);
-                    self.pending_shared_attach = None;
-                    let mut res = [0u8; 8];
-                    res[0..4].copy_from_slice(&OP_RES_SHARED_ATTACHED.to_le_bytes());
-                    res[4..8].copy_from_slice(&pending.window_id.to_le_bytes());
-                    let _ = ipc::ipc_send(sender_tid, &res);
-                    println!("[KAGAMI] sent OP_RES_SHARED_ATTACHED to {} for window {}", sender_tid, pending.window_id);
-                    return;
-                } else {
-                    println!("[KAGAMI] attach_mapped_shared_surface failed for window {}", pending.window_id);
+                if magic == MAP_HEADER_MAGIC {
+                    let mapped_addr = u64::from_le_bytes([
+                        self.ipc_buf[4],
+                        self.ipc_buf[5],
+                        self.ipc_buf[6],
+                        self.ipc_buf[7],
+                        self.ipc_buf[8],
+                        self.ipc_buf[9],
+                        self.ipc_buf[10],
+                        self.ipc_buf[11],
+                    ]);
+                    let total_bytes = u64::from_le_bytes([
+                        self.ipc_buf[12],
+                        self.ipc_buf[13],
+                        self.ipc_buf[14],
+                        self.ipc_buf[15],
+                        self.ipc_buf[16],
+                        self.ipc_buf[17],
+                        self.ipc_buf[18],
+                        self.ipc_buf[19],
+                    ]);
+                    println!("[KAGAMI] received map header from {} mapped=0x{:x} total_bytes={}", sender_tid, mapped_addr, total_bytes);
+                    if self.renderer.attach_mapped_shared_surface(
+                        pending.window_id,
+                        pending.width,
+                        pending.height,
+                        mapped_addr,
+                        total_bytes,
+                    ) {
+                        println!("[KAGAMI] attach_mapped_shared_surface OK for window {}", pending.window_id);
+                        self.pending_shared_attach = None;
+                        let mut res = [0u8; 8];
+                        res[0..4].copy_from_slice(&OP_RES_SHARED_ATTACHED.to_le_bytes());
+                        res[4..8].copy_from_slice(&pending.window_id.to_le_bytes());
+                        let _ = ipc::ipc_send(sender_tid, &res);
+                        println!("[KAGAMI] sent OP_RES_SHARED_ATTACHED to {} for window {}", sender_tid, pending.window_id);
+                        return;
+                    } else {
+                        println!("[KAGAMI] attach_mapped_shared_surface failed for window {}", pending.window_id);
+                    }
                 }
             }
         }
