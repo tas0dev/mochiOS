@@ -57,8 +57,6 @@ pub fn log(level: LogLevel, args: core::fmt::Arguments) {
 
     sprint!("{} ", prefix);
     sprintln!("{}", args);
-    vprint!("{} ", prefix);
-    vprintln!("{}", args);
 }
 
 /// トレースログ
