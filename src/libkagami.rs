@@ -827,7 +827,7 @@ mod mochi_impl {
         pub fn dispatch(&mut self) -> Result<(), String> {
             #[cfg(all(unix, target_os = "linux", target_env = "musl"))]
             {
-                let (bytes_received, _) = ipc_recv(&mut self.ipc_buf);
+                let (_, bytes_received) = ipc_recv(&mut self.ipc_buf);
                 self.process_input_events(bytes_received as usize);
             }
             
@@ -940,8 +940,9 @@ mod mochi_impl {
         }
 
         pub fn commit_front(&mut self) -> Result<(), String> {
-            self.present()
-                .map_err(|e| format!("present(front={}) failed: {}", self.front, e))
+            // mochi 実装では swap_and_commit() で既に present 済み。
+            // ここで再送すると OP_REQ_PRESENT_SHARED が二重送信され、送信失敗を招く。
+            Ok(())
         }
 
         pub fn swap_and_commit(&mut self) -> Result<(), String> {
@@ -1043,6 +1044,9 @@ mod mochi_impl {
             }
             let ack_window = u32::from_le_bytes([ipc_buf[4], ipc_buf[5], ipc_buf[6], ipc_buf[7]]);
             if ack_window == window_id {
+                // alloc_shared_pages / ipc_send_pages と対になるページ配列は
+                // mochiOS 側では解放時クラッシュを誘発するケースがあるため保持しない。
+                core::mem::forget(phys_pages);
                 return Ok(SharedSurface {
                     virt_addr,
                     page_count: page_count as u64,
