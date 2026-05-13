@@ -805,11 +805,15 @@ unsafe fn read_inode_range(
         let file_off = offset as usize + done;
         let bi = file_off / block_size;
         let boff = file_off % block_size;
-        let bnum = read_data_block_num(m, &inode, bi, READ_RANGE_IND.as_mut())?;
+        let n = min(block_size - boff, to_read - done);
+        let Some(bnum) = read_data_block_num(m, &inode, bi, READ_RANGE_IND.as_mut()) else {
+            dst[done..done + n].fill(0);
+            done += n;
+            continue;
+        };
         if !read_fs_block(m, bnum, READ_RANGE_BLK.as_mut()) {
             return None;
         }
-        let n = min(block_size - boff, to_read - done);
         let blk = READ_RANGE_BLK.as_ref();
         dst[done..done + n].copy_from_slice(&blk[boff..boff + n]);
         done += n;
