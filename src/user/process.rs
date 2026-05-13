@@ -1,5 +1,9 @@
 //! プロセス管理関連のシステムコール
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::sys::{syscall2, SyscallNumber};
 
 /// 実行可能ファイルを起動する
@@ -233,4 +237,57 @@ pub fn exec_via_fs_stream(path: &str, args: &[&str]) -> Result<u64, i64> {
         args_ptr,
     );
     if (res as i64) < 0 { Err(res as i64) } else { Ok(res) }
+}
+
+/// プロセス一覧の1件
+#[derive(Debug, Clone)]
+pub struct ProcessInfo {
+    pub pid: u64,
+    pub tid: u64,
+    pub state: u64,
+    pub name: String,
+}
+
+/// 現在のプロセス一覧を取得する
+pub fn list_processes() -> Vec<ProcessInfo> {
+    const RECORD_SIZE: usize = 88;
+    let mut buf = vec![0u8; RECORD_SIZE * 128];
+    let written = syscall2(
+        SyscallNumber::ListProcesses as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    ) as usize;
+    let count = core::cmp::min(written, buf.len() / RECORD_SIZE);
+    let mut out = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let off = i * RECORD_SIZE;
+        let mut pid_bytes = [0u8; 8];
+        let mut tid_bytes = [0u8; 8];
+        let mut state_bytes = [0u8; 8];
+        pid_bytes.copy_from_slice(&buf[off..off + 8]);
+        tid_bytes.copy_from_slice(&buf[off + 8..off + 16]);
+        state_bytes.copy_from_slice(&buf[off + 16..off + 24]);
+        let name_slice = &buf[off + 32..off + 96];
+        let name_len = name_slice
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_slice.len());
+        out.push(ProcessInfo {
+            pid: u64::from_ne_bytes(pid_bytes),
+            tid: u64::from_ne_bytes(tid_bytes),
+            state: u64::from_ne_bytes(state_bytes),
+            name: String::from_utf8_lossy(&name_slice[..name_len]).into_owned(),
+        });
+    }
+
+    out
+}
+
+/// PID からプロセス名を取得する
+pub fn process_name_by_pid(pid: u64) -> Option<String> {
+    list_processes()
+        .into_iter()
+        .find(|proc| proc.pid == pid)
+        .map(|proc| proc.name)
 }
