@@ -1,0 +1,11 @@
+name = "Binder"
+bundle_id = "com.mochi.binder"
+version = "0.1.0"
+developer = "tas0dev"
+entry = "entry.elf"
+description = "Binder is a Finder-like file manager app"
+icon = "assets/icon.png"
+
+resources = [
+    "assets/icon.png"
+]

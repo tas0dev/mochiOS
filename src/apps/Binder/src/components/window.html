@@ -1,0 +1,68 @@
+<style>
+    body {
+        background-color: #000;
+    }
+    .appwindow {
+        border-radius: 10px;
+        width: CONTENT_W;
+        height: CONTENT_H;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .appwindow-control {
+        border-radius: 10px 10px 0px 0px;
+        background-color: #f0f0f0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 5px;
+    }
+    .appwindow-spacer {
+        flex: 1;
+    }
+    .appwindow-title {
+        flex: 1;
+        text-align: center;
+    }
+    .appwindow-control-buttons {
+        display: flex;
+        justify-content: flex-end;
+        flex: 1;
+        margin-left: 10px;
+    }
+    .appwindow-control-button {
+        width: 20px;
+        height: 20px;
+    }
+
+    .appwindow-content {
+        background-color: #afafaf;
+        width: 100%;
+        flex: 1;
+        overflow: hidden;
+        border-radius: 0px 0px 10px 10px;
+    }
+</style>
+<div class="appwindow">
+    <div class="appwindow-control">
+        <div class="appwindow-spacer"></div>
+        <div class="appwindow-title">
+            <content type="String" />
+        </div>
+        <div class="appwindow-control-buttons">
+            <img
+                src="components/icons/MinimizeButton.png"
+                class="appwindow-control-button"
+            />
+            <img
+                src="components/icons/FullScreenButton.png"
+                class="appwindow-control-button"
+            />
+            <img src="components/icons/CloseButton.png" class="appwindow-control-button" />
+        </div>
+    </div>
+    <div class="appwindow-content">
+        <Children />
+    </div>
+</div>

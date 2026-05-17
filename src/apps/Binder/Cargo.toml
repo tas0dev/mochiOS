@@ -1,0 +1,22 @@
+[package]
+name = "binder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+viewkit = { path = "../ViewKit" }
+
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+swiftlib = { path = "../../user", features = ["std-support"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+wayland-client = { version = "0.31.14", features = ["dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client"] }
+memmap2 = "0.9.10"
+tempfile = "3.6"
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

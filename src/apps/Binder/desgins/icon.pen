@@ -1,0 +1,100 @@
+{
+  "version": "2.11",
+  "children": [
+    {
+      "type": "frame",
+      "id": "E26ok",
+      "x": 0,
+      "y": 0,
+      "name": "Icon",
+      "clip": true,
+      "width": 500,
+      "height": 500,
+      "fill": "#FFFFFF",
+      "cornerRadius": 100,
+      "layout": "none",
+      "children": [
+        {
+          "type": "group",
+          "id": "XUjnQ",
+          "x": 72.5,
+          "y": 399.5,
+          "name": "Binder",
+          "rotation": -270,
+          "children": [
+            {
+              "type": "rectangle",
+              "cornerRadius": 15,
+              "id": "i21nXo",
+              "x": 198.49999999999983,
+              "y": 25.50000000000003,
+              "fill": "#afafafff",
+              "width": 100,
+              "height": 305
+            },
+            {
+              "type": "rectangle",
+              "cornerRadius": 15,
+              "id": "Usu9w",
+              "x": 187.49999999999983,
+              "y": 38.50000000000003,
+              "name": "Paper",
+              "fill": "#ffffffff",
+              "width": 100,
+              "height": 280
+            },
+            {
+              "type": "rectangle",
+              "cornerRadius": 15,
+              "id": "RKm2P",
+              "x": 173.4999999999999,
+              "y": 12.500000000000043,
+              "fill": "#c8c8c8ff",
+              "width": 100,
+              "height": 330
+            },
+            {
+              "type": "rectangle",
+              "cornerRadius": 15,
+              "id": "Fc6ER",
+              "x": 162.49999999999997,
+              "y": 25,
+              "name": "Paper",
+              "fill": "#ffffffff",
+              "width": 100,
+              "height": 305
+            },
+            {
+              "type": "rectangle",
+              "cornerRadius": 15,
+              "id": "C0V5q6",
+              "x": 0,
+              "y": 0,
+              "fill": {
+                "type": "gradient",
+                "gradientType": "linear",
+                "enabled": true,
+                "rotation": 90,
+                "size": {
+                  "height": 1
+                },
+                "colors": [
+                  {
+                    "color": "#c8c8c8",
+                    "position": 1
+                  },
+                  {
+                    "color": "#e1e1e1",
+                    "position": 0
+                  }
+                ]
+              },
+              "width": 250,
+              "height": 355
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
