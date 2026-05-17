@@ -1,0 +1,12 @@
+[build]
+target = "x86_64-mochios.json"
+
+[unstable]
+build-std = ["std", "panic_abort"]
+json-target-spec = true
+
+[target.x86_64-mochios]
+rustflags = [
+    "-C", "link-arg=-nostdlib",
+    "-C", "panic=abort",
+]

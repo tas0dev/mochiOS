@@ -1,0 +1,514 @@
+{
+  "version": "2.11",
+  "children": [
+    {
+      "type": "frame",
+      "id": "cksHE",
+      "x": 250.4500818330605,
+      "y": 146.5,
+      "name": "Icon",
+      "clip": true,
+      "width": 250,
+      "height": 250,
+      "fill": "#ffffffff",
+      "cornerRadius": 30,
+      "stroke": {
+        "align": "inside",
+        "thickness": 1
+      },
+      "layout": "none",
+      "children": [
+        {
+          "type": "frame",
+          "id": "B4S3L",
+          "x": 0,
+          "y": 0,
+          "name": "Window",
+          "clip": true,
+          "width": 250,
+          "height": 250,
+          "stroke": {
+            "align": "inside",
+            "thickness": 1
+          },
+          "layout": "none",
+          "children": [
+            {
+              "type": "rectangle",
+              "cornerRadius": 10,
+              "id": "mDueJ",
+              "x": 0,
+              "y": 0,
+              "name": "bg",
+              "fill": "#ffffffff",
+              "width": 500,
+              "height": 300,
+              "stroke": {
+                "align": "inside",
+                "thickness": 1
+              }
+            },
+            {
+              "type": "frame",
+              "id": "X3msbN",
+              "x": 0,
+              "y": 0,
+              "name": "Bar",
+              "clip": true,
+              "width": 500,
+              "height": 29,
+              "stroke": {
+                "align": "inside",
+                "thickness": 1
+              },
+              "layout": "none",
+              "children": [
+                {
+                  "type": "group",
+                  "id": "CiyLN",
+                  "x": 191,
+                  "y": 14,
+                  "name": "Control",
+                  "children": [
+                    {
+                      "type": "group",
+                      "id": "x4R7z",
+                      "x": 30,
+                      "y": 0,
+                      "name": "CloseButton",
+                      "children": [
+                        {
+                          "type": "ellipse",
+                          "id": "bIRFR",
+                          "x": 0,
+                          "y": 0,
+                          "name": "ButtonBG",
+                          "sweepAngle": -360.00001001791264,
+                          "fill": "#ffffff00",
+                          "width": 15,
+                          "height": 15,
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1
+                          }
+                        },
+                        {
+                          "type": "frame",
+                          "id": "vLBqp",
+                          "x": 0,
+                          "y": 0,
+                          "name": "Close small",
+                          "clip": true,
+                          "width": 15,
+                          "height": 15,
+                          "fill": {
+                            "type": "color",
+                            "color": "#ffffffff",
+                            "enabled": false
+                          },
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1
+                          },
+                          "layout": "none",
+                          "children": [
+                            {
+                              "type": "rectangle",
+                              "cornerRadius": 50,
+                              "id": "S9S4q",
+                              "x": 3.7977294921875,
+                              "y": 4.50482177734375,
+                              "name": "Rectangle 4",
+                              "rotation": 45,
+                              "fill": "#0f0f0fff",
+                              "width": 1,
+                              "height": 9.47563648223877,
+                              "stroke": {
+                                "align": "inside",
+                                "thickness": 1
+                              }
+                            },
+                            {
+                              "type": "rectangle",
+                              "cornerRadius": 50,
+                              "id": "zpsnp",
+                              "x": 11.205122947692871,
+                              "y": 4.50482177734375,
+                              "name": "Rectangle 5",
+                              "rotation": -45,
+                              "flipX": true,
+                              "fill": "#0f0f0fff",
+                              "width": 1,
+                              "height": 9.47563648223877,
+                              "stroke": {
+                                "align": "inside",
+                                "thickness": 1
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "group",
+                      "id": "mN3pg",
+                      "x": 15,
+                      "y": 0,
+                      "name": "FullScreenButton",
+                      "children": [
+                        {
+                          "type": "ellipse",
+                          "id": "L8sfn",
+                          "x": 0,
+                          "y": 0,
+                          "name": "ButtonBG",
+                          "sweepAngle": -360.00001001791264,
+                          "fill": "#ffffff00",
+                          "width": 15,
+                          "height": 15,
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1
+                          }
+                        },
+                        {
+                          "type": "frame",
+                          "id": "rOW6x",
+                          "x": 0,
+                          "y": 0,
+                          "name": "FullScreen",
+                          "clip": true,
+                          "width": 15,
+                          "height": 15,
+                          "fill": {
+                            "type": "color",
+                            "color": "#ffffffff",
+                            "enabled": false
+                          },
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1
+                          },
+                          "layout": "none",
+                          "children": [
+                            {
+                              "type": "rectangle",
+                              "cornerRadius": 2,
+                              "id": "Okoy4",
+                              "x": 4,
+                              "y": 4,
+                              "name": "Rectangle 3",
+                              "width": 7,
+                              "height": 7,
+                              "stroke": {
+                                "align": "inside",
+                                "thickness": 1,
+                                "fill": "#0f0f0fff"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "group",
+                      "id": "hdR7v",
+                      "x": 0,
+                      "y": 0,
+                      "name": "MinimizeButton",
+                      "children": [
+                        {
+                          "type": "ellipse",
+                          "id": "d18Lo",
+                          "x": 0,
+                          "y": 0,
+                          "name": "ButtonBG",
+                          "sweepAngle": -360.00001001791264,
+                          "fill": "#ffffff00",
+                          "width": 15,
+                          "height": 15,
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1
+                          }
+                        },
+                        {
+                          "type": "frame",
+                          "id": "X7t8C",
+                          "x": 0,
+                          "y": 0,
+                          "name": "Minimize",
+                          "clip": true,
+                          "width": 15,
+                          "height": 15,
+                          "fill": {
+                            "type": "color",
+                            "color": "#ffffffff",
+                            "enabled": false
+                          },
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1
+                          },
+                          "layout": "none",
+                          "children": [
+                            {
+                              "type": "path",
+                              "id": "gu7RA",
+                              "x": 4,
+                              "y": 5.5,
+                              "name": "Line 3",
+                              "geometry": "M0 0l4.5 4.5 4.5-4.5",
+                              "width": 7,
+                              "height": 4,
+                              "stroke": {
+                                "align": "center",
+                                "thickness": 1,
+                                "cap": "round",
+                                "fill": "#000000ff"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "Z7rP4Y",
+              "x": 133,
+              "y": 43,
+              "name": "Card",
+              "clip": true,
+              "width": 99,
+              "height": 188,
+              "fill": "#ffffffff",
+              "cornerRadius": 10,
+              "stroke": {
+                "align": "inside",
+                "thickness": 1
+              },
+              "effect": {
+                "type": "shadow",
+                "shadowType": "outer",
+                "color": "#00000040",
+                "offset": {
+                  "x": 0,
+                  "y": 2
+                },
+                "blur": 7
+              },
+              "layout": "none"
+            },
+            {
+              "type": "group",
+              "id": "BKt1A",
+              "x": 36,
+              "y": 150,
+              "name": "Text",
+              "children": [
+                {
+                  "type": "rectangle",
+                  "cornerRadius": 8,
+                  "id": "Qfj1O",
+                  "x": 0,
+                  "y": 13.913046836853027,
+                  "name": "Rectangle 6",
+                  "fill": "#f4f4f4ff",
+                  "width": 53.424652099609375,
+                  "height": 8.347826957702637,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1
+                  }
+                },
+                {
+                  "type": "rectangle",
+                  "cornerRadius": 8,
+                  "id": "gKfvd",
+                  "x": 0,
+                  "y": 41.739139556884766,
+                  "name": "Rectangle 8",
+                  "fill": "#f4f4f4ff",
+                  "width": 61.972599029541016,
+                  "height": 8.347826957702637,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1
+                  }
+                },
+                {
+                  "type": "rectangle",
+                  "cornerRadius": 8,
+                  "id": "D2V0g",
+                  "x": 0,
+                  "y": 55.65218734741211,
+                  "name": "Rectangle 11",
+                  "fill": "#f4f4f4ff",
+                  "width": 35.260276794433594,
+                  "height": 8.347826957702637,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1
+                  }
+                },
+                {
+                  "type": "rectangle",
+                  "cornerRadius": 8,
+                  "id": "WuiqF",
+                  "x": 0,
+                  "y": 27.826093673706055,
+                  "name": "Rectangle 9",
+                  "fill": "#f4f4f4ff",
+                  "width": 78,
+                  "height": 8.347826957702637,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1
+                  }
+                },
+                {
+                  "type": "rectangle",
+                  "cornerRadius": 8,
+                  "id": "jFk1H",
+                  "x": 0,
+                  "y": 0,
+                  "name": "Rectangle 7",
+                  "fill": "#f4f4f4ff",
+                  "width": 69.45205688476562,
+                  "height": 8.347826957702637,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1
+                  }
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "KziPF",
+              "x": 24,
+              "y": 48,
+              "name": "Image",
+              "clip": true,
+              "width": 96,
+              "height": 96,
+              "fill": {
+                "type": "color",
+                "color": "#ffffffff",
+                "enabled": false
+              },
+              "stroke": {
+                "align": "inside",
+                "thickness": 1
+              },
+              "layout": "none",
+              "children": [
+                {
+                  "type": "path",
+                  "id": "d1D4dq",
+                  "x": 0,
+                  "y": 0,
+                  "name": "Vector",
+                  "geometry": "M0 0l24 0 0 24-24 0 0-24z",
+                  "width": 96,
+                  "height": 96,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 4
+                  }
+                },
+                {
+                  "type": "path",
+                  "id": "j6Sgf",
+                  "x": 12,
+                  "y": 12,
+                  "name": "Vector",
+                  "geometry": "M18 16l0-14c0-1.1-0.9-2-2-2l-14 0c-1.1 0-2 0.9-2 2l0 14c0 1.1 0.9 2 2 2l14 0c1.1 0 2-0.9 2-2z m-12.5-5.5l2.5 3.01 3.5-4.51 4.5 6-14 0 3.5-4.5z",
+                  "fill": "#c8c8c8ff",
+                  "width": 72,
+                  "height": 72,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 4
+                  }
+                }
+              ]
+            },
+            {
+              "type": "group",
+              "id": "JRlgI",
+              "x": 191,
+              "y": 191,
+              "name": "Button",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "M9ocOq",
+                  "x": 0,
+                  "y": 0,
+                  "name": "Button",
+                  "clip": true,
+                  "width": 30,
+                  "height": 29,
+                  "fill": "#ffc387ff",
+                  "cornerRadius": 20,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1
+                  },
+                  "effect": {
+                    "type": "shadow",
+                    "shadowType": "outer",
+                    "color": "#00000040",
+                    "offset": {
+                      "x": 0,
+                      "y": 2
+                    },
+                    "blur": 7
+                  },
+                  "gap": 10,
+                  "padding": [
+                    25,
+                    20
+                  ],
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "TwkDZ",
+                      "name": "Button",
+                      "fill": "#000000ff",
+                      "fontFamily": "Noto Sans JP",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "path",
+                  "id": "yh6FC",
+                  "x": 8,
+                  "y": 8,
+                  "name": "Vector",
+                  "geometry": "M7 14c-0.28333 0-0.52067-0.096-0.712-0.288-0.192-0.19133-0.288-0.42867-0.288-0.712l0-5-5 0c-0.28333 0-0.521-0.096-0.713-0.288-0.19133-0.19133-0.287-0.42867-0.287-0.712 0-0.28333 0.09567-0.521 0.287-0.713 0.192-0.19133 0.42967-0.287 0.713-0.287l5 0 0-5c0-0.28333 0.096-0.521 0.288-0.713 0.19133-0.19133 0.42867-0.287 0.712-0.287 0.28333 0 0.521 0.09567 0.713 0.287 0.19133 0.192 0.287 0.42967 0.287 0.713l0 5 5 0c0.28333 0 0.52067 0.09567 0.712 0.287 0.192 0.192 0.288 0.42967 0.288 0.713 0 0.28333-0.096 0.52067-0.288 0.712-0.19133 0.192-0.42867 0.288-0.712 0.288l-5 0 0 5c0 0.28333-0.09567 0.52067-0.287 0.712-0.192 0.192-0.42967 0.288-0.713 0.288z",
+                  "fill": "#ffffffff",
+                  "width": 14,
+                  "height": 14,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

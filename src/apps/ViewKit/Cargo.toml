@@ -1,0 +1,57 @@
+[package]
+name = "viewkit"
+description = "A UI kit for mochiOS / Kagami"
+keywords = ["uikit", "mochios", "viewkit", "ui", "kagami"]
+categories = ["gui"]
+license = "Apache-2.0"
+version = "0.1.0"
+edition = "2024"
+autoexamples = false
+
+[dependencies]
+wayland-client = { version = "0.31.14", features = ["dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client"] }
+memmap2 = "0.9.10"
+tempfile = "3.6"
+ui_layout = "0.9.8"
+fontdue = "0.9.3"
+html5ever = "0.39.0"
+lightningcss = "1.0.0-alpha.71"
+tiny-skia = "0.12.0"
+image = "0.25.10"
+
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+swiftlib = { path = "../../user", features = ["std-support"] }
+
+[build-dependencies]
+
+[lib]
+name = "viewkit"
+path = "src/lib.rs"
+test = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "ui_test"
+path = "examples/ui_test.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "stateful_ui"
+path = "examples/stateful_ui.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "event_debug"
+path = "examples/event_debug.rs"
+test = false
+bench = false
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

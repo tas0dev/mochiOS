@@ -1,0 +1,6 @@
+name = "ViewKit"
+bundle_id = "com.mochi.viewkit"
+version = "0.1.0"
+developer = "tas0dev"
+entry = "entry.elf"
+description = "UI toolkit for mochiOS"

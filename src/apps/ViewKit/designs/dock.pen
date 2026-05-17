@@ -1,0 +1,36 @@
+{
+  "version": "2.11",
+  "children": [
+    {
+      "type": "frame",
+      "id": "F9DNjY",
+      "x": 242,
+      "y": 854,
+      "name": "Dock",
+      "width": 276,
+      "height": 75,
+      "stroke": {
+        "align": "inside",
+        "thickness": 1
+      },
+      "layout": "none",
+      "children": [
+        {
+          "type": "rectangle",
+          "cornerRadius": 30,
+          "id": "tsym3",
+          "x": 0,
+          "y": 0,
+          "name": "BG",
+          "fill": "#ffffff99",
+          "width": 276,
+          "height": 75,
+          "stroke": {
+            "align": "inside",
+            "thickness": 1
+          }
+        }
+      ]
+    }
+  ]
+}
