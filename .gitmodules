@@ -1,18 +1,3 @@
 [submodule "src/lib"]
 	path = src/lib
 	url = https://sourceware.org/git/newlib-cygwin.git
-[submodule "src/apps/Kagami"]
-	path = src/apps/Kagami
-	url = https://github.com/tas0dev/Kagami
-[submodule "src/apps/Binder"]
-	path = src/apps/Binder
-	url = https://github.com/tas0dev/Binder
-[submodule "src/apps/ViewKit"]
-	path = src/apps/ViewKit
-	url = https://github.com/tas0dev/ViewKit
-[submodule "src/apps/Dock"]
-	path = src/apps/Dock
-	url = https://github.com/tas0dev/dock
-[submodule "src/apps/Terminal"]
-	path = src/apps/Terminal
-	url = https://github.com/tas0dev/Terminal
